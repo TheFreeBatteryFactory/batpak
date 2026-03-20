@@ -13,9 +13,12 @@ One document. No overrides. No layers. Every decision is final. A cloud agent wi
 2. STORE API IS SYNC. One set of methods. Bisync is a CHANNEL property,
    not an API property. The Store doesn't know if its caller is sync or async.
 
-3. NO PRODUCT CONCEPTS IN LIBRARY CODE. No "trajectory", "scope",
-   "artifact", "agent", "tenant", "turn", "note". Library vocabulary:
+3. NO PRODUCT CONCEPTS IN LIBRARY CODE. Library vocabulary:
    coordinate, entity, event, outcome, gate, region, transition.
+   build.rs checks type declarations for: "trajectory", "artifact", "tenant".
+   ("scope", "agent", "turn", "note" are common English substrings —
+   "return" contains "turn", "annotation" contains "note" — so they are
+   NOT auto-checked. Use judgment for these in code review.)
 
 4. NO SPECULATIVE ABSTRACTIONS. No trait until there's a second impl.
    No generic param until there's a second type. No module until there's
@@ -110,6 +113,7 @@ free-batteries/
 ├── .config/nextest.toml
 ├── .github/workflows/ci.yml
 ├── .gitignore
+├── build.rs                    # pre-flight invariant enforcement (runs every cargo command)
 ├── Cargo.toml
 ├── CHANGELOG.md
 ├── LICENSE-APACHE
@@ -121,6 +125,7 @@ free-batteries/
 │
 ├── src/
 │   ├── lib.rs
+│   ├── wire.rs               # serde helpers: u128 as [u8;16] BE (see WIRE FORMAT DECISIONS)
 │   ├── prelude.rs
 │   │
 │   ├── coordinate/
@@ -138,7 +143,6 @@ free-batteries/
 │   │   ├── header.rs         # EventHeader (repr(C), deterministic layout)
 │   │   ├── kind.rs           # EventKind (private u16)
 │   │   ├── hash.rs           # HashChain + compute_hash() + verify_chain() (NO trait)
-│   │   ├── u128_bytes.rs     # serde helpers: u128 as [u8;16] BE (see WIRE FORMAT DECISIONS)
 │   │   └── sourcing.rs       # EventSourced<P> + Reactive<P>
 │   │
 │   ├── guard/
@@ -174,7 +178,12 @@ free-batteries/
 │   ├── gate_pipeline.rs      # registration order, fail-fast, receipt TOCTOU, consumed once
 │   ├── typestate_safety.rs   # trybuild: compile-fail for invalid transitions + forged receipts
 │   ├── wire_format.rs        # golden file comparison for MessagePack serialization
-│   └── self_benchmark.rs     # gate that validates cold start < 200ms (library tests itself)
+│   ├── self_benchmark.rs     # gate that validates cold start < 200ms (library tests itself)
+│   ├── ui/                   # trybuild compile-fail test cases
+│   │   ├── forge_receipt.rs
+│   │   └── invalid_transition.rs
+│   └── golden/               # wire format golden files (msgpack bytes, hex-encoded)
+│       └── event_header_v1.hex
 │
 └── benches/
     ├── write_throughput.rs   # criterion: events/sec for 1K/10K/100K appends
@@ -266,7 +275,7 @@ are load-bearing for golden file tests and cross-language readers.
 2. u128 fields serialize as [u8; 16] big-endian via a shared serde helper.
    MessagePack has no native u128. Bare u128 fields cause rmp-serde errors.
 
-   Helper module: src/event/u128_bytes.rs (~20 LOC)
+   Helper module: src/wire.rs (~50 LOC, zero internal dependencies)
      pub fn serialize<S: Serializer>(val: &u128, ser: S) -> Result<S::Ok, S::Error>
        → val.to_be_bytes(), serialize as bytes
      pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<u128, D::Error>
@@ -298,9 +307,103 @@ are load-bearing for golden file tests and cross-language readers.
 
 ---
 
+## TOOLCHAIN ENFORCEMENT
+
+The spec becomes the compiler after first build. Every invariant and red flag
+that can be statically detected gets a build-time or test-time enforcement.
+If it fails, the message IS the documentation — it names the invariant, the
+files to check, and the fix.
+
+```
+build.rs — runs before every cargo build/check/test. Cannot be skipped.
+  CHECKS:
+    Invariant 1: tokio not in [dependencies] (only [dev-dependencies])
+    Invariant 3: no banned product nouns (trajectory, scope, artifact, agent,
+      tenant, turn, note) in struct/enum/fn names in src/**/*.rs
+    Red flag: no transmute, mem::read, or pointer_cast in src/
+    Red flag: no async fn in src/store/
+    Red flag: no std::time::Duration in types with #[derive(Serialize)]
+  ON FAILURE: panic!() with invariant number + explanation + file path
+
+compile_error!() — placed at top of modules agents try to "improve":
+    src/store/mod.rs:
+      #[cfg(feature = "async-store")]
+      compile_error!("Invariant 2: Store API is sync. Async callers use \
+        spawn_blocking() or flume recv_async(). See store/subscription.rs.");
+    src/event/hash.rs:
+      #[cfg(feature = "sha256")]
+      compile_error!("Invariant 5: blake3 is the only hash. No HashAlgorithm \
+        enum. One function: compute_hash(bytes) -> [u8; 32].");
+    src/store/writer.rs:
+      #[cfg(feature = "exponential-backoff")]
+      compile_error!("Red flag: only Once and Bounded restart policies. \
+        Exponential backoff belongs in the product's supervisor, not here.");
+
+clippy denials — per-module guardrails beyond Cargo.toml lints:
+    src/store/mod.rs:     #![deny(clippy::future_not_send)]
+    src/guard/receipt.rs:  // Receipt must NOT derive Clone (enforced by not deriving it;
+                           // trybuild test verifies cloning fails to compile)
+
+Test diagnostic messages — every test failure includes:
+    1. Which invariant/property broke
+    2. Which files to investigate
+    3. Common causes
+    4. Next command to run
+  Example (self_benchmark.rs cold start test):
+    assert!(elapsed < Duration::from_millis(200),
+      "COLD START REGRESSION: {elapsed:?} > 200ms.\n\
+       Check: store/index.rs scan_segment(), store/reader.rs.\n\
+       Common causes: unnecessary deserialization, missing BTreeMap pre-alloc.\n\
+       Run: cargo bench --bench cold_start");
+
+Golden test data — tests/golden/*.hex:
+    Hex-encoded MessagePack bytes for known structs.
+    wire_format.rs serializes known values, compares to golden files.
+    To update: GOLDEN_UPDATE=1 cargo test wire_format
+
+justfile dep-doc targets:
+    deps-doc:
+        cargo doc --document-private-items --no-deps --open
+    lib-doc:
+        cargo doc --all-features --open  # includes all dependency docs
+```
+
+---
+
 ## PER-FILE PRDs
 
 Every PRD below is the FINAL version. No overrides exist. Implement exactly what's described.
+
+---
+
+### `build.rs`
+
+```
+Pre-flight invariant enforcement. Runs before every cargo build/check/test.
+~80 LOC. No external deps (build script uses only std).
+
+fn main():
+  1. Read Cargo.toml as string
+     - Split on "[dependencies]", take the section before next "[" header
+     - If that section contains "tokio": panic with Invariant 1 message
+  2. Walk src/**/*.rs files (use std::fs::read_dir recursively)
+     - For each file, read contents as string
+     - Check for banned patterns:
+       a. transmute|mem::read|pointer_cast → panic with Red Flag message
+       b. In src/store/*.rs: async fn → panic with Invariant 2 message
+       c. Struct/enum/fn names containing: trajectory|scope|artifact|agent|
+          tenant|turn|note → panic with Invariant 3 message
+          (Match on: "struct ", "enum ", "fn ", "type " followed by a name
+          containing a banned word. NOT string literals or comments.)
+  3. println!("cargo:rerun-if-changed=Cargo.toml");
+     println!("cargo:rerun-if-changed=src/");
+
+Panic messages follow the pattern:
+  "INVARIANT {N} VIOLATED: {what happened}.\n\
+   {why this is wrong}.\n\
+   {what to do instead}.\n\
+   See: SPEC.md ## INVARIANTS, item {N}."
+```
 
 ---
 
@@ -318,7 +421,8 @@ Doc comment structure:
   Paragraph 4: Reading order: coordinate → outcome → event → guard →
     pipeline → store → typestate.
 
-Module declarations in READING ORDER (not alphabetical):
+Module declarations in DEPENDENCY ORDER:
+  pub mod wire;        // serde helpers — no deps, must come first
   pub mod coordinate;
   pub mod outcome;
   pub mod event;
@@ -392,7 +496,7 @@ Region builder (method chaining):
   Region::entity("player:alice")
   Region::scope("room:dungeon")
   Region::coordinate(&coord)
-  .scope("x").fact(KindFilter::Exact(k)).fact_category(0xF)
+  .with_scope("x").with_fact(KindFilter::Exact(k)).with_fact_category(0xF)
 
 Region replaces SubscriptionPattern. It is the ONE predicate type for:
   Applied to history  = query
@@ -400,8 +504,9 @@ Region replaces SubscriptionPattern. It is the ONE predicate type for:
   Applied to cursor   = consumption (pull, guaranteed)
   Applied to chain    = traversal (walk_ancestors is the exception — see store)
 
-Region::matches(&self, notif: &Notification) -> bool
-  Used by Subscription to filter incoming events.
+Region::matches_event(&self, entity: &str, scope: &str, kind: EventKind) -> bool
+  Used by Subscription to filter incoming events. Takes individual fields
+  instead of Notification to avoid circular dep (coordinate → store).
 ```
 
 ---
@@ -458,7 +563,7 @@ The and_then monad fix:
 Serde: #[derive(Serialize, Deserialize)]  (serde is always available)
   Adjacent tagging: #[serde(tag = "type", content = "data")]
   Durations as u64 millis.
-  All u128 fields use #[serde(with = "crate::event::u128_bytes")] — see WIRE FORMAT DECISIONS.
+  All u128 fields use #[serde(with = "crate::wire::u128_bytes")] — see WIRE FORMAT DECISIONS.
 ```
 
 ---
@@ -545,17 +650,34 @@ Use project<T: EventSourced>() for typed reconstruction.
 
 ---
 
-### `src/event/u128_bytes.rs`
+### `src/wire.rs`
 
 ```
-Shared serde helpers for u128 serialization as [u8; 16] big-endian.
-See WIRE FORMAT DECISIONS. ~50 LOC total.
+Serde helpers for types that MessagePack can't handle natively.
+ZERO internal dependencies. This module is declared first in lib.rs
+and available to every other module via crate::wire::.
 
-pub mod u128_bytes      — for plain u128 fields
-pub mod option_u128_bytes — for Option<u128> fields
-pub mod vec_u128_bytes  — for Vec<u128> fields
+See WIRE FORMAT DECISIONS for rationale.
 
-All use big-endian byte order. All are #[inline].
+pub mod u128_bytes {
+    // #[serde(with = "crate::wire::u128_bytes")]
+    pub fn serialize<S: Serializer>(val: &u128, ser: S) -> Result<S::Ok, S::Error>
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<u128, D::Error>
+}
+
+pub mod option_u128_bytes {
+    // #[serde(with = "crate::wire::option_u128_bytes")]
+    pub fn serialize<S: Serializer>(val: &Option<u128>, ser: S) -> Result<S::Ok, S::Error>
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Option<u128>, D::Error>
+}
+
+pub mod vec_u128_bytes {
+    // #[serde(with = "crate::wire::vec_u128_bytes")]
+    pub fn serialize<S: Serializer>(val: &[u128], ser: S) -> Result<S::Ok, S::Error>
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<u128>, D::Error>
+}
+
+~50 LOC total. All #[inline]. Big-endian byte order.
 ```
 
 ---
@@ -566,11 +688,11 @@ All use big-endian byte order. All are #[inline].
 #[repr(C)]
 #[derive(Serialize, Deserialize)]
 pub struct EventHeader {
-    #[serde(with = "crate::event::u128_bytes")]
+    #[serde(with = "crate::wire::u128_bytes")]
     pub event_id: u128,
-    #[serde(with = "crate::event::u128_bytes")]
+    #[serde(with = "crate::wire::u128_bytes")]
     pub correlation_id: u128,
-    #[serde(with = "crate::event::u128_bytes::option_u128_bytes")]
+    #[serde(with = "crate::wire::option_u128_bytes")]
     pub causation_id: Option<u128>,   // which event CAUSED this one (None = root cause)
     pub timestamp_us: i64,
     pub position: DagPosition,
@@ -715,7 +837,10 @@ Denial::new(gate, message), with_code, with_context
 Display: "[gate] message"
 Separate from OutcomeError. Library does NOT auto-store denials.
 Products decide whether to persist denials as events.
-Serde: #[derive(Serialize, Deserialize)] (serde is always available).
+Serde: #[derive(Serialize)] only — NOT Deserialize.
+  gate is &'static str which can't be deserialized from owned data.
+  Library never persists Denials (returns them to callers).
+  Products serialize denials into their own event payloads if needed.
 ```
 
 ---
@@ -1281,6 +1406,16 @@ path = "target/nextest/default/junit.xml"
 
 ### .cargo/config.toml
 ```toml
+# NOTE: .cargo/config.toml is for build settings, NOT profile settings.
+# Profile settings ([profile.*]) belong in Cargo.toml.
+# This file is intentionally minimal.
+[build]
+# rustflags set in CI via env var, not here
+```
+
+### Profile settings (in Cargo.toml, NOT .cargo/config.toml)
+```toml
+# Append these to Cargo.toml after [[bench]] sections:
 [profile.dev]
 opt-level = 0
 debug = true
@@ -1403,6 +1538,12 @@ bench:
 
 doc:
     cargo doc --all-features --no-deps --open
+
+deps-doc:
+    cargo doc --document-private-items --no-deps --open
+
+lib-doc:
+    cargo doc --all-features --open
 ```
 
 ### Version Policy
@@ -1416,28 +1557,84 @@ Check: cargo tree --duplicates. If duplicates: pin to older.
 
 ## BUILD ORDER
 
+Exact files per step. Dependencies flow DOWN — each step may use types from
+steps above it. An implementing agent builds top to bottom, checking after
+each numbered step.
+
 ```
 1.  cargo init free-batteries --lib
 2.  Create all config files (.cargo, clippy.toml, rust-toolchain.toml,
-    nextest.toml, ci.yml, justfile, .gitignore, licenses, changelog)
+    nextest.toml, ci.yml, justfile, .gitignore, licenses, changelog, build.rs)
 3.  Write Cargo.toml
-4.  Implement Layer 0 (coordinate, outcome core, guard trait, typestate, id trait)
-    + event/u128_bytes.rs serde helpers (needed by all layers above)
-    → cargo check --no-default-features MUST PASS
-5.  Implement Layer 1 (serde derives on Layer 0 types using u128_bytes annotations)
-    → cargo check --no-default-features MUST PASS
-6.  Implement Layer 2 (EventId, EventHeader, Event<P>, hash functions)
-    → cargo check --features blake3 MUST PASS
-7.  Implement Layer 3 (Store: writer, reader, segment, index, projection, cursor, subscription)
-    → cargo check --all-features MUST PASS
-8.  Write tests (monad_laws, hash_chain, store_integration, gate_pipeline,
-    typestate_safety, wire_format, self_benchmark)
-    → cargo nextest run MUST PASS
-9.  Write benches → cargo bench --no-run MUST COMPILE
-10. Write hello world, verify it runs (fn main, no tokio)
-11. cargo clippy --all-features -- -D warnings → ZERO WARNINGS
-12. cargo fmt --check → PASSES
-13. cargo doc --all-features --no-deps → CLEAN
+
+STEP 4 — Foundation types
+  FILES:
+    src/wire.rs                    ← FIRST. Zero deps. Everything else uses it.
+    src/event/kind.rs              ← EventKind (u16 newtype, no deps)
+    src/event/mod.rs               ← STUB: just `pub mod kind;` for now
+    src/coordinate/mod.rs          ← Coordinate, CoordinateError, Region, KindFilter
+    src/coordinate/position.rs     ← DagPosition
+    src/outcome/error.rs           ← OutcomeError, ErrorKind
+    src/outcome/wait.rs            ← WaitCondition, CompensationAction (uses wire::)
+    src/outcome/combine.rs         ← zip, join_all, join_any
+    src/outcome/mod.rs             ← Outcome<T> + combinators (uses wait.rs, error.rs)
+    src/guard/denial.rs            ← Denial
+    src/guard/receipt.rs           ← Receipt<T> (sealed)
+    src/guard/mod.rs               ← Gate<Ctx>, GateSet<Ctx>
+    src/typestate/mod.rs           ← define_state_machine!, define_typestate!
+    src/typestate/transition.rs    ← Transition<From,To,P> (uses EventKind)
+    src/id/mod.rs                  ← EntityIdType trait + define_entity_id! macro
+    src/lib.rs                     ← module declarations (wire, coordinate, outcome,
+                                     event stub, guard, typestate, id)
+  DEP NOTE: KindFilter in coordinate/mod.rs contains EventKind.
+    Write event/kind.rs and event/mod.rs (stub with `pub mod kind;`) BEFORE
+    coordinate/mod.rs so the import resolves. File order within this step matters.
+  → cargo check --no-default-features MUST PASS
+
+STEP 5 — Event types (EventHeader, Event<P>, StoredEvent, EventSourced, HashChain)
+  FILES:
+    src/event/hash.rs              ← HashChain struct (always), compute_hash/verify_chain (blake3 feature)
+    src/event/header.rs            ← EventHeader (uses wire::, DagPosition, EventKind)
+    src/event/mod.rs               ← COMPLETE: Event<P>, StoredEvent<P> (uses header, hash, kind)
+    src/event/sourcing.rs          ← EventSourced<P>, Reactive<P> (uses Event<P>, EventKind, Coordinate)
+    src/id/mod.rs                  ← ADD define_entity_id!(EventId, "event") (uses uuid)
+  → cargo check --features blake3 MUST PASS
+
+STEP 6 — Pipeline
+  FILES:
+    src/pipeline/mod.rs            ← Pipeline<Ctx>, Proposal<T>, Committed<T> (uses guard, wire::)
+    src/pipeline/bypass.rs         ← BypassReason, BypassReceipt<T>
+  → cargo check --features blake3 MUST PASS
+
+STEP 7 — Store (all files, biggest step)
+  FILES:
+    src/store/index.rs             ← StoreIndex, IndexEntry, ClockKey, DiskPos
+    src/store/segment.rs           ← SegmentHeader, frame_encode/decode, FramePayload
+    src/store/reader.rs            ← Reader (LRU FD cache, pread, CRC32)
+    src/store/writer.rs            ← WriterHandle, WriterCommand, SubscriberList, Notification
+    src/store/projection.rs        ← ProjectionCache trait, NoCache, RedbCache, LmdbCache
+    src/store/cursor.rs            ← Cursor
+    src/store/subscription.rs      ← Subscription
+    src/store/mod.rs               ← Store, StoreConfig, StoreError, AppendReceipt, AppendOptions
+    src/prelude.rs                 ← re-exports from all modules
+    src/lib.rs                     ← ADD remaining module declarations (pipeline, store, prelude)
+  → cargo check --all-features MUST PASS
+
+STEP 8 — Tests
+  FILES: tests/monad_laws.rs, hash_chain.rs, store_integration.rs,
+    gate_pipeline.rs, typestate_safety.rs, wire_format.rs, self_benchmark.rs
+  → cargo nextest run MUST PASS
+
+STEP 9 — Benches
+  FILES: benches/write_throughput.rs, cold_start.rs, projection_latency.rs
+  → cargo bench --no-run MUST COMPILE
+
+STEP 10 — Hello world, verify it runs (fn main, no tokio)
+
+STEP 11 — Final checks
+  → cargo clippy --all-features -- -D warnings → ZERO WARNINGS
+  → cargo fmt --check → PASSES
+  → cargo doc --all-features --no-deps → CLEAN
 ```
 
 ---
@@ -1530,17 +1727,19 @@ nobody has hit the wall that demands it):
 ```
 coordinate/    ~160  (Coordinate + Region + CoordinateError + KindFilter + DagPosition)
 outcome/       ~450  (Outcome<T> + OutcomeError + combinators + wait conditions)
-event/         ~450  (Event<P> + StoredEvent + EventHeader + EventKind + hash fns + u128_bytes + EventSourced + Reactive)
+event/         ~400  (Event<P> + StoredEvent + EventHeader + EventKind + hash fns + EventSourced + Reactive)
 guard/         ~250  (Gate + GateSet + Denial + Receipt)
 pipeline/      ~150  (Pipeline + Proposal + Committed + Bypass)
 store/        ~1800  (Store + segment + writer + reader + index + projection + cursor + subscription)
 typestate/     ~160  (macros + Transition<From,To,P>)
 id/             ~80  (EntityIdType + define_entity_id! + EventId)
+wire            ~50  (u128_bytes, option_u128_bytes, vec_u128_bytes serde helpers)
+build.rs        ~80  (pre-flight invariant enforcement)
 lib+prelude     ~60
 
-CODE:  ~3,510
-TESTS: ~1,500
-TOTAL: ~5,010
+CODE:  ~3,640
+TESTS: ~1,600  (diagnostic messages + trybuild ui/ + golden files add ~100)
+TOTAL: ~5,240
 ```
 
 ---
