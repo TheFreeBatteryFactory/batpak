@@ -1,4 +1,4 @@
-# free-b (batteries) — Airgapped Build Spec
+# Free-B (batteries) — Airgapped Build Spec
 
 One document. No overrides. No layers. Every decision is final. A cloud agent with zero prior context builds the entire library from this file.
 
@@ -86,7 +86,7 @@ free-batteries/
 │   │
 │   ├── event/
 │   │   ├── mod.rs            # Event<P>, StoredEvent<P>
-│   │   ├── header.rs         # EventHeader (64B cache-aligned)
+│   │   ├── header.rs         # EventHeader (repr(C), deterministic layout)
 │   │   ├── kind.rs           # EventKind (private u16)
 │   │   ├── hash.rs           # HashChain + compute_hash() + verify_chain() (NO trait)
 │   │   └── sourcing.rs       # EventSourced<P> + Reactive<P>
@@ -454,23 +454,48 @@ Use project<T: EventSourced>() for typed reconstruction.
 ### `src/event/header.rs`
 
 ```
-#[repr(C, align(64))]
+#[repr(C)]
 pub struct EventHeader {
     pub event_id: u128,
     pub correlation_id: u128,
+    pub causation_id: Option<u128>,   // which event CAUSED this one (None = root cause)
     pub timestamp_us: i64,
     pub position: DagPosition,
     pub payload_size: u32,
     pub event_kind: EventKind,
     pub flags: u8,
 }
+// No align(64) — causation_id pushes the struct past one cache line.
+// Cache-line alignment isn't load-bearing for an append-only log
+// (headers are read once from disk, not scanned in tight loops).
+// #[repr(C)] kept for deterministic field layout in segment serialization.
 
 THE STORE GENERATES THIS. Users never call EventHeader::new directly.
 store.append(coord, kind, payload) fills in event_id (UUIDv7), timestamp,
 position (from index), payload_size (from serialization). Constructor is
 pub for testing and advanced use only.
 
-  EventHeader::new(event_id, correlation_id, timestamp_us, position, payload_size, event_kind)
+  EventHeader::new(event_id, correlation_id, causation_id, timestamp_us, position, payload_size, event_kind)
+
+  // correlation_id vs causation_id:
+  //
+  //   correlation_id: "these events are RELATED" — same workflow, same request,
+  //     same logical operation. Many events share one correlation_id.
+  //     Example: all events in a delegation chain share the delegation's correlation_id.
+  //
+  //   causation_id: "this event was CAUSED BY that specific event" — direct parent
+  //     in the causal graph. Each event has at most one causation_id (its direct cause).
+  //     Example: DELEGATION_ACCEPTED was caused by DELEGATION_CREATED.
+  //     None means this event is a root cause (user action, external trigger).
+  //
+  //   Together they give you:
+  //     correlation_id → "show me everything related to this workflow"
+  //     causation_id chain → "trace the exact causal path that led to this event"
+  //
+  //   IndexEntry has both + helper methods:
+  //     is_correlated() → event_id != correlation_id
+  //     is_caused_by(id) → causation_id == Some(id)
+  //     is_root_cause() → causation_id.is_none()
   with_flags(u8) -> Self            // builder
   requires_ack() -> bool            // flag bit 0
   is_transactional() -> bool        // flag bit 1
@@ -659,7 +684,15 @@ WRITE:
   append(&self, coord: &Coordinate, kind: EventKind, payload: &impl Serialize)
     -> Result<AppendReceipt, StoreError>
     3 params. Store generates event_id, timestamp, position, hash chain.
-  append_with_options(..., opts: AppendOptions) — CAS, idempotency
+    correlation_id defaults to event_id (self-correlated). causation_id = None (root cause).
+
+  append_caused_by(&self, coord: &Coordinate, kind: EventKind, payload: &impl Serialize,
+                    correlation_id: u128, causation_id: u128)
+    -> Result<AppendReceipt, StoreError>
+    For events caused by another event. Sets both correlation and causation.
+    Example: DELEGATION_ACCEPTED caused by DELEGATION_CREATED.
+
+  append_with_options(..., opts: AppendOptions) — CAS, idempotency, custom correlation/causation
   apply_transition(coord, transition) — extracts kind+payload, delegates to append
 
 READ:
@@ -692,7 +725,24 @@ Or use flume's async API on the channels directly.
 
 Types owned by this module:
   Store, StoreConfig, StoreError (with From<CoordinateError>),
-  StoreStats, StoreDiagnostics, StoredEvent<P>, AppendReceipt, AppendOptions
+  StoreStats, StoreDiagnostics, StoredEvent<P>, AppendReceipt, AppendOptions,
+  RestartPolicy
+
+StoreConfig includes:
+  data_dir: PathBuf              (default: "./free-batteries-data")
+  segment_max_bytes: u64         (default: 256MB)
+  sync_every_n_events: u32       (default: 1000)
+  fd_budget: usize               (default: 64)
+  writer_channel_capacity: usize (default: 4096)
+  broadcast_capacity: usize      (default: 8192)
+  cache_map_size_bytes: usize    (default: 64MB, for LMDB)
+  restart_policy: RestartPolicy  (default: Once)
+  shutdown_drain_limit: usize    (default: 1024)
+
+In production, run under a process supervisor (systemd, k8s restart policy).
+The library's RestartPolicy handles transient writer panics. Process-level
+crashes require external restart. This is by design — a library is not a
+process supervisor.
 ```
 
 ---
@@ -730,7 +780,15 @@ struct SubscriberList {
   broadcast(notif): iterate, send, retain(ok). NO tokio::broadcast.
   subscribe(capacity) -> flume::Receiver<Notification>
 
-Notification { event_id: u128, coord: Coordinate, kind: EventKind, sequence: u64 }
+Notification {
+    event_id: u128,
+    correlation_id: u128,
+    causation_id: Option<u128>,
+    coord: Coordinate,
+    kind: EventKind,
+    sequence: u64,
+}
+// Reactive<P> consumers need correlation/causation to decide whether to react.
 
 The 10-step commit protocol (handle_append):
   1. Acquire per-entity lock (DashMap<Arc<str>, Arc<Mutex<()>>>)
@@ -746,8 +804,29 @@ The 10-step commit protocol (handle_append):
 
 Backpressure: bounded channel (default 4096). Callers block when full.
 Entity locks: grow without pruning (acceptable <100K entities).
-Crash recovery: if writer panics, WriterHandle detects (flume send fails).
-  Store restarts writer once. Second panic → StoreError::WriterCrashed.
+
+Crash recovery via RestartPolicy (on StoreConfig):
+  pub enum RestartPolicy {
+      Once,                                          // default
+      Bounded { max_restarts: u32, within_ms: u64 }, // production
+  }
+  Writer tracks restart count + timestamps. If count exceeds max within
+  the window → StoreError::WriterCrashed. Otherwise restart + reset counter.
+  Detection: WriterHandle sees flume send fail (receiver dropped on panic).
+  ~20 LOC. Passes Invariant 4: Once and Bounded are two real impls.
+
+Shutdown drain semantics:
+  Writer receives Shutdown → drains up to config.shutdown_drain_limit
+  (default 1024) queued Append commands → processes each → fsync →
+  responds to Shutdown. Commands beyond the cap get StoreError::ShuttingDown
+  on their respond channel. Producers that send after Shutdown get flume
+  SendError because the channel is dropped after drain completes.
+  This prevents silent data loss on close(). Products that call
+  store.close() after a burst of appends get all queued events persisted
+  (up to the cap). ~10 LOC.
+
+  In production, set shutdown_drain_limit high enough to cover your
+  burst size. In tests, default 1024 is fine.
 
 // NOTE: CompensationAction exists on OutcomeError but the writer
 // ignores it. Compensation handling is deferred — products implement it.
@@ -793,6 +872,8 @@ pub(crate) struct StoreIndex {
 
 pub struct IndexEntry {
     pub event_id: u128,
+    pub correlation_id: u128,          // for O(1) correlation checks without disk read
+    pub causation_id: Option<u128>,    // direct causal parent (None = root cause)
     pub coord: Coordinate,
     pub kind: EventKind,
     pub clock: u32,
@@ -800,6 +881,25 @@ pub struct IndexEntry {
     pub disk_pos: DiskPos,
     pub global_sequence: u64,
 }
+
+impl IndexEntry {
+    /// This event is part of a multi-event workflow (shares correlation_id with others).
+    pub fn is_correlated(&self) -> bool {
+        self.event_id != self.correlation_id
+    }
+
+    /// This event was directly caused by the given event.
+    pub fn is_caused_by(&self, event_id: u128) -> bool {
+        self.causation_id == Some(event_id)
+    }
+
+    /// This event is a root cause — not caused by any other event.
+    pub fn is_root_cause(&self) -> bool {
+        self.causation_id.is_none()
+    }
+}
+// Memory: ~32 bytes added per IndexEntry (correlation_id u128 + causation_id Option<u128>).
+// Total per entry: ~230-330 bytes. Worth it for O(1) causal queries without disk reads.
 
 pub struct DiskPos { pub segment_id: u64, pub offset: u64, pub length: u32 }
 pub struct ClockKey { pub clock: u32, pub uuid: u128 }
@@ -1229,7 +1329,8 @@ DECIDED (the design — not compromises, not simplifications, the right call):
   NoCache is the default projection backend
   macro_rules! for typestate (not proc macro)
   Denial is separate from OutcomeError (library doesn't auto-store denials)
-  Writer restarts once on panic (not a full supervisor)
+  Writer restart via RestartPolicy (Once default, Bounded for production)
+  Writer drains queued commands on shutdown (bounded, no silent data loss)
   blake3 only (no enum, no trait, one function)
   flume for all channels (no tokio::broadcast)
   Store API is sync (bisync is a channel property)
@@ -1339,7 +1440,57 @@ All drift corrections verified against this document:
 [✓] Async pattern clarification
     subscription.rs distinguishes recv_async (for subscriptions) from
     spawn_blocking (for Store read/write methods).
+
+[✓] RestartPolicy on StoreConfig
+    writer.rs: RestartPolicy enum (Once, Bounded). StoreConfig has restart_policy field.
+    Default: Once. Production: Bounded { max_restarts, within_ms }.
+    Passes Invariant 4: two real impls, not speculative.
+
+[✓] Shutdown drain semantics
+    writer.rs: Shutdown drains up to shutdown_drain_limit queued commands,
+    then fsync, then responds. Beyond cap → StoreError::ShuttingDown.
+    No silent data loss on store.close() after burst of appends.
+
+[✓] causation_id on EventHeader
+    header.rs: causation_id: Option<u128> — which event CAUSED this one.
+    Distinct from correlation_id (related vs caused-by).
+    None = root cause (user action, external trigger).
+    store.append() defaults to None. store.append_caused_by() sets both.
+
+[✓] IndexEntry causal fields + methods
+    index.rs: correlation_id: u128 + causation_id: Option<u128> on IndexEntry.
+    ~32 bytes added per entry for O(1) causal queries without disk reads.
+    Three methods:
+      is_correlated() → event_id != correlation_id
+      is_caused_by(id) → causation_id == Some(id)
+      is_root_cause() → causation_id.is_none()
+    Products: query(region).filter(|e| e.is_caused_by(parent_id))
+    Validated by FerrOx convergence — independent project needed same field.
+
+[✓] correlation vs causation documented on EventHeader
+    header.rs: explicit doc distinguishing the two concepts.
+    correlation = "show me everything related to this workflow"
+    causation chain = "trace the exact causal path to this event"
+
+[✓] Production supervisor guidance
+    store/mod.rs: "In production, run under a process supervisor."
+    Library handles transient writer panics. Process crashes require external restart.
 ```
+
+MCQ VALIDATION (10 questions, all answers verified against spec):
+  Q1=B (sync API), Q2=C (Ctx is product-defined), Q3=B (seal is private),
+  Q4=B (restart per policy), Q5=B (and_then distributes over Batch),
+  Q6=B (push lossy / pull guaranteed), Q7=B (EventSourced in Layer 0),
+  Q8=B (private u16 prevents reserved-range construction),
+  Q9=C (no cross-entity atomicity, saga via compensation),
+  Q10=B (writing IS executing — store is the runtime).
+
+CASCADE ANALYSIS (4 cascading pairs, 3 independent, 0 contradictions):
+  Q1+Q6: sync API + push/pull → NEVER async methods, products compose at boundary
+  Q3+Q9: sealed receipt + no cross-entity atomicity → one coord per pipeline pass
+  Q5+Q7: monad distributes + generic P → compose chains without serde
+  Q8+Q2: private EventKind + product Ctx → system events invisible to product gates
+  Independent: Q1/Q8, Q3/Q7, Q6/Q9
 
 This document is FINAL. No override layers. No patches. No "THIS SECTION WINS."
 An implementing agent reads top to bottom and builds exactly what's described.
