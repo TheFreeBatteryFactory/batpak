@@ -1,0 +1,278 @@
+use serde::{Deserialize, Serialize};
+// NOTE: No `use crate::wire::*` needed. serde(with = "crate::wire::...") resolves via string path.
+
+pub mod error;
+pub mod combine;
+pub mod wait;
+
+pub use error::{OutcomeError, ErrorKind};
+pub use wait::{WaitCondition, CompensationAction};
+pub use combine::{zip, join_all, join_any};
+
+/// Outcome<T>: the core algebraic type. 6 variants.
+/// Named "Outcome" not "Effect" to eliminate Effect/Event confusion.
+/// [SPEC:src/outcome/mod.rs]
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum Outcome<T> {
+    Ok(T),
+    Err(OutcomeError),
+    Retry {
+        after_ms: u64,
+        attempt: u32,
+        max_attempts: u32,
+        reason: String,
+    },
+    Pending {
+        condition: WaitCondition,
+        #[serde(with = "crate::wire::u128_bytes")]
+        resume_token: u128,
+    },
+    Cancelled { reason: String },
+    Batch(Vec<Outcome<T>>),
+}
+
+impl<T> Outcome<T> {
+    // --- Construction ---
+    pub fn ok(val: T) -> Self {
+        Self::Ok(val)
+    }
+    pub fn err(e: OutcomeError) -> Self {
+        Self::Err(e)
+    }
+    pub fn cancelled(reason: impl Into<String>) -> Self {
+        Self::Cancelled {
+            reason: reason.into(),
+        }
+    }
+    pub fn retry(
+        after_ms: u64,
+        attempt: u32,
+        max_attempts: u32,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self::Retry {
+            after_ms,
+            attempt,
+            max_attempts,
+            reason: reason.into(),
+        }
+    }
+    pub fn pending(condition: WaitCondition, resume_token: u128) -> Self {
+        Self::Pending {
+            condition,
+            resume_token,
+        }
+    }
+
+    // --- Predicates ---
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok(_))
+    }
+    pub fn is_err(&self) -> bool {
+        matches!(self, Self::Err(_))
+    }
+    pub fn is_retry(&self) -> bool {
+        matches!(self, Self::Retry { .. })
+    }
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending { .. })
+    }
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled { .. })
+    }
+    pub fn is_batch(&self) -> bool {
+        matches!(self, Self::Batch(_))
+    }
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Ok(_) | Self::Err(_) | Self::Cancelled { .. })
+    }
+
+    // --- Combinators ---
+
+    /// map: transform the Ok value. Distributes over Batch.
+    /// [SPEC:src/outcome/mod.rs — combinators distribute over Batch via F: Clone]
+    pub fn map<U, F: FnOnce(T) -> U + Clone>(self, f: F) -> Outcome<U> {
+        match self {
+            Self::Ok(v) => Outcome::Ok(f(v)),
+            Self::Err(e) => Outcome::Err(e),
+            Self::Retry {
+                after_ms,
+                attempt,
+                max_attempts,
+                reason,
+            } => Outcome::Retry {
+                after_ms,
+                attempt,
+                max_attempts,
+                reason,
+            },
+            Self::Pending {
+                condition,
+                resume_token,
+            } => Outcome::Pending {
+                condition,
+                resume_token,
+            },
+            Self::Cancelled { reason } => Outcome::Cancelled { reason },
+            Self::Batch(items) => {
+                Outcome::Batch(items.into_iter().map(|o| o.map(f.clone())).collect())
+            }
+        }
+    }
+
+    /// and_then: the monad bind. Distributes over Batch.
+    /// F: Clone is required for Batch distribution (called once per element).
+    /// [SPEC:src/outcome/mod.rs — The and_then monad fix]
+    /// This is THE critical method. Monad laws are verified by proptest.
+    /// [FILE:tests/monad_laws.rs]
+    pub fn and_then<U, F: FnOnce(T) -> Outcome<U> + Clone>(self, f: F) -> Outcome<U> {
+        match self {
+            Self::Ok(v) => f(v),
+            Self::Err(e) => Outcome::Err(e),
+            Self::Retry {
+                after_ms,
+                attempt,
+                max_attempts,
+                reason,
+            } => Outcome::Retry {
+                after_ms,
+                attempt,
+                max_attempts,
+                reason,
+            },
+            Self::Pending {
+                condition,
+                resume_token,
+            } => Outcome::Pending {
+                condition,
+                resume_token,
+            },
+            Self::Cancelled { reason } => Outcome::Cancelled { reason },
+            Self::Batch(items) => {
+                Outcome::Batch(items.into_iter().map(|o| o.and_then(f.clone())).collect())
+            }
+        }
+    }
+
+    pub fn map_err<F: FnOnce(OutcomeError) -> OutcomeError + Clone>(self, f: F) -> Self {
+        match self {
+            Self::Err(e) => Self::Err(f(e)),
+            Self::Batch(items) => Self::Batch(
+                items
+                    .into_iter()
+                    .map(|o| o.map_err(f.clone()))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    pub fn or_else<F: FnOnce(OutcomeError) -> Outcome<T> + Clone>(self, f: F) -> Outcome<T> {
+        match self {
+            Self::Err(e) => f(e),
+            Self::Batch(items) => Self::Batch(
+                items
+                    .into_iter()
+                    .map(|o| o.or_else(f.clone()))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    pub fn flatten(self) -> Outcome<T>
+    where
+        T: Into<Outcome<T>>,
+    {
+        /// Unwrap one layer: Outcome<Outcome<T>> → Outcome<T>
+        self.and_then(|v| v.into())
+    }
+
+    pub fn inspect<F: FnOnce(&T) + Clone>(self, f: F) -> Self {
+        match &self {
+            Self::Ok(v) => {
+                f(v);
+                self
+            }
+            Self::Batch(_) => self.map(|v| {
+                f(&v);
+                v
+            }),
+            _ => self,
+        }
+    }
+
+    pub fn inspect_err<F: FnOnce(&OutcomeError) + Clone>(self, f: F) -> Self {
+        match &self {
+            Self::Err(e) => {
+                f(e);
+                self
+            }
+            Self::Batch(_) => {
+                /// Walk batch, inspect errors, return unchanged
+                match self {
+                    Self::Batch(items) => Self::Batch(
+                        items
+                            .into_iter()
+                            .map(|o| o.inspect_err(f.clone()))
+                            .collect(),
+                    ),
+                    _ => unreachable!(),
+                }
+            }
+            _ => self,
+        }
+    }
+
+    pub fn and_then_if<F: FnOnce(&T) -> bool, G: FnOnce(T) -> Outcome<T>>(
+        self,
+        pred: F,
+        f: G,
+    ) -> Outcome<T> {
+        match self {
+            Self::Ok(v) => {
+                if pred(&v) {
+                    f(v)
+                } else {
+                    Self::Ok(v)
+                }
+            }
+            other => other,
+        }
+    }
+
+    pub fn into_result(self) -> Result<T, OutcomeError> {
+        match self {
+            Self::Ok(v) => Ok(v),
+            Self::Err(e) => Err(e),
+            Self::Cancelled { reason } => Err(OutcomeError {
+                kind: ErrorKind::Internal,
+                message: format!("cancelled: {reason}"),
+                compensation: None,
+                retryable: false,
+            }),
+            _ => Err(OutcomeError {
+                kind: ErrorKind::Internal,
+                message: "outcome is not terminal".into(),
+                compensation: None,
+                retryable: false,
+            }),
+        }
+    }
+
+    pub fn unwrap_or(self, default: T) -> T {
+        match self {
+            Self::Ok(v) => v,
+            _ => default,
+        }
+    }
+
+    pub fn unwrap_or_else<F: FnOnce() -> T>(self, f: F) -> T {
+        match self {
+            Self::Ok(v) => v,
+            _ => f(),
+        }
+    }
+}
