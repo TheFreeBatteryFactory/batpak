@@ -113,7 +113,7 @@ pub fn join_all<T>(outcomes: Vec<Outcome<T>>) -> Outcome<Vec<T>> {
                 };
             }
             Outcome::Batch(inner) => {
-                /// Flatten: join_all on the inner batch, then continue collecting.
+                // Flatten: join_all on the inner batch, then continue collecting.
                 match join_all(inner) {
                     Outcome::Ok(vs) => results.extend(vs),
                     other => {

@@ -1,6 +1,13 @@
+#[cfg(feature = "exponential-backoff")]
+compile_error!(
+    "Red flag: only Once and Bounded restart policies. \
+     Exponential backoff belongs in the product's supervisor, not here. \
+     See: SPEC.md ## RED FLAGS."
+);
+
 use crate::coordinate::{Coordinate, DagPosition};
-use crate::event::{Event, EventHeader, EventKind, HashChain};
-use crate::store::index::{StoreIndex, IndexEntry, ClockKey, DiskPos};
+use crate::event::{Event, EventKind, HashChain};
+use crate::store::index::{StoreIndex, IndexEntry, DiskPos};
 use crate::store::segment::{self, Segment, Active, FramePayload};
 use crate::store::{StoreConfig, StoreError, AppendReceipt};
 use flume::{Sender, Receiver, TrySendError};
@@ -148,7 +155,7 @@ fn writer_loop(
                     &index, &mut active_segment, &mut segment_id,
                     &config, &subscribers,
                 );
-                /// Respond to caller. Ignore send error (caller may have dropped).
+                // Respond to caller. Ignore send error (caller may have dropped).
                 let _ = respond.send(result);
 
                 events_since_sync += 1;
@@ -163,8 +170,8 @@ fn writer_loop(
                 events_since_sync = 0;
             }
             WriterCommand::Shutdown { respond } => {
-                /// Drain up to shutdown_drain_limit queued commands.
-                /// [SPEC:src/store/writer.rs — Shutdown drain semantics]
+                // Drain up to shutdown_drain_limit queued commands.
+                // [SPEC:src/store/writer.rs — Shutdown drain semantics]
                 let mut drained = 0;
                 while drained < config.shutdown_drain_limit {
                     match rx.try_recv() {

@@ -21,14 +21,14 @@ impl Subscription {
         loop {
             match self.rx.recv() {
                 Ok(notif) => {
-                    /// Filter: only return events matching our region.
-                    /// [FILE:src/coordinate/mod.rs — Region::matches_event]
+                    // Filter: only return events matching our region.
+                    // [FILE:src/coordinate/mod.rs — Region::matches_event]
                     if self.region.matches_event(
                         notif.coord.entity(), notif.coord.scope(), notif.kind
                     ) {
                         return Some(notif);
                     }
-                    /// Didn't match — keep receiving
+                    // Didn't match — keep receiving
                 }
                 Err(_) => return None, // channel closed
             }

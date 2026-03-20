@@ -18,8 +18,8 @@ impl Cursor {
 
     /// Poll for the next matching event after our current position.
     pub fn poll(&mut self) -> Option<IndexEntry> {
-        /// Query the index for events matching our region with global_sequence > self.position.
-        /// Return the first match, advance position.
+        // Query the index for events matching our region with global_sequence > self.position.
+        // Return the first match, advance position.
         let results = self.index.query(&self.region);
         for entry in results {
             if entry.global_sequence > self.position {

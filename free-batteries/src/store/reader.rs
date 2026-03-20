@@ -56,16 +56,27 @@ impl Reader {
         let file = self.get_fd(pos.segment_id)?;
         let mut buf = vec![0u8; pos.length as usize];
 
-        /// Use pread (read_at) — doesn't modify file cursor. [SPEC:IMPLEMENTATION NOTES item 7]
+        // Use pread (read_at) — doesn't modify file cursor. [SPEC:IMPLEMENTATION NOTES item 7]
+        // Loop to handle short reads (read_at may return fewer bytes than requested).
         #[cfg(unix)]
         {
             use std::os::unix::fs::FileExt;
-            file.read_at(&mut buf, pos.offset)
-                .map_err(StoreError::Io)?;
+            let mut total_read = 0;
+            while total_read < buf.len() {
+                let n = file.read_at(&mut buf[total_read..], pos.offset + total_read as u64)
+                    .map_err(StoreError::Io)?;
+                if n == 0 {
+                    return Err(StoreError::CorruptSegment {
+                        segment_id: pos.segment_id,
+                        detail: "unexpected EOF during read".into(),
+                    });
+                }
+                total_read += n;
+            }
         }
         #[cfg(not(unix))]
         {
-            /// Fallback: seek + read (holds the mutex so this is safe)
+            // Fallback: seek + read (holds the mutex so this is safe)
             use std::io::{Seek, SeekFrom};
             let mut file = file; // need mut for seek
             file.seek(SeekFrom::Start(pos.offset))
@@ -92,7 +103,7 @@ impl Reader {
         file.read_to_end(&mut all_bytes)
             .map_err(StoreError::Io)?;
 
-        /// Verify magic
+        // Verify magic
         if all_bytes.len() < 4 || &all_bytes[..4] != SEGMENT_MAGIC {
             return Err(StoreError::CorruptSegment {
                 segment_id: 0,
@@ -100,26 +111,26 @@ impl Reader {
             });
         }
 
-        /// Extract segment_id from filename: "000042.fbat" → 42
+        // Extract segment_id from filename: "000042.fbat" → 42
         let segment_id = path
             .file_stem()
             .and_then(|s| s.to_str())
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
-        /// Skip magic (4 bytes). Parse segment header from msgpack.
-        /// [DEP:rmp_serde::from_slice] — deserialize SegmentHeader
+        // Skip magic (4 bytes). Parse segment header from msgpack.
+        // [DEP:rmp_serde::from_slice] — deserialize SegmentHeader
         let after_magic = &all_bytes[4..];
         let _header: segment::SegmentHeader = rmp_serde::from_slice(after_magic)
             .map_err(|e| StoreError::Serialization(e.to_string()))?;
 
-        /// Find where header ends and frames begin.
-        /// Re-encode header to measure its serialized size (simplest approach).
+        // Find where header ends and frames begin.
+        // Re-encode header to measure its serialized size (simplest approach).
         let header_bytes = rmp_serde::to_vec_named(&_header)
             .map_err(|e| StoreError::Serialization(e.to_string()))?;
         let mut cursor = 4 + header_bytes.len();
 
-        /// Read frames until EOF. Each frame: [len:u32 BE][crc32:u32 BE][msgpack]
+        // Read frames until EOF. Each frame: [len:u32 BE][crc32:u32 BE][msgpack]
         let mut entries = Vec::new();
         while cursor < all_bytes.len() {
             let remaining = &all_bytes[cursor..];
@@ -130,7 +141,7 @@ impl Reader {
             let frame_offset = cursor as u64;
             match segment::frame_decode(remaining) {
                 Ok((msgpack, frame_size)) => {
-                    /// Deserialize frame payload
+                    // Deserialize frame payload
                     match rmp_serde::from_slice::<FramePayload<serde_json::Value>>(msgpack) {
                         Ok(payload) => {
                             entries.push(ScannedEntry {
@@ -168,8 +179,8 @@ impl Reader {
 
     fn get_fd(&self, segment_id: u64) -> Result<File, StoreError> {
         let mut cache = self.fd_cache.lock();
-        /// LRU logic: if in cache, move to end of order vec. If not, open file,
-        /// evict oldest if over budget, insert.
+        // LRU logic: if in cache, move to end of order vec. If not, open file,
+        // evict oldest if over budget, insert.
         if let Some(pos) = cache.order.iter().position(|&id| id == segment_id) {
             cache.order.remove(pos);
             cache.order.push(segment_id);

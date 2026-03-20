@@ -109,32 +109,32 @@ impl StoreIndex {
             uuid: entry.event_id,
         };
 
-        /// Primary index: entity -> BTreeMap
-        /// [DEP:dashmap::DashMap::entry] — holds write lock, release fast
+        // Primary index: entity -> BTreeMap
+        // [DEP:dashmap::DashMap::entry] — holds write lock, release fast
         self.streams
             .entry(entity.clone())
             .or_insert_with(BTreeMap::new)
             .insert(key.clone(), entry.clone());
 
-        /// Scope index
+        // Scope index
         self.scope_entities
             .entry(scope)
             .or_insert_with(HashSet::new)
             .insert(entity.clone());
 
-        /// Fact index
+        // Fact index
         self.by_fact
             .entry(entry.kind)
             .or_insert_with(BTreeMap::new)
             .insert(key, entry.clone());
 
-        /// Point lookup
+        // Point lookup
         self.by_id.insert(entry.event_id, entry.clone());
 
-        /// Chain head
+        // Chain head
         self.latest.insert(entity, entry);
 
-        /// Counters
+        // Counters
         self.global_sequence.fetch_add(1, Ordering::SeqCst);
         self.len.fetch_add(1, Ordering::Relaxed);
     }
@@ -155,22 +155,22 @@ impl StoreIndex {
     }
 
     pub(crate) fn query(&self, region: &crate::coordinate::Region) -> Vec<IndexEntry> {
-        /// Region query strategy:
-        /// 1. Determine candidate set based on most selective filter
-        /// 2. Apply remaining filters to narrow results
-        /// 3. Apply clock_range last (it's per-entity, cheap)
+        // Region query strategy:
+        // 1. Determine candidate set based on most selective filter
+        // 2. Apply remaining filters to narrow results
+        // 3. Apply clock_range last (it's per-entity, cheap)
         use crate::coordinate::KindFilter;
 
         let mut candidates: Vec<IndexEntry> = if let Some(ref prefix) = region.entity_prefix {
-            /// Entity prefix → scan streams map for matching keys
-            /// [DEP:dashmap::DashMap::iter] — NOT a consistent snapshot, fine for queries
+            // Entity prefix → scan streams map for matching keys
+            // [DEP:dashmap::DashMap::iter] — NOT a consistent snapshot, fine for queries
             self.streams
                 .iter()
                 .filter(|r| r.key().as_ref().starts_with(prefix.as_ref()))
                 .flat_map(|r| r.value().values().cloned())
                 .collect()
         } else if let Some(ref scope) = region.scope {
-            /// Scope → look up entities in scope, collect their streams
+            // Scope → look up entities in scope, collect their streams
             if let Some(entities) = self.scope_entities.get(scope.as_ref()) {
                 entities
                     .value()
@@ -186,7 +186,7 @@ impl StoreIndex {
                 Vec::new()
             }
         } else if let Some(ref fact) = region.fact {
-            /// Fact filter without entity/scope → scan by_fact index
+            // Fact filter without entity/scope → scan by_fact index
             match fact {
                 KindFilter::Exact(k) => {
                     self.by_fact
@@ -203,7 +203,7 @@ impl StoreIndex {
                         .collect()
                 }
                 KindFilter::Any => {
-                    /// No filter at all — return everything (expensive, use sparingly)
+                    // No filter at all — return everything (expensive, use sparingly)
                     self.streams
                         .iter()
                         .flat_map(|r| r.value().values().cloned())
@@ -211,30 +211,30 @@ impl StoreIndex {
                 }
             }
         } else {
-            /// Region::all() with no filters — return everything
+            // Region::all() with no filters — return everything
             self.streams
                 .iter()
                 .flat_map(|r| r.value().values().cloned())
                 .collect()
         };
 
-        /// Apply remaining filters that weren't used for the initial candidate set.
+        // Apply remaining filters that weren't used for the initial candidate set.
 
-        /// Scope filter (if entity_prefix was the primary selector)
+        // Scope filter (if entity_prefix was the primary selector)
         if region.entity_prefix.is_some() {
             if let Some(ref scope) = region.scope {
                 candidates.retain(|e| e.coord.scope() == scope.as_ref());
             }
         }
 
-        /// Entity prefix filter (if scope was the primary selector)
+        // Entity prefix filter (if scope was the primary selector)
         if region.scope.is_some() && region.entity_prefix.is_none() {
             if let Some(ref prefix) = region.entity_prefix {
                 candidates.retain(|e| e.coord.entity().starts_with(prefix.as_ref()));
             }
         }
 
-        /// Fact filter (if not already applied)
+        // Fact filter (if not already applied)
         if region.entity_prefix.is_some() || region.scope.is_some() {
             if let Some(ref fact) = region.fact {
                 candidates.retain(|e| match fact {
@@ -245,12 +245,12 @@ impl StoreIndex {
             }
         }
 
-        /// Clock range filter (always per-entity clock, not global_sequence)
+        // Clock range filter (always per-entity clock, not global_sequence)
         if let Some((min, max)) = region.clock_range {
             candidates.retain(|e| e.clock >= min && e.clock <= max);
         }
 
-        /// Sort by global_sequence for consistent ordering
+        // Sort by global_sequence for consistent ordering
         candidates.sort_by_key(|e| e.global_sequence);
         candidates
     }

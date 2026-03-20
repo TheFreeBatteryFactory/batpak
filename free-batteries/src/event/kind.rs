@@ -11,7 +11,7 @@ impl EventKind {
     /// category:type encoding. Upper 4 bits = category, lower 12 = type.
     /// Products use categories 0x1-0xF. System uses 0x0 and 0xD.
     pub const fn custom(category: u8, type_id: u16) -> Self {
-        /// Combine: (category as u16) << 12 | (type_id & 0x0FFF)
+        // Combine: (category as u16) << 12 | (type_id & 0x0FFF)
         Self(((category as u16) << 12) | (type_id & 0x0FFF))
     }
 

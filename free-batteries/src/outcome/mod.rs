@@ -186,43 +186,27 @@ impl<T> Outcome<T> {
     where
         T: Into<Outcome<T>>,
     {
-        /// Unwrap one layer: Outcome<Outcome<T>> → Outcome<T>
+        // Unwrap one layer: Outcome<Outcome<T>> → Outcome<T>
         self.and_then(|v| v.into())
     }
 
     pub fn inspect<F: FnOnce(&T) + Clone>(self, f: F) -> Self {
-        match &self {
-            Self::Ok(v) => {
-                f(v);
-                self
-            }
-            Self::Batch(_) => self.map(|v| {
-                f(&v);
-                v
-            }),
-            _ => self,
+        match self {
+            Self::Ok(v) => { f(&v); Self::Ok(v) }
+            Self::Batch(items) => Self::Batch(
+                items.into_iter().map(|o| o.inspect(f.clone())).collect()
+            ),
+            other => other,
         }
     }
 
     pub fn inspect_err<F: FnOnce(&OutcomeError) + Clone>(self, f: F) -> Self {
-        match &self {
-            Self::Err(e) => {
-                f(e);
-                self
-            }
-            Self::Batch(_) => {
-                /// Walk batch, inspect errors, return unchanged
-                match self {
-                    Self::Batch(items) => Self::Batch(
-                        items
-                            .into_iter()
-                            .map(|o| o.inspect_err(f.clone()))
-                            .collect(),
-                    ),
-                    _ => unreachable!(),
-                }
-            }
-            _ => self,
+        match self {
+            Self::Err(e) => { f(&e); Self::Err(e) }
+            Self::Batch(items) => Self::Batch(
+                items.into_iter().map(|o| o.inspect_err(f.clone())).collect()
+            ),
+            other => other,
         }
     }
 

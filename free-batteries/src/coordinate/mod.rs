@@ -137,7 +137,7 @@ impl Region {
                 KindFilter::Any => {},
             }
         }
-        /// clock_range is not checked here — it's for index queries, not live filtering.
+        // clock_range is not checked here — it's for index queries, not live filtering.
         true
     }
 }

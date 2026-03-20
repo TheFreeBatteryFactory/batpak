@@ -49,7 +49,7 @@ macro_rules! define_entity_id {
 
         impl ::std::fmt::Display for $name {
             fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-                /// Display as "entity_name:hex" e.g. "event:0a1b2c..."
+                // Display as "entity_name:hex" e.g. "event:0a1b2c..."
                 write!(f, "{}:{:032x}", $entity, self.0)
             }
         }
@@ -57,7 +57,7 @@ macro_rules! define_entity_id {
         impl ::std::str::FromStr for $name {
             type Err = String;
             fn from_str(s: &str) -> Result<Self, Self::Err> {
-                /// Parse "entity_name:hex" or bare hex
+                // Parse "entity_name:hex" or bare hex
                 let hex = s.strip_prefix(concat!($entity, ":")).unwrap_or(s);
                 u128::from_str_radix(hex, 16)
                     .map(Self)

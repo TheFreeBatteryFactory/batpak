@@ -1,7 +1,7 @@
 use crate::event::Event;
 use crate::store::StoreError;
 use serde::{Deserialize, Serialize};
-use std::io::{self, Read, Write};
+use std::io::Write;
 // NOTE: No `use crate::wire::*` needed. serde(with) resolves via string path.
 
 /// Segment file format: magic + header + frames.
@@ -102,8 +102,8 @@ impl Segment<Active> {
     /// Create new active segment.
     pub fn create(dir: &std::path::Path, segment_id: u64) -> Result<Self, StoreError> {
         let path = dir.join(segment_filename(segment_id));
-        /// Use OpenOptions (NOT File::create_new — requires Rust 1.77, MSRV is 1.75)
-        /// [SPEC:IMPLEMENTATION NOTES item 7 — MSRV workarounds]
+        // Use OpenOptions (NOT File::create_new — requires Rust 1.77, MSRV is 1.75)
+        // [SPEC:IMPLEMENTATION NOTES item 7 — MSRV workarounds]
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -120,7 +120,7 @@ impl Segment<Active> {
             segment_id,
         };
 
-        /// Write magic + header
+        // Write magic + header
         file.write_all(SEGMENT_MAGIC).map_err(StoreError::Io)?;
         let header_bytes = rmp_serde::to_vec_named(&header)
             .map_err(|e| StoreError::Serialization(e.to_string()))?;

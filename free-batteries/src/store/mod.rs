@@ -14,17 +14,13 @@ pub use writer::{Notification, RestartPolicy};
 
 use crate::coordinate::{Coordinate, CoordinateError, Region, KindFilter};
 use crate::event::{Event, EventHeader, EventKind, StoredEvent, EventSourced};
-use crate::wire::u128_bytes;
 use index::StoreIndex;
 use reader::Reader;
 use writer::{WriterHandle, WriterCommand, SubscriberList};
-use projection::ProjectionCache;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
-// NOTE: the `use crate::wire::u128_bytes` IS needed here — Store uses it
-// for AppendOptions.idempotency_key serde annotation (if AppendOptions is serialized).
-// If AppendOptions is never serialized, this can be removed.
+// ProjectionCache re-exported above via pub use, no separate use needed.
 
 /// Store: the runtime. Sync API. Send + Sync.
 /// [SPEC:src/store/mod.rs]
@@ -140,8 +136,8 @@ impl Store {
         let index = Arc::new(StoreIndex::new());
         let reader = Arc::new(Reader::new(config.data_dir.clone(), config.fd_budget));
 
-        /// Cold start: scan all segments, rebuild index.
-        /// [SPEC:IMPLEMENTATION NOTES item 2 — segment naming, alphabetical scan]
+        // Cold start: scan all segments, rebuild index.
+        // [SPEC:IMPLEMENTATION NOTES item 2 — segment naming, alphabetical scan]
         let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(&config.data_dir)?
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().map(|ext| ext == "fbat").unwrap_or(false))
@@ -263,10 +259,10 @@ impl Store {
                 if let Ok(stored) = self.reader.read_entry(&entry.disk_pos) {
                     results.push(stored);
                 }
-                /// Follow prev_hash: find the entry whose event_hash matches prev_hash
+                // Follow prev_hash: find the entry whose event_hash matches prev_hash
                 let prev = entry.hash_chain.prev_hash;
                 if prev == [0u8; 32] { break; } // genesis
-                /// Linear scan is acceptable for ancestor walks (bounded by limit).
+                // Linear scan is acceptable for ancestor walks (bounded by limit).
                 current_id = self.index.stream(entry.coord.entity())
                     .iter()
                     .find(|e| e.hash_chain.event_hash == prev)
@@ -315,12 +311,102 @@ impl Store {
         self.query(&Region::all().with_fact(KindFilter::Exact(kind)))
     }
 
+    /// WRITE: append with CAS, idempotency, custom correlation/causation.
+    pub fn append_with_options(
+        &self,
+        coord: &Coordinate,
+        kind: EventKind,
+        payload: &impl Serialize,
+        opts: AppendOptions,
+    ) -> Result<AppendReceipt, StoreError> {
+        // CAS: check expected sequence
+        if let Some(expected) = opts.expected_sequence {
+            let actual = self.index.get_latest(coord.entity())
+                .map(|e| e.clock)
+                .unwrap_or(0);
+            if actual != expected {
+                return Err(StoreError::SequenceMismatch {
+                    entity: coord.entity().to_string(),
+                    expected,
+                    actual,
+                });
+            }
+        }
+
+        // Idempotency: check if key already seen
+        if let Some(key) = opts.idempotency_key {
+            if let Some(entry) = self.index.get_by_id(key) {
+                return Ok(AppendReceipt {
+                    event_id: entry.event_id,
+                    sequence: entry.global_sequence,
+                    disk_pos: entry.disk_pos,
+                });
+            }
+        }
+
+        let payload_bytes = rmp_serde::to_vec_named(payload)
+            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let event_id = opts.idempotency_key.unwrap_or_else(crate::id::generate_v7_id);
+        let correlation_id = opts.correlation_id.unwrap_or(event_id);
+        let causation_id = opts.causation_id;
+        let header = EventHeader::new(
+            event_id, correlation_id, causation_id,
+            now_us(), crate::coordinate::DagPosition::root(),
+            payload_bytes.len() as u32, kind,
+        );
+        let event = Event::new(header, payload_bytes);
+
+        let (tx, rx) = flume::bounded(1);
+        self.writer.tx.send(WriterCommand::Append {
+            entity: coord.entity_arc(),
+            scope: coord.scope_arc(),
+            event, kind, correlation_id, causation_id,
+            respond: tx,
+        }).map_err(|_| StoreError::WriterCrashed)?;
+
+        rx.recv().map_err(|_| StoreError::WriterCrashed)?
+    }
+
+    /// WRITE: apply a typestate transition — extracts kind+payload, delegates to append.
+    pub fn apply_transition<From, To, P: Serialize>(
+        &self,
+        coord: &Coordinate,
+        transition: crate::typestate::transition::Transition<From, To, P>,
+    ) -> Result<AppendReceipt, StoreError> {
+        let kind = transition.kind();
+        let payload = transition.into_payload();
+        self.append(coord, kind, &payload)
+    }
+
     /// LIFECYCLE
     pub fn sync(&self) -> Result<(), StoreError> {
         let (tx, rx) = flume::bounded(1);
         self.writer.tx.send(WriterCommand::Sync { respond: tx })
             .map_err(|_| StoreError::WriterCrashed)?;
         rx.recv().map_err(|_| StoreError::WriterCrashed)?
+    }
+
+    /// Snapshot the current index to a destination directory.
+    pub fn snapshot(&self, dest: &std::path::Path) -> Result<(), StoreError> {
+        self.sync()?;
+        // Copy all segment files to dest
+        std::fs::create_dir_all(dest).map_err(StoreError::Io)?;
+        let entries = std::fs::read_dir(&self.config.data_dir).map_err(StoreError::Io)?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "fbat").unwrap_or(false) {
+                let dest_path = dest.join(entry.file_name());
+                std::fs::copy(&path, &dest_path).map_err(StoreError::Io)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Compact: placeholder for segment compaction. Currently a no-op sync.
+    pub fn compact(&self) -> Result<(), StoreError> {
+        // Future: merge segments, remove superseded events.
+        // For now, just sync to ensure durability.
+        self.sync()
     }
 
     pub fn close(self) -> Result<(), StoreError> {
@@ -337,6 +423,17 @@ impl Store {
             global_sequence: self.index.global_sequence(),
         }
     }
+
+    pub fn diagnostics(&self) -> StoreDiagnostics {
+        StoreDiagnostics {
+            event_count: self.index.len(),
+            global_sequence: self.index.global_sequence(),
+            data_dir: self.config.data_dir.clone(),
+            segment_max_bytes: self.config.segment_max_bytes,
+            fd_budget: self.config.fd_budget,
+            restart_policy: self.config.restart_policy.clone(),
+        }
+    }
 }
 
 fn now_us() -> i64 {
@@ -350,4 +447,14 @@ fn now_us() -> i64 {
 pub struct StoreStats {
     pub event_count: usize,
     pub global_sequence: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct StoreDiagnostics {
+    pub event_count: usize,
+    pub global_sequence: u64,
+    pub data_dir: PathBuf,
+    pub segment_max_bytes: u64,
+    pub fd_budget: usize,
+    pub restart_policy: RestartPolicy,
 }

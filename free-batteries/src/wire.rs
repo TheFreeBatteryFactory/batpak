@@ -21,15 +21,15 @@ pub mod u128_bytes {
     use super::*;
 
     pub fn serialize<S: Serializer>(val: &u128, ser: S) -> Result<S::Ok, S::Error> {
-        /// Convert to 16-byte big-endian array, serialize as bytes.
-        /// [DEP:serde::Serializer::serialize_bytes]
+        // Convert to 16-byte big-endian array, serialize as bytes.
+        // [DEP:serde::Serializer::serialize_bytes]
         ser.serialize_bytes(&val.to_be_bytes())
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<u128, D::Error> {
-        /// Accept bytes, convert from big-endian to u128.
-        /// Use a Visitor that handles both byte arrays and sequences.
-        /// [DEP:serde::de::Visitor]
+        // Accept bytes, convert from big-endian to u128.
+        // Use a Visitor that handles both byte arrays and sequences.
+        // [DEP:serde::de::Visitor]
         struct U128Visitor;
         impl<'de> Visitor<'de> for U128Visitor {
             type Value = u128;
@@ -37,13 +37,13 @@ pub mod u128_bytes {
                 f.write_str("16 bytes for u128")
             }
             fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<u128, E> {
-                /// v must be exactly 16 bytes. Convert via from_be_bytes.
+                // v must be exactly 16 bytes. Convert via from_be_bytes.
                 let arr: [u8; 16] = v.try_into().map_err(|_| {
                     E::invalid_length(v.len(), &"16 bytes")
                 })?;
                 Ok(u128::from_be_bytes(arr))
             }
-            /// Also handle seq format (some deserializers emit sequences not bytes)
+            // Also handle seq format (some deserializers emit sequences not bytes)
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<u128, A::Error> {
                 let mut bytes = [0u8; 16];
                 for (i, byte) in bytes.iter_mut().enumerate() {
@@ -71,7 +71,7 @@ pub mod option_u128_bytes {
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Option<u128>, D::Error> {
-        /// Visitor that handles None (nil) and Some(bytes).
+        // Visitor that handles None (nil) and Some(bytes).
         struct OptU128Visitor;
         impl<'de> Visitor<'de> for OptU128Visitor {
             type Value = Option<u128>;
@@ -103,9 +103,9 @@ pub mod vec_u128_bytes {
     use super::*;
 
     pub fn serialize<S: Serializer>(val: &[u128], ser: S) -> Result<S::Ok, S::Error> {
-        /// Serialize as a sequence of [u8; 16] fixed-size arrays (NOT bytes).
-        /// Using arrays ensures serialize and deserialize use the same msgpack
-        /// format (array of arrays, not array of bin). Avoids format mismatch.
+        // Serialize as a sequence of [u8; 16] fixed-size arrays (NOT bytes).
+        // Using arrays ensures serialize and deserialize use the same msgpack
+        // format (array of arrays, not array of bin). Avoids format mismatch.
         use serde::ser::SerializeSeq;
         let mut seq = ser.serialize_seq(Some(val.len()))?;
         for v in val {
@@ -115,7 +115,7 @@ pub mod vec_u128_bytes {
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<u128>, D::Error> {
-        /// Deserialize a sequence of [u8; 16] arrays back to Vec<u128>.
+        // Deserialize a sequence of [u8; 16] arrays back to Vec<u128>.
         struct VecU128Visitor;
         impl<'de> Visitor<'de> for VecU128Visitor {
             type Value = Vec<u128>;
