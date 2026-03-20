@@ -138,6 +138,7 @@ free-batteries/
 │   │   ├── header.rs         # EventHeader (repr(C), deterministic layout)
 │   │   ├── kind.rs           # EventKind (private u16)
 │   │   ├── hash.rs           # HashChain + compute_hash() + verify_chain() (NO trait)
+│   │   ├── u128_bytes.rs     # serde helpers: u128 as [u8;16] BE (see WIRE FORMAT DECISIONS)
 │   │   └── sourcing.rs       # EventSourced<P> + Reactive<P>
 │   │
 │   ├── guard/
@@ -195,21 +196,20 @@ license = "MIT OR Apache-2.0"
 description = "Event-sourced state machines over coordinate spaces"
 
 [features]
-default = ["serde", "blake3"]
-serde = ["dep:serde", "dep:serde_json", "uuid/serde"]
+default = ["blake3"]
 blake3 = ["dep:blake3"]
 redb = ["dep:redb"]
 lmdb = ["dep:heed"]
 
 [dependencies]
 uuid = { version = "1", features = ["v7"] }
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 blake3 = { version = "1", optional = true }
 flume = "0.11"
 crc32fast = "1"
 rmp-serde = "1"
-dashmap = "6"
+dashmap = "5"
 parking_lot = "0.12"
 tracing = "0.1"
 redb = { version = "2", optional = true }
@@ -221,7 +221,6 @@ proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 trybuild = "1"
-serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros"] }
 
 [lints.clippy]
@@ -250,6 +249,51 @@ harness = false
 [[bench]]
 name = "projection_latency"
 harness = false
+```
+
+---
+
+## WIRE FORMAT DECISIONS
+
+```
+MessagePack (rmp-serde) is the ONLY wire format for segments. These decisions
+are load-bearing for golden file tests and cross-language readers.
+
+1. ALL segment serialization uses rmp_serde::to_vec_named() (NOT to_vec()).
+   Named mode preserves field names as map keys. Positional arrays break
+   silently when fields are added or reordered. to_vec_named() survives.
+
+2. u128 fields serialize as [u8; 16] big-endian via a shared serde helper.
+   MessagePack has no native u128. Bare u128 fields cause rmp-serde errors.
+
+   Helper module: src/event/u128_bytes.rs (~20 LOC)
+     pub fn serialize<S: Serializer>(val: &u128, ser: S) -> Result<S::Ok, S::Error>
+       → val.to_be_bytes(), serialize as bytes
+     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<u128, D::Error>
+       → deserialize bytes, u128::from_be_bytes
+
+   For Option<u128>:
+     pub mod option_u128_bytes  (same file, ~15 LOC)
+       serialize: None → serialize_none, Some(v) → v.to_be_bytes()
+       deserialize: visit_none → None, visit_bytes → Some(u128::from_be_bytes)
+
+   Annotated fields (every u128 in a serializable type):
+     EventHeader: event_id, correlation_id
+     EventHeader: causation_id (uses option_u128_bytes)
+     Notification: event_id, correlation_id
+     Notification: causation_id (uses option_u128_bytes)
+     Committed<T>: event_id
+     WaitCondition::Event: event_id
+     CompensationAction::Notify: target_id
+     CompensationAction::Rollback: event_ids (Vec<u128> — use a vec_u128_bytes helper)
+     CompensationAction::Release: resource_ids (Vec<u128> — same helper)
+     Outcome::Pending: resume_token
+
+   Big-endian preserves sort order and is the standard network byte order.
+
+3. Option<T> serializes as msgpack nil for None (default serde behavior).
+   Use #[serde(skip_serializing_if = "Option::is_none", default)] on optional
+   fields for clean forward compatibility.
 ```
 
 ---
@@ -334,7 +378,7 @@ pub struct Region {
     pub entity_prefix: Option<Arc<str>>,
     pub scope: Option<Arc<str>>,
     pub fact: Option<KindFilter>,
-    pub sequence_range: Option<(u32, u32)>,  // per-entity sequence, NOT wall-clock
+    pub clock_range: Option<(u32, u32)>,  // per-entity clock (IndexEntry.clock), NOT global_sequence
 }
 
 pub enum KindFilter {
@@ -411,9 +455,10 @@ The and_then monad fix:
   pub fn and_then<U, F: FnOnce(T) -> Outcome<U> + Clone>(self, f: F) -> Outcome<U>
   Distributes over Batch (recurses into each element).
 
-Serde: #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+Serde: #[derive(Serialize, Deserialize)]  (serde is always available)
   Adjacent tagging: #[serde(tag = "type", content = "data")]
   Durations as u64 millis.
+  All u128 fields use #[serde(with = "crate::event::u128_bytes")] — see WIRE FORMAT DECISIONS.
 ```
 
 ---
@@ -500,13 +545,32 @@ Use project<T: EventSourced>() for typed reconstruction.
 
 ---
 
+### `src/event/u128_bytes.rs`
+
+```
+Shared serde helpers for u128 serialization as [u8; 16] big-endian.
+See WIRE FORMAT DECISIONS. ~50 LOC total.
+
+pub mod u128_bytes      — for plain u128 fields
+pub mod option_u128_bytes — for Option<u128> fields
+pub mod vec_u128_bytes  — for Vec<u128> fields
+
+All use big-endian byte order. All are #[inline].
+```
+
+---
+
 ### `src/event/header.rs`
 
 ```
 #[repr(C)]
+#[derive(Serialize, Deserialize)]
 pub struct EventHeader {
+    #[serde(with = "crate::event::u128_bytes")]
     pub event_id: u128,
+    #[serde(with = "crate::event::u128_bytes")]
     pub correlation_id: u128,
+    #[serde(with = "crate::event::u128_bytes::option_u128_bytes")]
     pub causation_id: Option<u128>,   // which event CAUSED this one (None = root cause)
     pub timestamp_us: i64,
     pub position: DagPosition,
@@ -607,8 +671,8 @@ pub trait EventSourced<P>: Sized {
     fn apply_event(&mut self, event: &Event<P>);
     fn relevant_event_kinds() -> &'static [EventKind];
 }
-P is generic. NO serde_json dependency in the trait.
-The store uses EventSourced<serde_json::Value> via its serde feature.
+P is generic. NO serde_json dependency in the trait definition.
+The store uses EventSourced<serde_json::Value> (serde is always available).
 
 pub trait Reactive<P> {
     fn react(&self, event: &Event<P>) -> Vec<(Coordinate, EventKind, P)>;
@@ -651,7 +715,7 @@ Denial::new(gate, message), with_code, with_context
 Display: "[gate] message"
 Separate from OutcomeError. Library does NOT auto-store denials.
 Products decide whether to persist denials as events.
-Serde: feature-gated.
+Serde: #[derive(Serialize, Deserialize)] (serde is always available).
 ```
 
 ---
@@ -691,7 +755,10 @@ pub struct Committed<T> {
 pub struct Pipeline<Ctx> { gates: GateSet<Ctx> }
   Pipeline::new(gates)
   evaluate(ctx, proposal) -> Result<Receipt<T>, Denial>
-  commit(receipt, commit_fn) -> Result<Committed<T>, E>
+  commit<E>(receipt: Receipt<T>, f: impl FnOnce(T) -> Result<Committed<T>, E>)
+    -> Result<Committed<T>, E>
+  // E is generic. The pipeline doesn't know about StoreError.
+  // Products pass a closure that calls store.append() and wraps the result.
 
 Library owns 2 stages: evaluate + commit.
 Products wrap with assembly (before) and receipt generation (after).
@@ -772,10 +839,36 @@ DIAGNOSTICS:
 Async callers: use tokio::task::spawn_blocking(|| store.append(...)).await
 Or use flume's async API on the channels directly.
 
+Store: Send + Sync. Reader's LRU FD cache behind parking_lot::Mutex.
+  Index is DashMap (Send + Sync). Writer communicates via flume (Send).
+  Config is immutable after open().
+
 Types owned by this module:
   Store, StoreConfig, StoreError (with From<CoordinateError>),
   StoreStats, StoreDiagnostics, StoredEvent<P>, AppendReceipt, AppendOptions,
   RestartPolicy
+
+pub struct AppendOptions {
+    pub expected_sequence: Option<u32>,     // CAS: reject if entity's latest clock != this
+    pub idempotency_key: Option<u128>,      // dedup: skip if key already seen, return original receipt
+    pub correlation_id: Option<u128>,       // override default (self-correlated)
+    pub causation_id: Option<u128>,         // override default (root cause)
+}
+
+pub enum StoreError {
+    Io(std::io::Error),
+    Coordinate(CoordinateError),
+    Serialization(String),
+    CrcMismatch { segment_id: u64, offset: u64 },
+    CorruptSegment { segment_id: u64, detail: String },
+    NotFound(u128),                         // event_id not in index
+    SequenceMismatch { entity: String, expected: u32, actual: u32 }, // CAS failure
+    DuplicateEvent(u128),                   // idempotency_key already seen
+    WriterCrashed,
+    ShuttingDown,
+    CacheFailed(String),
+}
+impl Display, Error, From<CoordinateError>, From<std::io::Error>.
 
 StoreConfig includes:
   data_dir: PathBuf              (default: "./free-batteries-data")
@@ -800,9 +893,12 @@ process supervisor.
 
 ```
 Magic: b"FBAT", Header: 32 bytes, Frame: [len:u32 BE][crc32:u32 BE][msgpack]
+Segment files named: {segment_id:06}.fbat (e.g., 000001.fbat). Sequential u64.
+Cold start scans data_dir alphabetically (zero-padded = chronological order).
 
 SegmentHeader { version: u16, flags: u16, created_ns: i64, segment_id: u64 }
 frame_encode(data) -> Vec<u8>
+  Serialization: rmp_serde::to_vec_named() — ALWAYS named mode (see WIRE FORMAT DECISIONS).
 frame_decode(buf) -> Result<(&[u8], usize), StoreError>
 FramePayload<P> { event: Event<P>, entity: String, scope: String }
 
@@ -826,7 +922,15 @@ WriterHandle { tx: flume::Sender<WriterCommand>, subscribers: Arc<SubscriberList
 struct SubscriberList {
     senders: parking_lot::Mutex<Vec<flume::Sender<Notification>>>,
 }
-  broadcast(notif): iterate, send, retain(ok). NO tokio::broadcast.
+  broadcast(notif): iterate with try_send(), retain on success or Full,
+    prune on Disconnected. NEVER blocking send() — one slow subscriber must
+    not block the writer thread. NO tokio::broadcast.
+    Pattern:
+      senders.retain(|tx| match tx.try_send(notif.clone()) {
+          Ok(()) => true,
+          Err(TrySendError::Full(_)) => true,         // keep, just slow
+          Err(TrySendError::Disconnected(_)) => false, // prune
+      });
   subscribe(capacity) -> flume::Receiver<Notification>
 
 Notification {
@@ -1217,7 +1321,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-features
       - run: cargo check --no-default-features
-      - run: cargo check --features serde
       - run: cargo check --features blake3
       - run: cargo check --features redb
 
@@ -1319,11 +1422,12 @@ Check: cargo tree --duplicates. If duplicates: pin to older.
     nextest.toml, ci.yml, justfile, .gitignore, licenses, changelog)
 3.  Write Cargo.toml
 4.  Implement Layer 0 (coordinate, outcome core, guard trait, typestate, id trait)
+    + event/u128_bytes.rs serde helpers (needed by all layers above)
     → cargo check --no-default-features MUST PASS
-5.  Implement Layer 1 (serde derives on Layer 0 types)
-    → cargo check --features serde MUST PASS
+5.  Implement Layer 1 (serde derives on Layer 0 types using u128_bytes annotations)
+    → cargo check --no-default-features MUST PASS
 6.  Implement Layer 2 (EventId, EventHeader, Event<P>, hash functions)
-    → cargo check --features "serde blake3" MUST PASS
+    → cargo check --features blake3 MUST PASS
 7.  Implement Layer 3 (Store: writer, reader, segment, index, projection, cursor, subscription)
     → cargo check --all-features MUST PASS
 8.  Write tests (monad_laws, hash_chain, store_integration, gate_pipeline,
@@ -1426,7 +1530,7 @@ nobody has hit the wall that demands it):
 ```
 coordinate/    ~160  (Coordinate + Region + CoordinateError + KindFilter + DagPosition)
 outcome/       ~450  (Outcome<T> + OutcomeError + combinators + wait conditions)
-event/         ~400  (Event<P> + StoredEvent + EventHeader + EventKind + hash fns + EventSourced + Reactive)
+event/         ~450  (Event<P> + StoredEvent + EventHeader + EventKind + hash fns + u128_bytes + EventSourced + Reactive)
 guard/         ~250  (Gate + GateSet + Denial + Receipt)
 pipeline/      ~150  (Pipeline + Proposal + Committed + Bypass)
 store/        ~1800  (Store + segment + writer + reader + index + projection + cursor + subscription)
@@ -1543,3 +1647,90 @@ CASCADE ANALYSIS (4 cascading pairs, 3 independent, 0 contradictions):
 
 This document is FINAL. No override layers. No patches. No "THIS SECTION WINS."
 An implementing agent reads top to bottom and builds exactly what's described.
+
+---
+
+## IMPLEMENTATION NOTES
+
+These notes resolve ambiguities an implementing agent would otherwise have to
+guess at. They do not change the architecture — they specify the HOW for
+decisions the PRDs specify the WHAT.
+
+```
+1. ClockKey Ord implementation:
+   impl Ord for ClockKey: compare clock first, then uuid for deterministic
+   tiebreaking of same-clock events. This is the sort order for BTreeMap
+   entries in streams and by_fact indexes.
+
+2. Segment file naming:
+   {segment_id:06}.fbat (e.g., 000001.fbat). segment_id is a sequential u64.
+   Cold start scans data_dir alphabetically — zero-padded means lexicographic
+   sort matches creation order. No gaps assumed (compaction may remove segments).
+
+3. walk_ancestors semantics:
+   Follows the per-entity hash chain (prev_hash links), NOT the causation chain.
+   Each entity's events form a linear hash chain. walk_ancestors starts at an
+   event_id, looks up its HashChain.prev_hash, finds the IndexEntry whose
+   event_hash matches, repeats. N index lookups for depth N. No disk reads
+   needed — the index has hash_chain on every IndexEntry.
+   Causation chain traversal (following causation_id across entities) is a
+   product concern — products use query(region).filter(|e| e.is_caused_by(id)).
+
+4. Writer panic → caller experience:
+   When the writer thread panics, flume's receiver is dropped. The caller
+   blocked on flume::recv() gets RecvError (channel disconnected). Store's
+   append() method catches this and converts to StoreError::WriterCrashed
+   before attempting restart per RestartPolicy. The caller NEVER sees a raw
+   flume error. The in-flight append is lost — the caller must retry.
+
+5. DashMap guard lifetimes in the writer:
+   Extract and clone values from DashMap BEFORE acquiring the entity Mutex.
+   Do NOT hold a DashMap Ref across the 10-step commit. Pattern:
+     let lock = index.entity_locks.entry(entity.clone())
+         .or_insert_with(|| Arc::new(Mutex::new(()))).clone();
+     // DashMap entry guard dropped here (clone gives us the Arc)
+     let _guard = lock.lock();
+     // ... 10-step commit with _guard held ...
+   Similarly for step 2 (prev_hash from latest): clone the IndexEntry out
+   of the DashMap Ref immediately, drop the Ref, then use the cloned value.
+
+6. Store is Send + Sync:
+   - Reader: LRU FD cache behind parking_lot::Mutex → Send + Sync
+   - Index: DashMap → Send + Sync
+   - Writer: flume::Sender → Send + Sync
+   - Config: immutable after open() → Send + Sync
+   The compiler enforces this. If a field isn't Sync, Store won't compile
+   as Sync. No manual unsafe impl needed.
+
+7. MSRV 1.75 workarounds:
+   - File::create_new() requires 1.77. Use OpenOptions::new().write(true)
+     .create_new(true).open(path) instead.
+   - LazyLock requires 1.80. Use OnceLock with get_or_init() instead.
+   - OnceLock::get_or_try_init() requires 1.82. Pre-validate before
+     get_or_init(), or use Once manually.
+   - Unix pread: use std::os::unix::fs::FileExt::read_at() (stable since 1.15).
+     For cross-platform: #[cfg(unix)] read_at, #[cfg(not(unix))] seek+read fallback.
+
+8. serde is non-optional:
+   serde + serde_json are required dependencies (not behind a feature flag).
+   The store's primary API (append with &impl Serialize, get returning
+   serde_json::Value, project) fundamentally requires serialization.
+   Layer 0 types derive(Serialize, Deserialize) unconditionally.
+   blake3, redb, lmdb remain optional features.
+   --no-default-features builds everything except blake3 hashing (which
+   falls back to [0u8; 32] genesis convention).
+
+9. rmp-serde named mode:
+   ALL MessagePack serialization uses rmp_serde::to_vec_named().
+   NEVER use rmp_serde::to_vec() — it serializes structs as positional
+   arrays which break silently when fields are added or reordered.
+   This applies to frame_encode, cache serialization, and any other
+   msgpack path. Deserialization uses rmp_serde::from_slice() (handles both
+   named and positional input, but we always write named).
+
+10. Broadcast is lossy by design:
+    Subscription says "lossy: if subscriber is slow, bounded channel fills."
+    The try_send() pattern in the writer preserves this: Full channels keep
+    the subscriber (they catch up on next send), Disconnected channels prune.
+    For guaranteed delivery, products use Cursor (pull-based, index-backed).
+```
