@@ -27,6 +27,55 @@ One document. No overrides. No layers. Every decision is final. A cloud agent wi
 
 ---
 
+## RED FLAGS (if you do any of these, you violated the design)
+
+```
+✗ DO NOT transmute, mem::read, or pointer-cast EventHeader from raw bytes.
+  repr(C) is for deterministic FIELD ORDERING in Rust, not a wire format.
+  All serialization goes through MessagePack (rmp-serde). Always.
+
+✗ DO NOT add async fn to any public Store method.
+  If you wrote ".await" inside store/mod.rs, you broke Invariant 2.
+  Async lives in flume channels and product code. Not here.
+
+✗ DO NOT add a third RestartPolicy variant.
+  Once and Bounded. That's it. If you're reaching for exponential backoff
+  curves or jitter configs, the product should wrap Store in a supervisor.
+
+✗ DO NOT store product domain types in library code.
+  If your type name contains a business noun (trajectory, agent, artifact,
+  tenant, scope, note, turn), it goes in the product, not the library.
+
+✗ DO NOT auto-store Denials in the event log.
+  The library returns Denial to the caller. The caller decides whether to
+  persist it. Auto-storing creates a DoS vector (spam invalid requests →
+  fill the log with rejections).
+
+✗ DO NOT add a trait for what has one implementation.
+  Store is a struct. ProjectionCache is a trait because it has NoCache +
+  RedbCache + LmdbCache. If your new thing has one impl, it's a struct.
+
+✗ DO NOT bypass the Receipt to commit.
+  If you can call store.append() without a Receipt<T> from the pipeline,
+  you broke the TOCTOU guarantee. The ONLY bypass path is Pipeline::bypass()
+  which produces a BypassReceipt with an auditable reason.
+
+✗ DO NOT use std::time::Duration in serializable types.
+  All durations are u64 milliseconds. Duration doesn't implement Serialize
+  without custom serde impls. u64 millis is portable across languages.
+
+✗ DO NOT assume the index fits in memory forever.
+  10M events ≈ 2-3GB RAM. This is a declared trade-off, not an accident.
+  If your test creates 100K events without a tempdir cleanup, you're
+  leaking real memory. global_sequence exists for future partial loading.
+
+✗ DO NOT put uuid::Uuid in the public API.
+  All IDs are u128. The uuid crate is used internally by define_entity_id!
+  for now_v7() generation. The public surface never exposes Uuid.
+```
+
+---
+
 ## WHAT V1 IS
 
 ```
