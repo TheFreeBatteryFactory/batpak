@@ -75,7 +75,7 @@ free-batteries/
 │   ├── prelude.rs
 │   │
 │   ├── coordinate/
-│   │   ├── mod.rs            # Coordinate (Arc<str>), Region, CoordinateError, EventKindFilter
+│   │   ├── mod.rs            # Coordinate (Arc<str>), Region, CoordinateError, KindFilter
 │   │   └── position.rs       # DagPosition (depth, lane, sequence)
 │   │
 │   ├── outcome/
@@ -265,7 +265,7 @@ Re-exports:
 ### `src/coordinate/mod.rs`
 
 ```
-Coordinate struct + Region struct + CoordinateError + EventKindFilter.
+Coordinate struct + Region struct + CoordinateError + KindFilter.
 
 pub struct Coordinate {
     entity: Arc<str>,   // WHO — stream key, hash chain anchor
@@ -284,11 +284,11 @@ pub enum CoordinateError { EmptyEntity, EmptyScope }
 pub struct Region {
     pub entity_prefix: Option<Arc<str>>,
     pub scope: Option<Arc<str>>,
-    pub fact: Option<EventKindFilter>,
+    pub fact: Option<KindFilter>,
     pub sequence_range: Option<(u32, u32)>,  // per-entity sequence, NOT wall-clock
 }
 
-pub enum EventKindFilter {
+pub enum KindFilter {
     Exact(EventKind),
     Category(u8),    // matches any EventKind in this 4-bit category
     Any,
@@ -299,7 +299,7 @@ Region builder (method chaining):
   Region::entity("player:alice")
   Region::scope("room:dungeon")
   Region::coordinate(&coord)
-  .scope("x").fact(EventKindFilter::Exact(k)).fact_category(0xF)
+  .scope("x").fact(KindFilter::Exact(k)).fact_category(0xF)
 
 Region replaces SubscriptionPattern. It is the ONE predicate type for:
   Applied to history  = query
@@ -686,7 +686,7 @@ WRITE:
     3 params. Store generates event_id, timestamp, position, hash chain.
     correlation_id defaults to event_id (self-correlated). causation_id = None (root cause).
 
-  append_caused_by(&self, coord: &Coordinate, kind: EventKind, payload: &impl Serialize,
+  append_reaction(&self, coord: &Coordinate, kind: EventKind, payload: &impl Serialize,
                     correlation_id: u128, causation_id: u128)
     -> Result<AppendReceipt, StoreError>
     For events caused by another event. Sets both correlation and causation.
@@ -712,7 +712,7 @@ SUBSCRIBE:
 CONVENIENCE (sugar over Region):
   stream(entity) = query(&Region::entity(entity))
   by_scope(scope) = query(&Region::scope(scope))
-  by_fact(kind) = query(&Region::all().fact(EventKindFilter::Exact(kind)))
+  by_fact(kind) = query(&Region::all().fact(KindFilter::Exact(kind)))
 
 LIFECYCLE:
   sync(), snapshot(dest), compact(), close(self)
@@ -1375,7 +1375,7 @@ nobody has hit the wall that demands it):
 ## ESTIMATED LOC
 
 ```
-coordinate/    ~160  (Coordinate + Region + CoordinateError + EventKindFilter + DagPosition)
+coordinate/    ~160  (Coordinate + Region + CoordinateError + KindFilter + DagPosition)
 outcome/       ~450  (Outcome<T> + OutcomeError + combinators + wait conditions)
 event/         ~400  (Event<P> + StoredEvent + EventHeader + EventKind + hash fns + EventSourced + Reactive)
 guard/         ~250  (Gate + GateSet + Denial + Receipt)
@@ -1417,7 +1417,7 @@ All drift corrections verified against this document:
 [✓] blake3 only
     hash.rs: "NO TRAIT. NO ENUM." Two functions + one struct. ~30 LOC.
 
-[✓] EventKindFilter in coordinate/mod.rs
+[✓] KindFilter in coordinate/mod.rs
     Region component, Region lives in coordinate. Internally consistent.
 
 [✓] OutcomeError naming
@@ -1455,7 +1455,7 @@ All drift corrections verified against this document:
     header.rs: causation_id: Option<u128> — which event CAUSED this one.
     Distinct from correlation_id (related vs caused-by).
     None = root cause (user action, external trigger).
-    store.append() defaults to None. store.append_caused_by() sets both.
+    store.append() defaults to None. store.append_reaction() sets both.
 
 [✓] IndexEntry causal fields + methods
     index.rs: correlation_id: u128 + causation_id: Option<u128> on IndexEntry.
