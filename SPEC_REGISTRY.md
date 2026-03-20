@@ -301,6 +301,100 @@ Transition<From, To, P> { kind: EventKind, payload: P, _from: PhantomData, _to: 
 
 EntityIdType: trait (Copy + Clone + Eq + Hash + Debug + Display + FromStr + Send + Sync)
   ::new(u128) .as_u128() .now_v7() .nil()
+
+=== STORE TYPES ===
+
+Store { index: Arc<StoreIndex>, reader: Arc<Reader>, cache: Box<dyn ProjectionCache>,
+        writer: WriterHandle, config: Arc<StoreConfig> }
+  Store: Send + Sync (all fields are Send + Sync)
+  ::open(config: StoreConfig) -> Result<Self, StoreError>
+  ::open_default() -> Result<Self, StoreError>     // ./free-batteries-data/
+  .append(&self, coord, kind, payload: &impl Serialize) -> Result<AppendReceipt, StoreError>
+  .append_reaction(&self, coord, kind, payload, correlation_id: u128, causation_id: u128) -> Result<AppendReceipt, StoreError>
+  .get(event_id: u128) -> Result<StoredEvent<serde_json::Value>, StoreError>
+  .query(region: &Region) -> Vec<IndexEntry>
+  .walk_ancestors(event_id: u128, limit: usize) -> Vec<StoredEvent<Value>>
+  .project<T: EventSourced<Value>>(entity: &str, freshness: Freshness) -> Result<Option<T>, StoreError>
+  .subscribe(region: &Region) -> Subscription
+  .cursor(region: &Region) -> Cursor
+  .stream(entity) .by_scope(scope) .by_fact(kind)  // convenience sugar
+  .sync() .close(self) .stats() -> StoreStats
+
+StoreConfig { data_dir: PathBuf, segment_max_bytes: u64, sync_every_n_events: u32,
+              fd_budget: usize, writer_channel_capacity: usize, broadcast_capacity: usize,
+              cache_map_size_bytes: usize, restart_policy: RestartPolicy, shutdown_drain_limit: usize }
+  All pub. impl Default with sane values.
+
+StoreError: Io(io::Error) | Coordinate(CoordinateError) | Serialization(String)
+  | CrcMismatch{segment_id,offset} | CorruptSegment{segment_id,detail}
+  | NotFound(u128) | SequenceMismatch{entity,expected,actual}
+  | DuplicateEvent(u128) | WriterCrashed | ShuttingDown | CacheFailed(String)
+  impl Display, Error, From<CoordinateError>, From<io::Error>
+
+AppendReceipt { pub event_id: u128, pub sequence: u64, pub disk_pos: DiskPos }
+
+AppendOptions { pub expected_sequence: Option<u32>, pub idempotency_key: Option<u128>,
+                pub correlation_id: Option<u128>, pub causation_id: Option<u128> }
+  impl Default (all None)
+
+RestartPolicy: Once | Bounded { max_restarts: u32, within_ms: u64 }
+  impl Default → Once. EXACTLY two variants. [SPEC:RED FLAGS]
+
+StoreIndex — pub(crate). Fields: streams, scope_entities, by_fact, by_id, latest,
+  global_sequence: AtomicU64, len: AtomicUsize, entity_locks: DashMap
+  .insert(entry) .get_by_id(u128) .get_latest(&str) .stream(&str) .query(&Region)
+  .global_sequence() -> u64 .len() -> usize
+
+IndexEntry { pub event_id: u128, pub correlation_id: u128, pub causation_id: Option<u128>,
+             pub coord: Coordinate, pub kind: EventKind, pub clock: u32,
+             pub hash_chain: HashChain, pub disk_pos: DiskPos, pub global_sequence: u64 }
+  .is_correlated() -> bool    (event_id != correlation_id)
+  .is_caused_by(u128) -> bool (causation_id == Some(id))
+  .is_root_cause() -> bool    (causation_id.is_none())
+
+ClockKey { pub clock: u32, pub uuid: u128 }
+  impl Ord: clock first, uuid tiebreak. [SPEC:IMPLEMENTATION NOTES item 1]
+
+DiskPos { pub segment_id: u64, pub offset: u64, pub length: u32 }
+
+WriterHandle — pub(crate) { pub tx: Sender<WriterCommand>, pub subscribers: Arc<SubscriberList>, thread }
+  ::spawn(config, index, subscribers) -> Result<Self, StoreError>
+  .tx is pub(crate) — Store sends commands directly, no wrapper method.
+
+WriterCommand: Append{entity,scope,event,kind,correlation_id,causation_id,respond}
+  | Sync{respond} | Shutdown{respond}
+
+SubscriberList { senders: Mutex<Vec<Sender<Notification>>> }
+  .subscribe(capacity) -> Receiver<Notification>
+  .broadcast(Notification)  // try_send, retain on Ok|Full, prune on Disconnected
+
+Notification: Clone + Debug
+  { pub event_id: u128, pub correlation_id: u128, pub causation_id: Option<u128>,
+    pub coord: Coordinate, pub kind: EventKind, pub sequence: u64 }
+
+Cursor { region: Region, position: u64, index: Arc<StoreIndex> }
+  .poll() -> Option<IndexEntry>
+  .poll_batch(max: usize) -> Vec<IndexEntry>
+
+Subscription { rx: Receiver<Notification>, region: Region }
+  .recv() -> Option<Notification>               // sync, blocks, filters by region
+  .receiver() -> &Receiver<Notification>         // for async: rx.recv_async().await
+
+ProjectionCache: trait (Send + Sync + 'static)
+  .get(key: &[u8]) -> Result<Option<(Vec<u8>, CacheMeta)>, StoreError>
+  .put(key: &[u8], value: &[u8], meta: CacheMeta) -> Result<(), StoreError>
+  .delete_prefix(prefix: &[u8]) -> Result<u64, StoreError>
+  .sync() -> Result<(), StoreError>
+
+CacheMeta { pub watermark: u64, pub cached_at_us: i64 }
+Freshness: Consistent | BestEffort { max_stale_ms: u64 }
+NoCache — default, always miss, forces replay from segments
+
+SegmentHeader { pub version: u16, pub flags: u16, pub created_ns: i64, pub segment_id: u64 }
+FramePayload<P> { pub event: Event<P>, pub entity: String, pub scope: String }
+Segment<Active> — writable. Segment<Sealed> — immutable. Typestate transition via .seal()
+
+StoreStats { pub event_count: usize, pub global_sequence: u64 }
 ```
 
 ---
@@ -2356,13 +2450,96 @@ impl StoreIndex {
     }
 
     pub(crate) fn query(&self, region: &crate::coordinate::Region) -> Vec<IndexEntry> {
-        /// Apply Region filters to index. Strategy depends on which fields are set.
-        /// entity_prefix set → scan streams matching prefix
-        /// scope set → scan scope_entities, collect matching entity streams
-        /// fact set → scan by_fact index
-        /// Combine results, apply clock_range filter if set.
-        /// This is the core query engine. ~50-80 LOC.
-        todo!("Implement region-based query — see SPEC:src/store/mod.rs READ section")
+        /// Region query strategy:
+        /// 1. Determine candidate set based on most selective filter
+        /// 2. Apply remaining filters to narrow results
+        /// 3. Apply clock_range last (it's per-entity, cheap)
+        use crate::coordinate::KindFilter;
+
+        let mut candidates: Vec<IndexEntry> = if let Some(ref prefix) = region.entity_prefix {
+            /// Entity prefix → scan streams map for matching keys
+            /// [DEP:dashmap::DashMap::iter] — NOT a consistent snapshot, fine for queries
+            self.streams.iter()
+                .filter(|r| r.key().as_ref().starts_with(prefix.as_ref()))
+                .flat_map(|r| r.value().values().cloned())
+                .collect()
+        } else if let Some(ref scope) = region.scope {
+            /// Scope → look up entities in scope, collect their streams
+            if let Some(entities) = self.scope_entities.get(scope.as_ref()) {
+                entities.value().iter()
+                    .flat_map(|entity| {
+                        self.streams.get(entity.as_ref())
+                            .map(|r| r.value().values().cloned().collect::<Vec<_>>())
+                            .unwrap_or_default()
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else if let Some(ref fact) = region.fact {
+            /// Fact filter without entity/scope → scan by_fact index
+            match fact {
+                KindFilter::Exact(k) => {
+                    self.by_fact.get(k)
+                        .map(|r| r.value().values().cloned().collect())
+                        .unwrap_or_default()
+                }
+                KindFilter::Category(c) => {
+                    let cat = *c;
+                    self.by_fact.iter()
+                        .filter(|r| r.key().category() == cat)
+                        .flat_map(|r| r.value().values().cloned())
+                        .collect()
+                }
+                KindFilter::Any => {
+                    /// No filter at all — return everything (expensive, use sparingly)
+                    self.streams.iter()
+                        .flat_map(|r| r.value().values().cloned())
+                        .collect()
+                }
+            }
+        } else {
+            /// Region::all() with no filters — return everything
+            self.streams.iter()
+                .flat_map(|r| r.value().values().cloned())
+                .collect()
+        };
+
+        /// Apply remaining filters that weren't used for the initial candidate set.
+
+        /// Scope filter (if entity_prefix was the primary selector)
+        if region.entity_prefix.is_some() {
+            if let Some(ref scope) = region.scope {
+                candidates.retain(|e| e.coord.scope() == scope.as_ref());
+            }
+        }
+
+        /// Entity prefix filter (if scope was the primary selector)
+        if region.scope.is_some() && region.entity_prefix.is_none() {
+            if let Some(ref prefix) = region.entity_prefix {
+                candidates.retain(|e| e.coord.entity().starts_with(prefix.as_ref()));
+            }
+        }
+
+        /// Fact filter (if not already applied)
+        if region.entity_prefix.is_some() || region.scope.is_some() {
+            if let Some(ref fact) = region.fact {
+                candidates.retain(|e| match fact {
+                    KindFilter::Exact(k) => e.kind == *k,
+                    KindFilter::Category(c) => e.kind.category() == *c,
+                    KindFilter::Any => true,
+                });
+            }
+        }
+
+        /// Clock range filter (always per-entity clock, not global_sequence)
+        if let Some((min, max)) = region.clock_range {
+            candidates.retain(|e| e.clock >= min && e.clock <= max);
+        }
+
+        /// Sort by global_sequence for consistent ordering
+        candidates.sort_by_key(|e| e.global_sequence);
+        candidates
     }
 
     pub(crate) fn global_sequence(&self) -> u64 {
@@ -2657,12 +2834,62 @@ impl Reader {
             });
         }
 
-        /// Parse segment header (after magic)
-        /// ... skip header bytes, start reading frames
-        /// Each frame: frame_decode → FramePayload<Value> → ScannedEntry
-        /// Collect into Vec<ScannedEntry>
-        /// ~30-40 LOC of frame iteration
-        todo!("frame-by-frame scan — see segment::frame_decode")
+        /// Extract segment_id from filename: "000042.fbat" → 42
+        let segment_id = path.file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        /// Skip magic (4 bytes). Parse segment header from msgpack.
+        /// [DEP:rmp_serde::from_slice] — deserialize SegmentHeader
+        let after_magic = &all_bytes[4..];
+        let _header: segment::SegmentHeader = rmp_serde::from_slice(after_magic)
+            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+
+        /// Find where header ends and frames begin.
+        /// Re-encode header to measure its serialized size (simplest approach).
+        let header_bytes = rmp_serde::to_vec_named(&_header)
+            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let mut cursor = 4 + header_bytes.len();
+
+        /// Read frames until EOF. Each frame: [len:u32 BE][crc32:u32 BE][msgpack]
+        let mut entries = Vec::new();
+        while cursor < all_bytes.len() {
+            let remaining = &all_bytes[cursor..];
+            if remaining.len() < 8 { break; } // not enough for a frame header
+
+            let frame_offset = cursor as u64;
+            match segment::frame_decode(remaining) {
+                Ok((msgpack, frame_size)) => {
+                    /// Deserialize frame payload
+                    match rmp_serde::from_slice::<FramePayload<serde_json::Value>>(msgpack) {
+                        Ok(payload) => {
+                            entries.push(ScannedEntry {
+                                event: payload.event,
+                                entity: payload.entity,
+                                scope: payload.scope,
+                                segment_id,
+                                offset: frame_offset,
+                                length: frame_size as u32,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                segment_id, offset = frame_offset,
+                                "skipping unreadable frame: {e}"
+                            );
+                        }
+                    }
+                    cursor += frame_size;
+                }
+                Err(StoreError::CrcMismatch { .. }) => {
+                    tracing::warn!(segment_id, offset = frame_offset, "CRC mismatch, skipping frame");
+                    break; // CRC mismatch = stop scanning this segment
+                }
+                Err(_) => break, // truncated or corrupt — stop
+            }
+        }
+        Ok(entries)
     }
 
     fn get_fd(&self, segment_id: u64) -> Result<File, StoreError> {
@@ -2826,20 +3053,10 @@ impl WriterHandle {
         Ok(Self { tx, subscribers, thread: Some(thread) })
     }
 
-    /// Send an append command. Blocks if channel full (backpressure).
-    /// On flume error (writer thread panicked): returns StoreError::WriterCrashed.
-    /// [SPEC:IMPLEMENTATION NOTES item 4 — Writer panic → caller experience]
-    pub(crate) fn send_append(
-        &self, cmd: WriterCommand,
-    ) -> Result<Receiver<Result<AppendReceipt, StoreError>>, StoreError> {
-        /// Extract the respond receiver before sending (we return it to caller)
-        /// Actually, the caller creates the one-shot channel and passes the sender in cmd.
-        /// This method just sends the command through the main channel.
-        self.tx.send(cmd).map_err(|_| StoreError::WriterCrashed)?;
-        /// Caller already has the rx side of the respond channel.
-        /// This is a simplified API — real impl threads the channel through.
-        todo!("wire through respond channel")
-    }
+    /// NOTE: No send_append() method here. Store::append() and Store::append_reaction()
+    /// in store/mod.rs create one-shot flume channels and send WriterCommands directly
+    /// via self.writer.tx.send(). This avoids an unnecessary abstraction layer.
+    /// WriterHandle.tx is pub(crate) for direct access. [SPEC:INVARIANTS item 4]
 }
 
 /// The writer's main loop. Runs on the background thread.
