@@ -1,0 +1,4 @@
+# NOTE: Profile settings ([profile.*]) belong in Cargo.toml, NOT here.
+# .cargo/config.toml is for build settings only.
+[build]
+# rustflags set in CI via env var, not here
