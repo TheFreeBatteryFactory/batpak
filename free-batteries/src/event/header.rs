@@ -1,0 +1,66 @@
+use crate::coordinate::DagPosition;
+use crate::event::EventKind;
+use serde::{Deserialize, Serialize};
+
+/// EventHeader: metadata for every event. Store generates this — users don't call new directly.
+/// repr(C) for deterministic field ordering (NOT a wire format — msgpack handles serialization).
+/// [SPEC:src/event/header.rs]
+#[repr(C)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventHeader {
+    #[serde(with = "crate::wire::u128_bytes")]
+    pub event_id: u128,
+    #[serde(with = "crate::wire::u128_bytes")]
+    pub correlation_id: u128,
+    #[serde(with = "crate::wire::option_u128_bytes")]
+    pub causation_id: Option<u128>,
+    pub timestamp_us: i64,
+    pub position: DagPosition,
+    pub payload_size: u32,
+    pub event_kind: EventKind,
+    pub flags: u8,
+}
+
+impl EventHeader {
+    pub fn new(
+        event_id: u128,
+        correlation_id: u128,
+        causation_id: Option<u128>,
+        timestamp_us: i64,
+        position: DagPosition,
+        payload_size: u32,
+        event_kind: EventKind,
+    ) -> Self {
+        Self {
+            event_id,
+            correlation_id,
+            causation_id,
+            timestamp_us,
+            position,
+            payload_size,
+            event_kind,
+            flags: 0,
+        }
+    }
+
+    pub fn with_flags(mut self, flags: u8) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    pub fn requires_ack(&self) -> bool {
+        self.flags & 0x01 != 0
+    }
+
+    pub fn is_transactional(&self) -> bool {
+        self.flags & 0x02 != 0
+    }
+
+    pub fn is_replay(&self) -> bool {
+        self.flags & 0x08 != 0
+    }
+
+    pub fn age_us(&self, now_us: i64) -> u64 {
+        (now_us - self.timestamp_us) as u64
+    }
+}
