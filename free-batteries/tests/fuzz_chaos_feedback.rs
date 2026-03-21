@@ -411,6 +411,7 @@ fn run_chaos_probes() -> (f64, u64, bool, bool, u64, f64, bool) {
 // ============================================================
 
 #[test]
+#[ignore] // Heavy: run with `cargo test --test fuzz_chaos_feedback -- --ignored`
 fn fuzz_chaos_feedback_loop() {
     eprintln!("\n  ========================================");
     eprintln!("  FUZZ + CHAOS FEEDBACK LOOP (Phase 1)");

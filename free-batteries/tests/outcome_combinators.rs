@@ -1010,3 +1010,40 @@ fn outcome_error_with_compensation() {
          Common causes: compensation field dropped or not preserved in OutcomeError struct.\n\
          Run: cargo test --test outcome_combinators");
 }
+
+/// Regression test: join_all and flatten must not require T: Clone.
+/// Both previously had spurious Clone bounds that rejected valid non-Clone payloads.
+/// [FILE:src/outcome/combine.rs — join_all]
+/// [FILE:src/outcome/mod.rs — flatten]
+#[test]
+fn join_all_and_flatten_accept_non_clone_types() {
+    use free_batteries::outcome::combine::{join_all, join_any};
+
+    // A type that is deliberately NOT Clone or Copy.
+    struct Unique(u64);
+
+    // join_all: should compile and work with non-Clone T
+    let outcomes = vec![Outcome::Ok(Unique(1)), Outcome::Ok(Unique(2))];
+    let joined = join_all(outcomes);
+    assert!(
+        matches!(&joined, Outcome::Ok(v) if v.len() == 2),
+        "JOIN_ALL NON-CLONE REGRESSION: join_all should accept non-Clone types.\n\
+         Investigate: src/outcome/combine.rs join_all generic bounds.\n\
+         Run: cargo test --test outcome_combinators join_all_and_flatten"
+    );
+
+    // join_any: already accepted non-Clone (control check)
+    let outcomes2 = vec![Outcome::Ok(Unique(10)), Outcome::Ok(Unique(20))];
+    let any = join_any(outcomes2);
+    assert!(matches!(any, Outcome::Ok(Unique(10))));
+
+    // flatten: should compile and work with non-Clone T
+    let nested: Outcome<Outcome<Unique>> = Outcome::Ok(Outcome::Ok(Unique(42)));
+    let flat = nested.flatten();
+    assert!(
+        matches!(flat, Outcome::Ok(Unique(42))),
+        "FLATTEN NON-CLONE REGRESSION: flatten should accept non-Clone types.\n\
+         Investigate: src/outcome/mod.rs impl Outcome<Outcome<T>> flatten.\n\
+         Run: cargo test --test outcome_combinators join_all_and_flatten"
+    );
+}

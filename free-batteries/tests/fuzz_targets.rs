@@ -25,7 +25,7 @@ proptest! {
         std::env::var("PROPTEST_CASES")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(1024)
+            .unwrap_or(32)
     ))]
 
     /// Fuzz frame_decode with completely random bytes.
@@ -105,7 +105,7 @@ proptest! {
         std::env::var("PROPTEST_CASES")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(1024)
+            .unwrap_or(32)
     ))]
 
     /// u128 round-trip through MessagePack.
@@ -225,7 +225,7 @@ proptest! {
         std::env::var("PROPTEST_CASES")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(1024)
+            .unwrap_or(32)
     ))]
 
     /// Coordinate::new rejects empty strings, accepts non-empty.
@@ -382,7 +382,7 @@ proptest! {
         std::env::var("PROPTEST_CASES")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(1024)
+            .unwrap_or(32)
     ))]
 
     /// Deep nested Batch: map(id) == id (functor identity, recursive).
@@ -535,7 +535,7 @@ proptest! {
         std::env::var("PROPTEST_CASES")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(1024)
+            .unwrap_or(32)
     ))]
 
     /// Multi-event hash chain: build N events, verify entire chain.

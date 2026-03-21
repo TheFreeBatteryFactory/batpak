@@ -444,7 +444,7 @@ impl Store {
             let is_fresh = match freshness {
                 Freshness::Consistent => meta.watermark == watermark,
                 Freshness::BestEffort { max_stale_ms } => {
-                    let age_us = now_us().saturating_sub(meta.cached_at_us);
+                    let age_us = now_us().saturating_sub(meta.cached_at_us).max(0);
                     age_us < (*max_stale_ms as i64) * 1000
                 }
             };
@@ -693,7 +693,7 @@ impl Store {
             merged_id,
         )?;
 
-        // 5. Write kept events to merged segment, updating index
+        // 5. Write kept events to merged segment
         for entry in &kept_events {
             let frame_payload = segment::FramePayload {
                 event: entry.event.clone(),
@@ -701,15 +701,7 @@ impl Store {
                 scope: entry.scope.clone(),
             };
             let frame = segment::frame_encode(&frame_payload)?;
-            let offset = merged_segment.write_frame(&frame)?;
-
-            // Update index disk_pos
-            let new_pos = DiskPos {
-                segment_id: merged_id,
-                offset,
-                length: frame.len() as u32,
-            };
-            self.index.update_disk_pos(entry.event.header.event_id, new_pos);
+            merged_segment.write_frame(&frame)?;
         }
 
         merged_segment.sync()?;
@@ -725,6 +717,46 @@ impl Store {
             }
             std::fs::remove_file(path).map_err(StoreError::Io)?;
             segments_removed += 1;
+        }
+
+        // 7. Rebuild index from all remaining segments on disk.
+        // This guarantees consistency for Retention (dropped events removed)
+        // and Tombstone (event_kind updated in index).
+        self.index.clear();
+        let mut remaining: Vec<std::fs::DirEntry> = std::fs::read_dir(&self.config.data_dir)
+            .map_err(StoreError::Io)?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "fbat")
+                    .unwrap_or(false)
+            })
+            .collect();
+        remaining.sort_by_key(|e| e.file_name());
+
+        for dir_entry in &remaining {
+            let scanned = self.reader.scan_segment(&dir_entry.path())?;
+            for se in scanned {
+                let coord = Coordinate::new(&se.entity, &se.scope)?;
+                let clock = se.event.header.position.sequence;
+                let entry = IndexEntry {
+                    event_id: se.event.header.event_id,
+                    correlation_id: se.event.header.correlation_id,
+                    causation_id: se.event.header.causation_id,
+                    coord,
+                    kind: se.event.header.event_kind,
+                    clock,
+                    hash_chain: se.event.hash_chain.clone().unwrap_or_default(),
+                    disk_pos: DiskPos {
+                        segment_id: se.segment_id,
+                        offset: se.offset,
+                        length: se.length,
+                    },
+                    global_sequence: self.index.global_sequence(),
+                };
+                self.index.insert(entry);
+            }
         }
 
         Ok(segment::CompactionResult { segments_removed, bytes_reclaimed })

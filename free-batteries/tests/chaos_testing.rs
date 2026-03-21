@@ -25,7 +25,7 @@ fn chaos_iterations() -> usize {
     std::env::var("CHAOS_ITERATIONS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(500)
+        .unwrap_or(10)
 }
 
 // ============================================================

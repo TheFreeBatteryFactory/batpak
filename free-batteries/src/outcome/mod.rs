@@ -262,7 +262,7 @@ impl<T> Outcome<T> {
 /// Implemented on the nested type (like Option::flatten), not as a bounded
 /// method on Outcome<T>. This is join in category theory: join = bind(id).
 /// Composes with and_then (the monad bind, proptest-proven).
-impl<T: Clone> Outcome<Outcome<T>> {
+impl<T> Outcome<Outcome<T>> {
     pub fn flatten(self) -> Outcome<T> {
         self.and_then(|inner| inner)
     }

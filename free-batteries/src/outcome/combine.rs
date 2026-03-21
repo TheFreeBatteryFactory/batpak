@@ -93,7 +93,7 @@ pub fn zip<A: Clone, B: Clone>(a: Outcome<A>, b: Outcome<B>) -> Outcome<(A, B)> 
 /// join_all: collect a Vec of outcomes into an outcome of Vec.
 /// All must be Ok for the result to be Ok. First Err short-circuits.
 /// [SPEC:src/outcome/combine.rs]
-pub fn join_all<T: Clone>(outcomes: Vec<Outcome<T>>) -> Outcome<Vec<T>> {
+pub fn join_all<T>(outcomes: Vec<Outcome<T>>) -> Outcome<Vec<T>> {
     let mut results = Vec::with_capacity(outcomes.len());
     for outcome in outcomes {
         match outcome {
@@ -126,12 +126,21 @@ pub fn join_all<T: Clone>(outcomes: Vec<Outcome<T>>) -> Outcome<Vec<T>> {
                 // Flatten: join_all on the inner batch, then continue collecting.
                 match join_all(inner) {
                     Outcome::Ok(vs) => results.extend(vs),
-                    other => {
-                        return other.map(|mut vs| {
-                            let mut r = results;
-                            r.append(&mut vs);
-                            r
-                        })
+                    Outcome::Err(e) => return Outcome::Err(e),
+                    Outcome::Cancelled { reason } => return Outcome::Cancelled { reason },
+                    Outcome::Retry { after_ms, attempt, max_attempts, reason } => {
+                        return Outcome::Retry { after_ms, attempt, max_attempts, reason };
+                    }
+                    Outcome::Pending { condition, resume_token } => {
+                        return Outcome::Pending { condition, resume_token };
+                    }
+                    Outcome::Batch(vs) => {
+                        // Nested batch from recursive join_all — extend results
+                        for item in vs {
+                            if let Outcome::Ok(v) = item {
+                                results.extend(v);
+                            }
+                        }
                     }
                 }
             }
