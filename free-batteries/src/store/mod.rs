@@ -25,6 +25,7 @@ use std::sync::Arc;
 /// Store: the runtime. Sync API. Send + Sync.
 /// [SPEC:src/store/mod.rs]
 /// Invariant 2: ALL METHODS ARE SYNC. No .await anywhere.
+#[allow(unexpected_cfgs)]
 #[cfg(feature = "async-store")]
 compile_error!("INVARIANT 2: Store API is sync. Use spawn_blocking or flume recv_async.");
 

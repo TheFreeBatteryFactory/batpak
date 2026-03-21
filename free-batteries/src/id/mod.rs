@@ -67,5 +67,5 @@ macro_rules! define_entity_id {
     };
 }
 
-/// Library defines ONE id type.
+// Library defines ONE id type.
 define_entity_id!(EventId, "event");

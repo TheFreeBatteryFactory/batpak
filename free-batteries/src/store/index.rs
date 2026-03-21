@@ -167,7 +167,7 @@ impl StoreIndex {
             self.streams
                 .iter()
                 .filter(|r| r.key().as_ref().starts_with(prefix.as_ref()))
-                .flat_map(|r| r.value().values().cloned())
+                .flat_map(|r| r.value().values().cloned().collect::<Vec<_>>())
                 .collect()
         } else if let Some(ref scope) = region.scope {
             // Scope → look up entities in scope, collect their streams
@@ -199,14 +199,14 @@ impl StoreIndex {
                     self.by_fact
                         .iter()
                         .filter(|r| r.key().category() == cat)
-                        .flat_map(|r| r.value().values().cloned())
+                        .flat_map(|r| r.value().values().cloned().collect::<Vec<_>>())
                         .collect()
                 }
                 KindFilter::Any => {
                     // No filter at all — return everything (expensive, use sparingly)
                     self.streams
                         .iter()
-                        .flat_map(|r| r.value().values().cloned())
+                        .flat_map(|r| r.value().values().cloned().collect::<Vec<_>>())
                         .collect()
                 }
             }
@@ -214,7 +214,7 @@ impl StoreIndex {
             // Region::all() with no filters — return everything
             self.streams
                 .iter()
-                .flat_map(|r| r.value().values().cloned())
+                .flat_map(|r| r.value().values().cloned().collect::<Vec<_>>())
                 .collect()
         };
 
@@ -227,12 +227,10 @@ impl StoreIndex {
             }
         }
 
-        // Entity prefix filter (if scope was the primary selector)
-        if region.scope.is_some() && region.entity_prefix.is_none() {
-            if let Some(ref prefix) = region.entity_prefix {
-                candidates.retain(|e| e.coord.entity().starts_with(prefix.as_ref()));
-            }
-        }
+        // Entity prefix filter: not needed here. When scope is the primary selector
+        // and entity_prefix is Some, it's applied during initial candidate selection.
+        // (Dead logic removed — the old guard `scope.is_some() && entity_prefix.is_none()`
+        // made the inner `if let Some(prefix) = entity_prefix` unreachable.)
 
         // Fact filter (if not already applied)
         if region.entity_prefix.is_some() || region.scope.is_some() {

@@ -13,8 +13,7 @@ struct Counter {
 }
 
 impl EventSourced<serde_json::Value> for Counter {
-    fn apply(&mut self, event: &Event<serde_json::Value>) {
-        let _ = event;
+    fn apply_event(&mut self, _event: &Event<serde_json::Value>) {
         self.count += 1;
     }
 
@@ -24,9 +23,14 @@ impl EventSourced<serde_json::Value> for Counter {
         }
         let mut state = Self::default();
         for event in events {
-            state.apply(event);
+            state.apply_event(event);
         }
         Some(state)
+    }
+
+    fn relevant_event_kinds() -> &'static [EventKind] {
+        static KINDS: [EventKind; 1] = [EventKind::custom(0xF, 1)];
+        &KINDS
     }
 }
 

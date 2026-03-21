@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 //! free-batteries: Event Sourcing Runtime with DAG Causation Tracking.
 //!
 //! Free-batteries provides a complete event sourcing platform with:
@@ -45,6 +46,7 @@ pub mod id;
 pub mod prelude;
 
 /// compile_error guards for impossible configurations:
+#[allow(unexpected_cfgs)]
 #[cfg(feature = "async-store")]
 compile_error!(
     "INVARIANT 2: free-batteries does not have an async Store API. \
@@ -52,6 +54,7 @@ compile_error!(
      See: src/store/subscription.rs for the async pattern."
 );
 
+#[allow(unexpected_cfgs)]
 #[cfg(feature = "sha256")]
 compile_error!(
     "INVARIANT 5: blake3 is the only hash. No HashAlgorithm enum. \

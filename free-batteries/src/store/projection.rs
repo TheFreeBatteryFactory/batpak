@@ -79,8 +79,12 @@ impl ProjectionCache for RedbCache {
                     return Ok(None);
                 }
                 let (value, meta_bytes) = bytes.split_at(bytes.len() - 16);
-                let watermark = u64::from_le_bytes(meta_bytes[..8].try_into().unwrap());
-                let cached_at_us = i64::from_le_bytes(meta_bytes[8..16].try_into().unwrap());
+                let watermark = u64::from_le_bytes(
+                    meta_bytes[..8].try_into().expect("split guarantees 16 bytes"),
+                );
+                let cached_at_us = i64::from_le_bytes(
+                    meta_bytes[8..16].try_into().expect("split guarantees 16 bytes"),
+                );
                 Ok(Some((value.to_vec(), CacheMeta { watermark, cached_at_us })))
             }
             Ok(None) => Ok(None),
@@ -113,6 +117,7 @@ impl ProjectionCache for RedbCache {
     }
 
     fn delete_prefix(&self, prefix: &[u8]) -> Result<u64, StoreError> {
+        use redb::ReadableTable;
         // redb has no built-in delete_prefix. Iterate range + collect keys + delete.
         let txn = self
             .db
@@ -123,7 +128,7 @@ impl ProjectionCache for RedbCache {
             let mut table = txn
                 .open_table(CACHE_TABLE)
                 .map_err(|e| StoreError::CacheFailed(e.to_string()))?;
-            // Range: prefix..prefix_with_ff_appended
+            // Range: prefix..prefix_end (increment last non-0xFF byte)
             let mut end = prefix.to_vec();
             end.push(0xFF);
             let keys: Vec<Vec<u8>> = table
@@ -195,8 +200,12 @@ impl ProjectionCache for LmdbCache {
         {
             Some(bytes) if bytes.len() >= 16 => {
                 let (value, meta_bytes) = bytes.split_at(bytes.len() - 16);
-                let watermark = u64::from_le_bytes(meta_bytes[..8].try_into().unwrap());
-                let cached_at_us = i64::from_le_bytes(meta_bytes[8..16].try_into().unwrap());
+                let watermark = u64::from_le_bytes(
+                    meta_bytes[..8].try_into().expect("split guarantees 16 bytes"),
+                );
+                let cached_at_us = i64::from_le_bytes(
+                    meta_bytes[8..16].try_into().expect("split guarantees 16 bytes"),
+                );
                 Ok(Some((value.to_vec(), CacheMeta { watermark, cached_at_us })))
             }
             _ => Ok(None),
@@ -222,15 +231,31 @@ impl ProjectionCache for LmdbCache {
     }
 
     fn delete_prefix(&self, prefix: &[u8]) -> Result<u64, StoreError> {
-        // heed has built-in delete_prefix! One line.
+        // heed does NOT have delete_prefix. Use prefix_iter_mut + del_current.
         let mut txn = self
             .env
             .write_txn()
             .map_err(|e| StoreError::CacheFailed(e.to_string()))?;
-        let count = self
+        let mut iter = self
             .db
-            .delete_prefix(&mut txn, prefix)
-            .map_err(|e| StoreError::CacheFailed(e.to_string()))? as u64;
+            .prefix_iter_mut(&mut txn, prefix)
+            .map_err(|e| StoreError::CacheFailed(e.to_string()))?;
+        let mut count = 0u64;
+        while iter
+            .next()
+            .transpose()
+            .map_err(|e| StoreError::CacheFailed(e.to_string()))?
+            .is_some()
+        {
+            // SAFETY: We do not hold any references to the current entry;
+            // the .is_some() check consumed the Option without binding.
+            unsafe {
+                iter.del_current()
+                    .map_err(|e| StoreError::CacheFailed(e.to_string()))?;
+            }
+            count += 1;
+        }
+        drop(iter);
         txn.commit()
             .map_err(|e| StoreError::CacheFailed(e.to_string()))?;
         Ok(count)
