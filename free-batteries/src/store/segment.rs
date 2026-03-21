@@ -4,12 +4,12 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 // NOTE: No `use crate::wire::*` needed. serde(with) resolves via string path.
 
-/// Segment file format: magic + header + frames.
-/// Magic: b"FBAT" (4 bytes). Header: 32 bytes. Frame: [len:u32 BE][crc32:u32 BE][msgpack]
-/// Files named: {segment_id:06}.fbat (e.g., 000001.fbat). Sequential u64.
+/// Segment file format: magic(4) + header_len(4 BE) + header(msgpack) + frames
+/// Frame: [len:u32 BE][crc32:u32 BE][msgpack]
+/// Files named: {segment_id:06}.fbat. Sequential u64.
 /// [SPEC:src/store/segment.rs]
 pub const SEGMENT_MAGIC: &[u8; 4] = b"FBAT";
-pub const SEGMENT_HEADER_SIZE: usize = 32;
+pub const SEGMENT_EXTENSION: &str = "fbat";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SegmentHeader {
@@ -66,6 +66,7 @@ pub fn frame_encode<T: serde::Serialize>(data: &T) -> Result<Vec<u8>, StoreError
 /// Error from frame_decode. Does not include segment_id — the caller
 /// wraps this with the correct segment context.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum FrameDecodeError {
     TooShort,
     Truncated { expected_len: usize, available: usize },
@@ -107,7 +108,7 @@ pub fn frame_decode(buf: &[u8]) -> Result<(&[u8], usize), FrameDecodeError> {
 
 /// Segment naming helper.
 pub fn segment_filename(segment_id: u64) -> String {
-    format!("{:06}.fbat", segment_id)
+    format!("{:06}.{}", segment_id, SEGMENT_EXTENSION)
 }
 
 impl Segment<Active> {
@@ -132,17 +133,19 @@ impl Segment<Active> {
             segment_id,
         };
 
-        // Write magic + header
+        // Write magic + header_len(u32 BE) + header(msgpack)
         file.write_all(SEGMENT_MAGIC).map_err(StoreError::Io)?;
         let header_bytes = rmp_serde::to_vec_named(&header)
             .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let header_len = (header_bytes.len() as u32).to_be_bytes();
+        file.write_all(&header_len).map_err(StoreError::Io)?;
         file.write_all(&header_bytes).map_err(StoreError::Io)?;
 
         Ok(Self {
             header,
             path,
             file: Some(file),
-            written_bytes: (4 + header_bytes.len()) as u64,
+            written_bytes: (4 + 4 + header_bytes.len()) as u64, // magic + len + header
             _state: std::marker::PhantomData,
         })
     }

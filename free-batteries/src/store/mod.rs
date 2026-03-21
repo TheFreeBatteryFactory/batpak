@@ -41,9 +41,20 @@ pub struct Store {
     config: Arc<StoreConfig>,
 }
 
+/// Sync strategy for segment fsync.
+#[derive(Clone, Debug, Default)]
+pub enum SyncMode {
+    /// sync_all: syncs data + metadata (safest, slower)
+    #[default]
+    SyncAll,
+    /// sync_data: syncs data only (faster, sufficient for most use cases)
+    SyncData,
+}
+
 /// StoreConfig: all settings for a Store instance.
 /// No Default — callers must provide data_dir via `StoreConfig::new(path)`.
-#[derive(Clone, Debug)]
+/// Note: Manual Clone impl because `clock` field is `Arc<dyn Fn>`.
+/// No Debug derive because closures don't implement Debug.
 pub struct StoreConfig {
     pub data_dir: PathBuf,
     pub segment_max_bytes: u64,
@@ -54,6 +65,13 @@ pub struct StoreConfig {
     pub cache_map_size_bytes: usize,
     pub restart_policy: RestartPolicy,
     pub shutdown_drain_limit: usize,
+    /// Optional writer thread stack size. None = OS default (~8MB on Linux).
+    pub writer_stack_size: Option<usize>,
+    /// Injectable clock for deterministic testing. Returns microseconds since epoch.
+    /// None = std::time::SystemTime::now() (production default).
+    pub clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
+    /// Sync mode: SyncAll (data+metadata, default) or SyncData (data only, faster).
+    pub sync_mode: SyncMode,
 }
 
 impl StoreConfig {
@@ -71,6 +89,17 @@ impl StoreConfig {
             cache_map_size_bytes: 64 * 1024 * 1024,   // 64MB — used by LmdbCache
             restart_policy: RestartPolicy::default(),
             shutdown_drain_limit: 1024,               // max queued commands drained on shutdown
+            writer_stack_size: None,                   // OS default (~8MB on Linux)
+            clock: None,                               // SystemTime::now() default
+            sync_mode: SyncMode::default(),            // SyncAll (safest)
+        }
+    }
+
+    /// Get current timestamp in microseconds, using the injectable clock if set.
+    pub(crate) fn now_us(&self) -> i64 {
+        match &self.clock {
+            Some(f) => f(),
+            None => now_us(), // module-level fallback using SystemTime
         }
     }
 }
@@ -78,6 +107,7 @@ impl StoreConfig {
 /// StoreError: every error the store can produce.
 /// [SPEC:src/store/mod.rs — StoreError variants]
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum StoreError {
     Io(std::io::Error),
     Coordinate(CoordinateError),
@@ -164,6 +194,7 @@ pub struct AppendOptions {
 pub type RetentionPredicate = Box<dyn Fn(&StoredEvent<serde_json::Value>) -> bool + Send>;
 
 /// CompactionStrategy: how compact() handles events during segment merging.
+#[non_exhaustive]
 pub enum CompactionStrategy {
     /// Merge sealed segments into one. No events removed.
     Merge,
@@ -214,7 +245,7 @@ impl Store {
             .filter(|e| {
                 e.path()
                     .extension()
-                    .map(|ext| ext == "fbat")
+                    .map(|ext| ext == segment::SEGMENT_EXTENSION)
                     .unwrap_or(false)
             })
             .collect();
@@ -271,7 +302,7 @@ impl Store {
             event_id,
             event_id,
             None, // correlation = self, causation = root
-            now_us(),
+            self.config.now_us(),
             crate::coordinate::DagPosition::root(),
             payload_bytes.len() as u32,
             kind,
@@ -315,7 +346,7 @@ impl Store {
             event_id,
             correlation_id,
             Some(causation_id),
-            now_us(),
+            self.config.now_us(),
             crate::coordinate::DagPosition::root(),
             payload_bytes.len() as u32,
             kind,
@@ -444,7 +475,7 @@ impl Store {
             let is_fresh = match freshness {
                 Freshness::Consistent => meta.watermark == watermark,
                 Freshness::BestEffort { max_stale_ms } => {
-                    let age_us = now_us().saturating_sub(meta.cached_at_us).max(0);
+                    let age_us = self.config.now_us().saturating_sub(meta.cached_at_us).max(0);
                     age_us < (*max_stale_ms as i64) * 1000
                 }
             };
@@ -469,7 +500,7 @@ impl Store {
             if let Ok(bytes) = serde_json::to_vec(t) {
                 let meta = projection::CacheMeta {
                     watermark,
-                    cached_at_us: now_us(),
+                    cached_at_us: self.config.now_us(),
                 };
                 if let Err(e) = self.cache.put(cache_key, &bytes, meta) {
                     tracing::warn!("cache put failed (non-fatal): {e}");
@@ -526,7 +557,7 @@ impl Store {
             event_id,
             correlation_id,
             causation_id,
-            now_us(),
+            self.config.now_us(),
             crate::coordinate::DagPosition::root(),
             payload_bytes.len() as u32,
             kind,
@@ -583,7 +614,7 @@ impl Store {
         let entries = std::fs::read_dir(&self.config.data_dir).map_err(StoreError::Io)?;
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map(|e| e == "fbat").unwrap_or(false) {
+            if path.extension().map(|e| e == segment::SEGMENT_EXTENSION).unwrap_or(false) {
                 let dest_path = dest.join(entry.file_name());
                 std::fs::copy(&path, &dest_path).map_err(StoreError::Io)?;
             }
@@ -604,7 +635,7 @@ impl Store {
             .filter_map(|e| e.ok())
             .filter_map(|e| {
                 let path = e.path();
-                if path.extension().map(|ext| ext == "fbat").unwrap_or(false) {
+                if path.extension().map(|ext| ext == segment::SEGMENT_EXTENSION).unwrap_or(false) {
                     path.file_stem()?.to_str()?.parse::<u64>().ok()
                 } else {
                     None
@@ -618,7 +649,7 @@ impl Store {
             .filter_map(|e| e.ok())
             .filter_map(|e| {
                 let path = e.path();
-                let ext_ok = path.extension().map(|ext| ext == "fbat").unwrap_or(false);
+                let ext_ok = path.extension().map(|ext| ext == segment::SEGMENT_EXTENSION).unwrap_or(false);
                 if !ext_ok { return None; }
                 let seg_id = path.file_stem()
                     .and_then(|s| s.to_str())
@@ -729,7 +760,7 @@ impl Store {
             .filter(|e| {
                 e.path()
                     .extension()
-                    .map(|ext| ext == "fbat")
+                    .map(|ext| ext == segment::SEGMENT_EXTENSION)
                     .unwrap_or(false)
             })
             .collect();
@@ -788,6 +819,15 @@ impl Store {
             fd_budget: self.config.fd_budget,
             restart_policy: self.config.restart_policy.clone(),
         }
+    }
+}
+
+/// Safety net: if Store is dropped without calling close(), send a best-effort
+/// Shutdown to the writer thread. close(self) is still the preferred explicit path.
+impl Drop for Store {
+    fn drop(&mut self) {
+        let (tx, _rx) = flume::bounded(1);
+        let _ = self.writer.tx.send(WriterCommand::Shutdown { respond: tx });
     }
 }
 

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 /// [SPEC:src/outcome/wait.rs]
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum WaitCondition {
     Timeout {
         resume_at_ms: u64,
@@ -28,6 +29,7 @@ pub enum WaitCondition {
 /// [SPEC:src/outcome/wait.rs — CompensationAction]
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum CompensationAction {
     Rollback {
         #[serde(with = "crate::wire::vec_u128_bytes")]

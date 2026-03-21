@@ -17,6 +17,7 @@ pub struct CacheMeta {
 }
 
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum Freshness {
     Consistent,
     BestEffort { max_stale_ms: u64 },

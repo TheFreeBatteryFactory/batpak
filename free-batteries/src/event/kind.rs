@@ -44,6 +44,8 @@ impl EventKind {
     pub const EFFECT_BACKPRESSURE: Self = Self(0xD005);
     pub const EFFECT_CANCEL: Self = Self(0xD006);
     pub const EFFECT_CONFLICT: Self = Self(0xD007);
+    /// Used by compact() for tombstone markers. Public so consumers can detect them.
+    pub const TOMBSTONE: Self = Self(0x0FFE);
 }
 
 impl fmt::Display for EventKind {

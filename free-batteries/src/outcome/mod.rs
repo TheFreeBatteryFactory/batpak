@@ -15,6 +15,7 @@ pub use wait::{CompensationAction, WaitCondition};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
+#[non_exhaustive]
 pub enum Outcome<T> {
     Ok(T),
     Err(OutcomeError),

@@ -16,6 +16,7 @@ pub struct Coordinate {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CoordinateError {
     EmptyEntity,
     EmptyScope,
@@ -32,6 +33,7 @@ pub struct Region {
 }
 
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum KindFilter {
     Exact(EventKind),
     Category(u8), // matches any EventKind in this 4-bit category

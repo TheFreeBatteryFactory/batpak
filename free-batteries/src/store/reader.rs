@@ -132,17 +132,34 @@ impl Reader {
             }
         };
 
-        // Skip magic (4 bytes). Parse segment header from msgpack.
-        // [DEP:rmp_serde::from_slice] — deserialize SegmentHeader
-        let after_magic = &all_bytes[4..];
-        let _header: segment::SegmentHeader = rmp_serde::from_slice(after_magic)
+        // Read header_len (u32 BE) after magic, then header bytes
+        if all_bytes.len() < 8 {
+            return Err(StoreError::CorruptSegment {
+                segment_id,
+                detail: "segment too short for magic + header_len".into(),
+            });
+        }
+        let header_len =
+            u32::from_be_bytes([all_bytes[4], all_bytes[5], all_bytes[6], all_bytes[7]]) as usize;
+        if all_bytes.len() < 8 + header_len {
+            return Err(StoreError::CorruptSegment {
+                segment_id,
+                detail: "segment truncated in header".into(),
+            });
+        }
+        let header_slice = &all_bytes[8..8 + header_len];
+        let header: segment::SegmentHeader = rmp_serde::from_slice(header_slice)
             .map_err(|e| StoreError::Serialization(e.to_string()))?;
 
-        // Find where header ends and frames begin.
-        // Re-encode header to measure its serialized size (simplest approach).
-        let header_bytes = rmp_serde::to_vec_named(&_header)
-            .map_err(|e| StoreError::Serialization(e.to_string()))?;
-        let mut cursor = 4 + header_bytes.len();
+        // Version check — reject unknown segment versions
+        if header.version != 1 {
+            return Err(StoreError::CorruptSegment {
+                segment_id,
+                detail: format!("unsupported segment version: {}", header.version),
+            });
+        }
+
+        let mut cursor = 8 + header_len; // past magic + header_len + header
 
         // Read frames until EOF. Each frame: [len:u32 BE][crc32:u32 BE][msgpack]
         let mut entries = Vec::new();

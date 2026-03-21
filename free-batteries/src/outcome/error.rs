@@ -17,6 +17,7 @@ pub struct OutcomeError {
 /// [SPEC:src/outcome/error.rs — ErrorKind]
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ErrorKind {
     NotFound,
     Conflict,

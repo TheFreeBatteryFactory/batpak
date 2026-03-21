@@ -21,6 +21,11 @@ pub struct EventHeader {
     pub flags: u8,
 }
 
+/// Flag bit constants for EventHeader.flags
+pub const FLAG_REQUIRES_ACK: u8 = 0x01;
+pub const FLAG_TRANSACTIONAL: u8 = 0x02;
+pub const FLAG_REPLAY: u8 = 0x08;
+
 impl EventHeader {
     pub fn new(
         event_id: u128,
@@ -49,15 +54,15 @@ impl EventHeader {
     }
 
     pub fn requires_ack(&self) -> bool {
-        self.flags & 0x01 != 0
+        self.flags & FLAG_REQUIRES_ACK != 0
     }
 
     pub fn is_transactional(&self) -> bool {
-        self.flags & 0x02 != 0
+        self.flags & FLAG_TRANSACTIONAL != 0
     }
 
     pub fn is_replay(&self) -> bool {
-        self.flags & 0x08 != 0
+        self.flags & FLAG_REPLAY != 0
     }
 
     pub fn age_us(&self, now_us: i64) -> u64 {

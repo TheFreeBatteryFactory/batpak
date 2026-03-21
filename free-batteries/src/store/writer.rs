@@ -66,6 +66,7 @@ pub struct Notification {
 /// [SPEC:src/store/writer.rs — RestartPolicy]
 /// EXACTLY two variants. Adding a third violates the RED FLAGS.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub enum RestartPolicy {
     #[default]
     Once,
