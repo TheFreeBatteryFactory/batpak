@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 /// Reader: reads events from segment files. LRU file descriptor cache.
 /// Behind parking_lot::Mutex for Send + Sync. [SPEC:src/store/reader.rs]
 /// [SPEC:IMPLEMENTATION NOTES item 6 — Store is Send + Sync]
-
 pub(crate) struct Reader {
     data_dir: PathBuf,
     /// LRU FD cache: segment_id -> open File handle. Evicts oldest when full.
@@ -63,7 +62,8 @@ impl Reader {
             use std::os::unix::fs::FileExt;
             let mut total_read = 0;
             while total_read < buf.len() {
-                let n = file.read_at(&mut buf[total_read..], pos.offset + total_read as u64)
+                let n = file
+                    .read_at(&mut buf[total_read..], pos.offset + total_read as u64)
                     .map_err(StoreError::Io)?;
                 if n == 0 {
                     return Err(StoreError::CorruptSegment {
@@ -84,12 +84,21 @@ impl Reader {
             file.read_exact(&mut buf).map_err(StoreError::Io)?;
         }
 
-        let (msgpack, _) = segment::frame_decode(&buf)?;
-        let payload: FramePayload<serde_json::Value> = rmp_serde::from_slice(msgpack)
-            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let (msgpack, _) = segment::frame_decode(&buf).map_err(|e| match e {
+            segment::FrameDecodeError::CrcMismatch { .. } => StoreError::CrcMismatch {
+                segment_id: pos.segment_id,
+                offset: pos.offset,
+            },
+            _ => StoreError::CorruptSegment {
+                segment_id: pos.segment_id,
+                detail: e.to_string(),
+            },
+        })?;
+        let payload: FramePayload<serde_json::Value> =
+            rmp_serde::from_slice(msgpack).map_err(|e| StoreError::Serialization(e.to_string()))?;
 
-        let coord = Coordinate::new(&payload.entity, &payload.scope)
-            .map_err(StoreError::Coordinate)?;
+        let coord =
+            Coordinate::new(&payload.entity, &payload.scope).map_err(StoreError::Coordinate)?;
         Ok(StoredEvent {
             coordinate: coord,
             event: payload.event,
@@ -100,8 +109,7 @@ impl Reader {
     pub(crate) fn scan_segment(&self, path: &Path) -> Result<Vec<ScannedEntry>, StoreError> {
         let mut file = File::open(path).map_err(StoreError::Io)?;
         let mut all_bytes = Vec::new();
-        file.read_to_end(&mut all_bytes)
-            .map_err(StoreError::Io)?;
+        file.read_to_end(&mut all_bytes).map_err(StoreError::Io)?;
 
         // Verify magic
         if all_bytes.len() < 4 || &all_bytes[..4] != SEGMENT_MAGIC {
@@ -112,11 +120,17 @@ impl Reader {
         }
 
         // Extract segment_id from filename: "000042.fbat" → 42
-        let segment_id = path
+        let segment_id = match path
             .file_stem()
             .and_then(|s| s.to_str())
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
+        {
+            Some(id) => id,
+            None => {
+                tracing::warn!(?path, "skipping segment with unparseable filename");
+                return Ok(Vec::new());
+            }
+        };
 
         // Skip magic (4 bytes). Parse segment header from msgpack.
         // [DEP:rmp_serde::from_slice] — deserialize SegmentHeader
@@ -163,7 +177,7 @@ impl Reader {
                     }
                     cursor += frame_size;
                 }
-                Err(StoreError::CrcMismatch { .. }) => {
+                Err(segment::FrameDecodeError::CrcMismatch { .. }) => {
                     tracing::warn!(
                         segment_id,
                         offset = frame_offset,
@@ -184,9 +198,7 @@ impl Reader {
         if let Some(pos) = cache.order.iter().position(|&id| id == segment_id) {
             cache.order.remove(pos);
             cache.order.push(segment_id);
-            return Ok(cache.fds[&segment_id]
-                .try_clone()
-                .map_err(StoreError::Io)?);
+            return cache.fds[&segment_id].try_clone().map_err(StoreError::Io);
         }
 
         let path = self.data_dir.join(segment::segment_filename(segment_id));
@@ -199,8 +211,17 @@ impl Reader {
             }
         }
 
-        cache.fds.insert(segment_id, file.try_clone().map_err(StoreError::Io)?);
+        cache
+            .fds
+            .insert(segment_id, file.try_clone().map_err(StoreError::Io)?);
         cache.order.push(segment_id);
         Ok(file)
+    }
+
+    /// Evict a segment from the FD cache. Called during compaction before deleting segment files.
+    pub(crate) fn evict_segment(&self, segment_id: u64) {
+        let mut cache = self.fd_cache.lock();
+        cache.fds.remove(&segment_id);
+        cache.order.retain(|&id| id != segment_id);
     }
 }

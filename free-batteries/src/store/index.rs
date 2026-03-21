@@ -60,7 +60,9 @@ pub struct DiskPos {
 
 impl Ord for ClockKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.clock.cmp(&other.clock).then(self.uuid.cmp(&other.uuid))
+        self.clock
+            .cmp(&other.clock)
+            .then(self.uuid.cmp(&other.uuid))
     }
 }
 
@@ -112,20 +114,20 @@ impl StoreIndex {
         // Primary index: entity -> BTreeMap
         // [DEP:dashmap::DashMap::entry] — holds write lock, release fast
         self.streams
-            .entry(entity.clone())
-            .or_insert_with(BTreeMap::new)
+            .entry(Arc::clone(&entity))
+            .or_default()
             .insert(key.clone(), entry.clone());
 
         // Scope index
         self.scope_entities
             .entry(scope)
-            .or_insert_with(HashSet::new)
-            .insert(entity.clone());
+            .or_default()
+            .insert(Arc::clone(&entity));
 
         // Fact index
         self.by_fact
             .entry(entry.kind)
-            .or_insert_with(BTreeMap::new)
+            .or_default()
             .insert(key, entry.clone());
 
         // Point lookup
@@ -167,7 +169,7 @@ impl StoreIndex {
             self.streams
                 .iter()
                 .filter(|r| r.key().as_ref().starts_with(prefix.as_ref()))
-                .flat_map(|r| r.value().values().cloned())
+                .flat_map(|r| r.value().values().cloned().collect::<Vec<_>>())
                 .collect()
         } else if let Some(ref scope) = region.scope {
             // Scope → look up entities in scope, collect their streams
@@ -188,25 +190,24 @@ impl StoreIndex {
         } else if let Some(ref fact) = region.fact {
             // Fact filter without entity/scope → scan by_fact index
             match fact {
-                KindFilter::Exact(k) => {
-                    self.by_fact
-                        .get(k)
-                        .map(|r| r.value().values().cloned().collect())
-                        .unwrap_or_default()
-                }
+                KindFilter::Exact(k) => self
+                    .by_fact
+                    .get(k)
+                    .map(|r| r.value().values().cloned().collect())
+                    .unwrap_or_default(),
                 KindFilter::Category(c) => {
                     let cat = *c;
                     self.by_fact
                         .iter()
                         .filter(|r| r.key().category() == cat)
-                        .flat_map(|r| r.value().values().cloned())
+                        .flat_map(|r| r.value().values().cloned().collect::<Vec<_>>())
                         .collect()
                 }
                 KindFilter::Any => {
                     // No filter at all — return everything (expensive, use sparingly)
                     self.streams
                         .iter()
-                        .flat_map(|r| r.value().values().cloned())
+                        .flat_map(|r| r.value().values().cloned().collect::<Vec<_>>())
                         .collect()
                 }
             }
@@ -214,7 +215,7 @@ impl StoreIndex {
             // Region::all() with no filters — return everything
             self.streams
                 .iter()
-                .flat_map(|r| r.value().values().cloned())
+                .flat_map(|r| r.value().values().cloned().collect::<Vec<_>>())
                 .collect()
         };
 
@@ -227,12 +228,10 @@ impl StoreIndex {
             }
         }
 
-        // Entity prefix filter (if scope was the primary selector)
-        if region.scope.is_some() && region.entity_prefix.is_none() {
-            if let Some(ref prefix) = region.entity_prefix {
-                candidates.retain(|e| e.coord.entity().starts_with(prefix.as_ref()));
-            }
-        }
+        // Entity prefix filter: not needed here. When scope is the primary selector
+        // and entity_prefix is Some, it's applied during initial candidate selection.
+        // (Dead logic removed — the old guard `scope.is_some() && entity_prefix.is_none()`
+        // made the inner `if let Some(prefix) = entity_prefix` unreachable.)
 
         // Fact filter (if not already applied)
         if region.entity_prefix.is_some() || region.scope.is_some() {
@@ -262,4 +261,17 @@ impl StoreIndex {
     pub(crate) fn len(&self) -> usize {
         self.len.load(Ordering::Relaxed)
     }
+
+    /// Clear all indexes for a full rebuild (e.g. after compaction).
+    pub(crate) fn clear(&self) {
+        self.streams.clear();
+        self.scope_entities.clear();
+        self.by_fact.clear();
+        self.by_id.clear();
+        self.latest.clear();
+        self.global_sequence.store(0, Ordering::SeqCst);
+        self.len.store(0, Ordering::Relaxed);
+        // entity_locks intentionally NOT cleared — writer may hold references
+    }
+
 }

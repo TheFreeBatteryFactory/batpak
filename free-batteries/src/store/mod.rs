@@ -1,30 +1,35 @@
-pub mod index;
-pub mod segment;
-pub mod writer;
-pub mod reader;
-pub mod projection;
 pub mod cursor;
+pub mod index;
+pub mod projection;
+pub mod reader;
+pub mod segment;
 pub mod subscription;
+pub mod writer;
 
-pub use index::{IndexEntry, ClockKey, DiskPos};
-pub use projection::{ProjectionCache, NoCache, CacheMeta, Freshness};
 pub use cursor::Cursor;
+pub use index::{ClockKey, DiskPos, IndexEntry};
+pub use projection::{CacheMeta, Freshness, NoCache, ProjectionCache};
+#[cfg(feature = "redb")]
+pub use projection::RedbCache;
+#[cfg(feature = "lmdb")]
+pub use projection::LmdbCache;
 pub use subscription::Subscription;
 pub use writer::{Notification, RestartPolicy};
 
-use crate::coordinate::{Coordinate, CoordinateError, Region, KindFilter};
-use crate::event::{Event, EventHeader, EventKind, StoredEvent, EventSourced};
+use crate::coordinate::{Coordinate, CoordinateError, KindFilter, Region};
+use crate::event::{Event, EventHeader, EventKind, EventSourced, StoredEvent};
 use index::StoreIndex;
 use reader::Reader;
-use writer::{WriterHandle, WriterCommand, SubscriberList};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
+use writer::{AppendGuards, SubscriberList, WriterCommand, WriterHandle};
 // ProjectionCache re-exported above via pub use, no separate use needed.
 
 /// Store: the runtime. Sync API. Send + Sync.
 /// [SPEC:src/store/mod.rs]
 /// Invariant 2: ALL METHODS ARE SYNC. No .await anywhere.
+#[allow(unexpected_cfgs)]
 #[cfg(feature = "async-store")]
 compile_error!("INVARIANT 2: Store API is sync. Use spawn_blocking or flume recv_async.");
 
@@ -36,7 +41,8 @@ pub struct Store {
     config: Arc<StoreConfig>,
 }
 
-/// StoreConfig: all settings with sane defaults.
+/// StoreConfig: all settings for a Store instance.
+/// No Default — callers must provide data_dir via `StoreConfig::new(path)`.
 #[derive(Clone, Debug)]
 pub struct StoreConfig {
     pub data_dir: PathBuf,
@@ -50,18 +56,21 @@ pub struct StoreConfig {
     pub shutdown_drain_limit: usize,
 }
 
-impl Default for StoreConfig {
-    fn default() -> Self {
+impl StoreConfig {
+    /// Create a StoreConfig with required data_dir and sensible defaults.
+    /// All numeric defaults are documented. Override fields after construction
+    /// to tune for your deployment (embedded, server, CLI).
+    pub fn new(data_dir: impl Into<PathBuf>) -> Self {
         Self {
-            data_dir: PathBuf::from("./free-batteries-data"),
-            segment_max_bytes: 256 * 1024 * 1024,  // 256MB
-            sync_every_n_events: 1000,
-            fd_budget: 64,
-            writer_channel_capacity: 4096,
-            broadcast_capacity: 8192,
-            cache_map_size_bytes: 64 * 1024 * 1024, // 64MB
+            data_dir: data_dir.into(),
+            segment_max_bytes: 256 * 1024 * 1024,    // 256MB — tune down for embedded
+            sync_every_n_events: 1000,                // durability vs throughput tradeoff
+            fd_budget: 64,                            // LRU FD cache slots
+            writer_channel_capacity: 4096,            // back-pressure threshold
+            broadcast_capacity: 8192,                 // per-subscriber lossy buffer
+            cache_map_size_bytes: 64 * 1024 * 1024,   // 64MB — used by LmdbCache
             restart_policy: RestartPolicy::default(),
-            shutdown_drain_limit: 1024,
+            shutdown_drain_limit: 1024,               // max queued commands drained on shutdown
         }
     }
 }
@@ -73,10 +82,20 @@ pub enum StoreError {
     Io(std::io::Error),
     Coordinate(CoordinateError),
     Serialization(String),
-    CrcMismatch { segment_id: u64, offset: u64 },
-    CorruptSegment { segment_id: u64, detail: String },
+    CrcMismatch {
+        segment_id: u64,
+        offset: u64,
+    },
+    CorruptSegment {
+        segment_id: u64,
+        detail: String,
+    },
     NotFound(u128),
-    SequenceMismatch { entity: String, expected: u32, actual: u32 },
+    SequenceMismatch {
+        entity: String,
+        expected: u32,
+        actual: u32,
+    },
     DuplicateEvent(u128),
     WriterCrashed,
     ShuttingDown,
@@ -89,13 +108,21 @@ impl std::fmt::Display for StoreError {
             Self::Io(e) => write!(f, "IO error: {e}"),
             Self::Coordinate(e) => write!(f, "coordinate error: {e}"),
             Self::Serialization(s) => write!(f, "serialization error: {s}"),
-            Self::CrcMismatch { segment_id, offset } =>
-                write!(f, "CRC mismatch in segment {segment_id} at offset {offset}"),
-            Self::CorruptSegment { segment_id, detail } =>
-                write!(f, "corrupt segment {segment_id}: {detail}"),
+            Self::CrcMismatch { segment_id, offset } => {
+                write!(f, "CRC mismatch in segment {segment_id} at offset {offset}")
+            }
+            Self::CorruptSegment { segment_id, detail } => {
+                write!(f, "corrupt segment {segment_id}: {detail}")
+            }
             Self::NotFound(id) => write!(f, "event {id:032x} not found"),
-            Self::SequenceMismatch { entity, expected, actual } =>
-                write!(f, "CAS failed for {entity}: expected seq {expected}, got {actual}"),
+            Self::SequenceMismatch {
+                entity,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "CAS failed for {entity}: expected seq {expected}, got {actual}"
+            ),
             Self::DuplicateEvent(key) => write!(f, "duplicate idempotency key {key:032x}"),
             Self::WriterCrashed => write!(f, "writer thread crashed"),
             Self::ShuttingDown => write!(f, "store is shutting down"),
@@ -105,10 +132,14 @@ impl std::fmt::Display for StoreError {
 }
 impl std::error::Error for StoreError {}
 impl From<CoordinateError> for StoreError {
-    fn from(e: CoordinateError) -> Self { Self::Coordinate(e) }
+    fn from(e: CoordinateError) -> Self {
+        Self::Coordinate(e)
+    }
 }
 impl From<std::io::Error> for StoreError {
-    fn from(e: std::io::Error) -> Self { Self::Io(e) }
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
 }
 
 /// AppendReceipt: proof an event was persisted.
@@ -121,7 +152,7 @@ pub struct AppendReceipt {
 
 /// AppendOptions: CAS, idempotency, custom correlation/causation.
 /// [SPEC:src/store/mod.rs — AppendOptions]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct AppendOptions {
     pub expected_sequence: Option<u32>,
     pub idempotency_key: Option<u128>,
@@ -129,8 +160,48 @@ pub struct AppendOptions {
     pub causation_id: Option<u128>,
 }
 
+/// Predicate for filtering events during compaction. Returns true to keep, false to drop.
+pub type RetentionPredicate = Box<dyn Fn(&StoredEvent<serde_json::Value>) -> bool + Send>;
+
+/// CompactionStrategy: how compact() handles events during segment merging.
+pub enum CompactionStrategy {
+    /// Merge sealed segments into one. No events removed.
+    Merge,
+    /// Merge + drop events failing the retention predicate.
+    /// Dropped events are permanently lost.
+    Retention(RetentionPredicate),
+    /// Merge + write tombstone markers for dropped events.
+    /// Downstream consumers can detect deletions.
+    Tombstone(RetentionPredicate),
+}
+
+/// CompactionConfig: controls compact() behavior.
+pub struct CompactionConfig {
+    /// Strategy for handling events during compaction.
+    pub strategy: CompactionStrategy,
+    /// Minimum number of sealed segments before compaction runs.
+    /// Below this threshold, compact() returns early.
+    pub min_segments: usize,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            strategy: CompactionStrategy::Merge,
+            min_segments: 2,
+        }
+    }
+}
+
 impl Store {
     pub fn open(config: StoreConfig) -> Result<Self, StoreError> {
+        Self::open_with_cache(config, Box::new(NoCache))
+    }
+
+    pub fn open_with_cache(
+        config: StoreConfig,
+        cache: Box<dyn ProjectionCache>,
+    ) -> Result<Self, StoreError> {
         std::fs::create_dir_all(&config.data_dir)?;
         let config = Arc::new(config);
         let index = Arc::new(StoreIndex::new());
@@ -140,7 +211,12 @@ impl Store {
         // [SPEC:IMPLEMENTATION NOTES item 2 — segment naming, alphabetical scan]
         let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(&config.data_dir)?
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map(|ext| ext == "fbat").unwrap_or(false))
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "fbat")
+                    .unwrap_or(false)
+            })
             .collect();
         entries.sort_by_key(|e| e.file_name());
 
@@ -169,75 +245,109 @@ impl Store {
         }
 
         let subscribers = Arc::new(SubscriberList::new());
-        let writer = WriterHandle::spawn(
-            Arc::clone(&config), Arc::clone(&index), Arc::clone(&subscribers),
-        )?;
+        let writer = WriterHandle::spawn(&config, &index, &subscribers)?;
 
         Ok(Self {
-            index, reader, cache: Box::new(NoCache), writer, config,
+            index,
+            reader,
+            cache,
+            writer,
+            config,
         })
-    }
-
-    pub fn open_default() -> Result<Self, StoreError> {
-        Self::open(StoreConfig::default())
     }
 
     /// WRITE: append a new root-cause event.
     /// correlation_id defaults to event_id (self-correlated). causation_id = None.
     pub fn append(
-        &self, coord: &Coordinate, kind: EventKind, payload: &impl Serialize,
+        &self,
+        coord: &Coordinate,
+        kind: EventKind,
+        payload: &impl Serialize,
     ) -> Result<AppendReceipt, StoreError> {
         let payload_bytes = rmp_serde::to_vec_named(payload)
             .map_err(|e| StoreError::Serialization(e.to_string()))?;
         let event_id = crate::id::generate_v7_id();
         let header = EventHeader::new(
-            event_id, event_id, None, // correlation = self, causation = root
-            now_us(), crate::coordinate::DagPosition::root(),
-            payload_bytes.len() as u32, kind,
+            event_id,
+            event_id,
+            None, // correlation = self, causation = root
+            now_us(),
+            crate::coordinate::DagPosition::root(),
+            payload_bytes.len() as u32,
+            kind,
         );
         let event = Event::new(header, payload_bytes);
 
         let (tx, rx) = flume::bounded(1);
-        self.writer.tx.send(WriterCommand::Append {
-            entity: coord.entity_arc(),
-            scope: coord.scope_arc(),
-            event, kind,
-            correlation_id: event_id,
-            causation_id: None,
-            respond: tx,
-        }).map_err(|_| StoreError::WriterCrashed)?;
+        self.writer
+            .tx
+            .send(WriterCommand::Append {
+                entity: coord.entity_arc(),
+                scope: coord.scope_arc(),
+                event: Box::new(event),
+                kind,
+                guards: AppendGuards {
+                    correlation_id: event_id,
+                    causation_id: None,
+                    expected_sequence: None,
+                    idempotency_key: None,
+                },
+                respond: tx,
+            })
+            .map_err(|_| StoreError::WriterCrashed)?;
 
         rx.recv().map_err(|_| StoreError::WriterCrashed)?
     }
 
     /// WRITE: append a reaction (caused by another event).
     pub fn append_reaction(
-        &self, coord: &Coordinate, kind: EventKind, payload: &impl Serialize,
-        correlation_id: u128, causation_id: u128,
+        &self,
+        coord: &Coordinate,
+        kind: EventKind,
+        payload: &impl Serialize,
+        correlation_id: u128,
+        causation_id: u128,
     ) -> Result<AppendReceipt, StoreError> {
         let payload_bytes = rmp_serde::to_vec_named(payload)
             .map_err(|e| StoreError::Serialization(e.to_string()))?;
         let event_id = crate::id::generate_v7_id();
         let header = EventHeader::new(
-            event_id, correlation_id, Some(causation_id),
-            now_us(), crate::coordinate::DagPosition::root(),
-            payload_bytes.len() as u32, kind,
+            event_id,
+            correlation_id,
+            Some(causation_id),
+            now_us(),
+            crate::coordinate::DagPosition::root(),
+            payload_bytes.len() as u32,
+            kind,
         );
         let event = Event::new(header, payload_bytes);
 
         let (tx, rx) = flume::bounded(1);
-        self.writer.tx.send(WriterCommand::Append {
-            entity: coord.entity_arc(), scope: coord.scope_arc(),
-            event, kind, correlation_id, causation_id: Some(causation_id),
-            respond: tx,
-        }).map_err(|_| StoreError::WriterCrashed)?;
+        self.writer
+            .tx
+            .send(WriterCommand::Append {
+                entity: coord.entity_arc(),
+                scope: coord.scope_arc(),
+                event: Box::new(event),
+                kind,
+                guards: AppendGuards {
+                    correlation_id,
+                    causation_id: Some(causation_id),
+                    expected_sequence: None,
+                    idempotency_key: None,
+                },
+                respond: tx,
+            })
+            .map_err(|_| StoreError::WriterCrashed)?;
 
         rx.recv().map_err(|_| StoreError::WriterCrashed)?
     }
 
     /// READ: get a single event by ID.
     pub fn get(&self, event_id: u128) -> Result<StoredEvent<serde_json::Value>, StoreError> {
-        let entry = self.index.get_by_id(event_id)
+        let entry = self
+            .index
+            .get_by_id(event_id)
             .ok_or(StoreError::NotFound(event_id))?;
         self.reader.read_entry(&entry.disk_pos)
     }
@@ -248,50 +358,134 @@ impl Store {
     }
 
     /// READ: walk hash chain ancestors. [SPEC:IMPLEMENTATION NOTES item 3]
-    pub fn walk_ancestors(&self, event_id: u128, limit: usize)
-        -> Vec<StoredEvent<serde_json::Value>>
-    {
+    /// When blake3 is enabled, follows the hash chain (event_hash -> prev_hash).
+    /// When blake3 is disabled, all hashes are [0u8;32] so hash-based walking
+    /// is impossible. Falls back to clock-ordered traversal (descending clock).
+    pub fn walk_ancestors(
+        &self,
+        event_id: u128,
+        limit: usize,
+    ) -> Vec<StoredEvent<serde_json::Value>> {
         let mut results = Vec::new();
-        let mut current_id = Some(event_id);
-        while let Some(id) = current_id {
-            if results.len() >= limit { break; }
-            if let Some(entry) = self.index.get_by_id(id) {
+        #[cfg(feature = "blake3")]
+        {
+            let mut current_id = Some(event_id);
+            while let Some(id) = current_id {
+                if results.len() >= limit {
+                    break;
+                }
+                if let Some(entry) = self.index.get_by_id(id) {
+                    if let Ok(stored) = self.reader.read_entry(&entry.disk_pos) {
+                        results.push(stored);
+                    }
+                    // Follow prev_hash: find the entry whose event_hash matches prev_hash
+                    let prev = entry.hash_chain.prev_hash;
+                    if prev == [0u8; 32] {
+                        break;
+                    } // genesis
+                      // Linear scan is acceptable for ancestor walks (bounded by limit).
+                    current_id = self
+                        .index
+                        .stream(entry.coord.entity())
+                        .iter()
+                        .find(|e| e.hash_chain.event_hash == prev)
+                        .map(|e| e.event_id);
+                } else {
+                    break;
+                }
+            }
+        }
+
+        #[cfg(not(feature = "blake3"))]
+        {
+            // Without blake3, hashes are all zeros. Walk by descending clock order.
+            let Some(start_entry) = self.index.get_by_id(event_id) else {
+                return results;
+            };
+            let entity = start_entry.coord.entity();
+            let stream = self.index.stream(entity);
+            // stream is sorted by (clock, uuid). Walk backwards from start_entry's clock.
+            for entry in stream.iter().rev() {
+                if results.len() >= limit {
+                    break;
+                }
+                if entry.clock > start_entry.clock {
+                    continue;
+                }
                 if let Ok(stored) = self.reader.read_entry(&entry.disk_pos) {
                     results.push(stored);
                 }
-                // Follow prev_hash: find the entry whose event_hash matches prev_hash
-                let prev = entry.hash_chain.prev_hash;
-                if prev == [0u8; 32] { break; } // genesis
-                // Linear scan is acceptable for ancestor walks (bounded by limit).
-                current_id = self.index.stream(entry.coord.entity())
-                    .iter()
-                    .find(|e| e.hash_chain.event_hash == prev)
-                    .map(|e| e.event_id);
-            } else {
-                break;
             }
         }
+
         results
     }
 
-    /// PROJECT: reconstruct typed state from events.
-    pub fn project<T: EventSourced<serde_json::Value>>(
-        &self, entity: &str, _freshness: Freshness,
-    ) -> Result<Option<T>, StoreError> {
+    /// PROJECT: reconstruct typed state from events, with cache support.
+    /// [SPEC:src/store/mod.rs — Projection Flow]
+    pub fn project<T>(
+        &self,
+        entity: &str,
+        freshness: &Freshness,
+    ) -> Result<Option<T>, StoreError>
+    where
+        T: EventSourced<serde_json::Value> + serde::Serialize + serde::de::DeserializeOwned,
+    {
         let entries = self.index.stream(entity);
-        if entries.is_empty() { return Ok(None); }
+        if entries.is_empty() {
+            return Ok(None);
+        }
 
+        let watermark = entries.last().map(|e| e.global_sequence).unwrap_or(0);
+        let cache_key = entity.as_bytes();
+
+        // Step 1: Check cache
+        if let Ok(Some((bytes, meta))) = self.cache.get(cache_key) {
+            let is_fresh = match freshness {
+                Freshness::Consistent => meta.watermark == watermark,
+                Freshness::BestEffort { max_stale_ms } => {
+                    let age_us = now_us().saturating_sub(meta.cached_at_us).max(0);
+                    age_us < (*max_stale_ms as i64) * 1000
+                }
+            };
+            if is_fresh {
+                if let Ok(t) = serde_json::from_slice::<T>(&bytes) {
+                    return Ok(Some(t));
+                }
+                // Deserialization failed — fall through to replay
+            }
+        }
+
+        // Step 2: Cache miss or stale — replay from segments
         let mut events = Vec::with_capacity(entries.len());
         for entry in &entries {
             let stored = self.reader.read_entry(&entry.disk_pos)?;
             events.push(stored.event);
         }
-        Ok(T::from_events(&events))
+        let result = T::from_events(&events);
+
+        // Step 3: Populate cache (non-fatal on error)
+        if let Some(ref t) = result {
+            if let Ok(bytes) = serde_json::to_vec(t) {
+                let meta = projection::CacheMeta {
+                    watermark,
+                    cached_at_us: now_us(),
+                };
+                if let Err(e) = self.cache.put(cache_key, &bytes, meta) {
+                    tracing::warn!("cache put failed (non-fatal): {e}");
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     /// SUBSCRIBE: push-based, lossy.
     pub fn subscribe(&self, region: &Region) -> Subscription {
-        let rx = self.writer.subscribers.subscribe(self.config.broadcast_capacity);
+        let rx = self
+            .writer
+            .subscribers
+            .subscribe(self.config.broadcast_capacity);
         Subscription::new(rx, region.clone())
     }
 
@@ -312,6 +506,8 @@ impl Store {
     }
 
     /// WRITE: append with CAS, idempotency, custom correlation/causation.
+    /// CAS and idempotency checks execute inside the writer thread under
+    /// the entity lock — no TOCTOU race between check and commit.
     pub fn append_with_options(
         &self,
         coord: &Coordinate,
@@ -319,50 +515,41 @@ impl Store {
         payload: &impl Serialize,
         opts: AppendOptions,
     ) -> Result<AppendReceipt, StoreError> {
-        // CAS: check expected sequence
-        if let Some(expected) = opts.expected_sequence {
-            let actual = self.index.get_latest(coord.entity())
-                .map(|e| e.clock)
-                .unwrap_or(0);
-            if actual != expected {
-                return Err(StoreError::SequenceMismatch {
-                    entity: coord.entity().to_string(),
-                    expected,
-                    actual,
-                });
-            }
-        }
-
-        // Idempotency: check if key already seen
-        if let Some(key) = opts.idempotency_key {
-            if let Some(entry) = self.index.get_by_id(key) {
-                return Ok(AppendReceipt {
-                    event_id: entry.event_id,
-                    sequence: entry.global_sequence,
-                    disk_pos: entry.disk_pos,
-                });
-            }
-        }
-
         let payload_bytes = rmp_serde::to_vec_named(payload)
             .map_err(|e| StoreError::Serialization(e.to_string()))?;
-        let event_id = opts.idempotency_key.unwrap_or_else(crate::id::generate_v7_id);
+        let event_id = opts
+            .idempotency_key
+            .unwrap_or_else(crate::id::generate_v7_id);
         let correlation_id = opts.correlation_id.unwrap_or(event_id);
         let causation_id = opts.causation_id;
         let header = EventHeader::new(
-            event_id, correlation_id, causation_id,
-            now_us(), crate::coordinate::DagPosition::root(),
-            payload_bytes.len() as u32, kind,
+            event_id,
+            correlation_id,
+            causation_id,
+            now_us(),
+            crate::coordinate::DagPosition::root(),
+            payload_bytes.len() as u32,
+            kind,
         );
         let event = Event::new(header, payload_bytes);
 
         let (tx, rx) = flume::bounded(1);
-        self.writer.tx.send(WriterCommand::Append {
-            entity: coord.entity_arc(),
-            scope: coord.scope_arc(),
-            event, kind, correlation_id, causation_id,
-            respond: tx,
-        }).map_err(|_| StoreError::WriterCrashed)?;
+        self.writer
+            .tx
+            .send(WriterCommand::Append {
+                entity: coord.entity_arc(),
+                scope: coord.scope_arc(),
+                event: Box::new(event),
+                kind,
+                guards: AppendGuards {
+                    correlation_id,
+                    causation_id,
+                    expected_sequence: opts.expected_sequence,
+                    idempotency_key: opts.idempotency_key,
+                },
+                respond: tx,
+            })
+            .map_err(|_| StoreError::WriterCrashed)?;
 
         rx.recv().map_err(|_| StoreError::WriterCrashed)?
     }
@@ -381,7 +568,9 @@ impl Store {
     /// LIFECYCLE
     pub fn sync(&self) -> Result<(), StoreError> {
         let (tx, rx) = flume::bounded(1);
-        self.writer.tx.send(WriterCommand::Sync { respond: tx })
+        self.writer
+            .tx
+            .send(WriterCommand::Sync { respond: tx })
             .map_err(|_| StoreError::WriterCrashed)?;
         rx.recv().map_err(|_| StoreError::WriterCrashed)?
     }
@@ -402,16 +591,182 @@ impl Store {
         Ok(())
     }
 
-    /// Compact: placeholder for segment compaction. Currently a no-op sync.
-    pub fn compact(&self) -> Result<(), StoreError> {
-        // Future: merge segments, remove superseded events.
-        // For now, just sync to ensure durability.
-        self.sync()
+    /// Compact: merge sealed segments, optionally filtering events.
+    /// Returns the number of segments removed and bytes reclaimed.
+    /// The active (currently-written) segment is never touched.
+    pub fn compact(&self, config: &CompactionConfig) -> Result<segment::CompactionResult, StoreError> {
+        self.sync()?;
+
+        // 1. Enumerate sealed segment files (not the active one the writer owns).
+        // The active segment is always the max-numbered one.
+        let active_segment_id = std::fs::read_dir(&self.config.data_dir)
+            .map_err(StoreError::Io)?
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let path = e.path();
+                if path.extension().map(|ext| ext == "fbat").unwrap_or(false) {
+                    path.file_stem()?.to_str()?.parse::<u64>().ok()
+                } else {
+                    None
+                }
+            })
+            .max()
+            .unwrap_or(0);
+
+        let mut sealed: Vec<(u64, std::path::PathBuf)> = std::fs::read_dir(&self.config.data_dir)
+            .map_err(StoreError::Io)?
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let path = e.path();
+                let ext_ok = path.extension().map(|ext| ext == "fbat").unwrap_or(false);
+                if !ext_ok { return None; }
+                let seg_id = path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.parse::<u64>().ok())?;
+                if seg_id >= active_segment_id { return None; } // skip active
+                Some((seg_id, path))
+            })
+            .collect();
+        sealed.sort_by_key(|(id, _)| *id);
+
+        if sealed.len() < config.min_segments {
+            return Ok(segment::CompactionResult { segments_removed: 0, bytes_reclaimed: 0 });
+        }
+
+        // 2. Read all events from sealed segments
+        let mut all_events: Vec<reader::ScannedEntry> = Vec::new();
+        for (_, path) in &sealed {
+            let scanned = self.reader.scan_segment(path)?;
+            all_events.extend(scanned);
+        }
+
+        // 3. Apply strategy filter
+        let tombstone_kind = EventKind::custom(0x0, 0xFFE); // system tombstone
+        let mut kept_events: Vec<reader::ScannedEntry> = Vec::new();
+        match &config.strategy {
+            CompactionStrategy::Merge => {
+                kept_events = all_events;
+            }
+            CompactionStrategy::Retention(predicate) => {
+                for entry in all_events {
+                    let coord = Coordinate::new(&entry.entity, &entry.scope)?;
+                    let stored = StoredEvent {
+                        coordinate: coord,
+                        event: entry.event.clone(),
+                    };
+                    if predicate(&stored) {
+                        kept_events.push(entry);
+                    }
+                }
+            }
+            CompactionStrategy::Tombstone(predicate) => {
+                for entry in all_events {
+                    let coord = Coordinate::new(&entry.entity, &entry.scope)?;
+                    let stored = StoredEvent {
+                        coordinate: coord,
+                        event: entry.event.clone(),
+                    };
+                    if predicate(&stored) {
+                        kept_events.push(entry);
+                    } else {
+                        let mut tombstone = entry;
+                        tombstone.event.header.event_kind = tombstone_kind;
+                        kept_events.push(tombstone);
+                    }
+                }
+            }
+        }
+
+        // 4. Create merged segment.
+        // Use the lowest sealed ID for the merged segment (reuse it).
+        let merged_id = sealed[0].0;
+        let merged_path = self.config.data_dir.join(segment::segment_filename(merged_id));
+
+        // Evict FDs for ALL sealed segments before removing files
+        for (seg_id, _) in &sealed {
+            self.reader.evict_segment(*seg_id);
+        }
+
+        let _ = std::fs::remove_file(&merged_path); // remove the existing file at merged_id
+        let mut merged_segment = segment::Segment::<segment::Active>::create(
+            &self.config.data_dir,
+            merged_id,
+        )?;
+
+        // 5. Write kept events to merged segment
+        for entry in &kept_events {
+            let frame_payload = segment::FramePayload {
+                event: entry.event.clone(),
+                entity: entry.entity.clone(),
+                scope: entry.scope.clone(),
+            };
+            let frame = segment::frame_encode(&frame_payload)?;
+            merged_segment.write_frame(&frame)?;
+        }
+
+        merged_segment.sync()?;
+        let _sealed_seg = merged_segment.seal();
+
+        // 6. Delete old segment files (except the merged one which was replaced)
+        let mut bytes_reclaimed: u64 = 0;
+        let mut segments_removed: usize = 0;
+        for (seg_id, path) in &sealed {
+            if *seg_id == merged_id { continue; } // already replaced
+            if let Ok(meta) = std::fs::metadata(path) {
+                bytes_reclaimed += meta.len();
+            }
+            std::fs::remove_file(path).map_err(StoreError::Io)?;
+            segments_removed += 1;
+        }
+
+        // 7. Rebuild index from all remaining segments on disk.
+        // This guarantees consistency for Retention (dropped events removed)
+        // and Tombstone (event_kind updated in index).
+        self.index.clear();
+        let mut remaining: Vec<std::fs::DirEntry> = std::fs::read_dir(&self.config.data_dir)
+            .map_err(StoreError::Io)?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "fbat")
+                    .unwrap_or(false)
+            })
+            .collect();
+        remaining.sort_by_key(|e| e.file_name());
+
+        for dir_entry in &remaining {
+            let scanned = self.reader.scan_segment(&dir_entry.path())?;
+            for se in scanned {
+                let coord = Coordinate::new(&se.entity, &se.scope)?;
+                let clock = se.event.header.position.sequence;
+                let entry = IndexEntry {
+                    event_id: se.event.header.event_id,
+                    correlation_id: se.event.header.correlation_id,
+                    causation_id: se.event.header.causation_id,
+                    coord,
+                    kind: se.event.header.event_kind,
+                    clock,
+                    hash_chain: se.event.hash_chain.clone().unwrap_or_default(),
+                    disk_pos: DiskPos {
+                        segment_id: se.segment_id,
+                        offset: se.offset,
+                        length: se.length,
+                    },
+                    global_sequence: self.index.global_sequence(),
+                };
+                self.index.insert(entry);
+            }
+        }
+
+        Ok(segment::CompactionResult { segments_removed, bytes_reclaimed })
     }
 
     pub fn close(self) -> Result<(), StoreError> {
         let (tx, rx) = flume::bounded(1);
-        self.writer.tx.send(WriterCommand::Shutdown { respond: tx })
+        self.writer
+            .tx
+            .send(WriterCommand::Shutdown { respond: tx })
             .map_err(|_| StoreError::WriterCrashed)?;
         rx.recv().map_err(|_| StoreError::WriterCrashed)?
     }
@@ -436,7 +791,7 @@ impl Store {
     }
 }
 
-fn now_us() -> i64 {
+pub(crate) fn now_us() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

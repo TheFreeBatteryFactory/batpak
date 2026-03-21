@@ -13,7 +13,6 @@ pub use transition::Transition;
 ///   //   pub struct Released;
 ///   //   impl LockState for Acquired {}
 ///   //   impl LockState for Released {}
-
 #[macro_export]
 macro_rules! define_state_machine {
     ($trait_name:ident { $($state:ident),+ $(,)? }) => {
@@ -39,7 +38,6 @@ macro_rules! define_state_machine {
 /// Usage:
 ///   define_typestate!(Lock<S: LockState> { holder: String });
 ///   // Generates Lock<S> with PhantomData<S>, data(), into_data(), new()
-
 #[macro_export]
 macro_rules! define_typestate {
     ($name:ident<$param:ident: $bound:ident> { $($field:ident: $ftype:ty),* $(,)? }) => {

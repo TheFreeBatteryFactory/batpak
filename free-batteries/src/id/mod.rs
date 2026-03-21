@@ -5,7 +5,6 @@ use std::str::FromStr;
 /// EntityIdType: Layer 0 trait. No uuid dep.
 /// All IDs are u128 internally. No Uuid in public API. [SPEC:src/id/mod.rs]
 /// [SPEC:RED FLAGS — DO NOT put uuid::Uuid in the public API]
-
 pub trait EntityIdType:
     Copy + Clone + Eq + Hash + fmt::Debug + fmt::Display + FromStr + Send + Sync + 'static
 {
@@ -26,7 +25,6 @@ pub fn generate_v7_id() -> u128 {
 
 /// define_entity_id!: Layer 1+ macro. Uses generate_v7_id() helper.
 /// Downstream crates do NOT need uuid as a direct dependency.
-
 #[macro_export]
 macro_rules! define_entity_id {
     ($name:ident, $entity:literal) => {
@@ -36,15 +34,21 @@ macro_rules! define_entity_id {
         impl $crate::id::EntityIdType for $name {
             const ENTITY_NAME: &'static str = $entity;
 
-            fn new(id: u128) -> Self { Self(id) }
+            fn new(id: u128) -> Self {
+                Self(id)
+            }
 
-            fn as_u128(&self) -> u128 { self.0 }
+            fn as_u128(&self) -> u128 {
+                self.0
+            }
 
             fn now_v7() -> Self {
                 Self($crate::id::generate_v7_id())
             }
 
-            fn nil() -> Self { Self(0) }
+            fn nil() -> Self {
+                Self(0)
+            }
         }
 
         impl ::std::fmt::Display for $name {
@@ -67,5 +71,5 @@ macro_rules! define_entity_id {
     };
 }
 
-/// Library defines ONE id type.
+// Library defines ONE id type.
 define_entity_id!(EventId, "event");

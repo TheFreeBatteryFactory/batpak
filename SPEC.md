@@ -79,6 +79,75 @@ One document. No overrides. No layers. Every decision is final. A cloud agent wi
 
 ---
 
+## ANTI-ALMOST-CORRECTNESS PROTOCOL
+
+The most dangerous code is code that *looks* correct but doesn't compile — or compiles
+but doesn't do what you think. AI-generated code is especially prone to this: hallucinated
+APIs, missing trait bounds, dead logic branches, wrong feature flags. The fix isn't more
+review — it's **making the toolchain the reviewer**.
+
+### Rules
+
+```
+1. EVERY COMPILATION FIX GENERATES A REGRESSION TEST.
+   The test must fail without the fix. If you fix a bug and don't write
+   a test that would have caught it, the fix is incomplete.
+
+2. cargo test --all-features IS THE ONLY ACCEPTANCE GATE.
+   If it doesn't pass, the code doesn't exist. There is no "it compiles
+   so it's probably fine" — compilation is necessary but not sufficient.
+
+3. THE LIBRARY DOGFOODS ITS OWN GATE SYSTEM.
+   tests/self_benchmark.rs uses a Gate<ColdStartContext> to validate
+   cold-start performance. If gates work, the test passes. If the test
+   passes, gates work. This is the quadratic feedback loop.
+
+4. HALLUCINATED APIs ARE CAUGHT BY INTEGRATION TESTS.
+   Every trait method on ProjectionCache is exercised against every backend
+   (NoCache, RedbCache, LmdbCache). If an API doesn't exist, the test
+   fails before it reaches CI. See: LmdbCache::delete_prefix (never existed).
+
+5. AI-GENERATED CODE FOLLOWS THE SAME SPEC AS HUMAN CODE.
+   The spec IS the compiler after first build. If an AI produces code
+   that references [FILE:tests/monad_laws.rs] but doesn't create the file,
+   the tests will catch it. The file either exists and passes, or it doesn't.
+
+6. DEAD LOGIC IS A BUG, NOT A STYLE ISSUE.
+   A condition that can never be true (e.g., `x.is_none()` guarding
+   `if let Some(v) = x`) means the code doesn't do what the author intended.
+   Tests must exercise all query paths to surface these.
+```
+
+### Feedback Loop Topology
+
+```
+                    ┌─── build.rs invariant checks ──────┐
+                    │                                     │
+   SPEC.md ──────→ Code ──→ cargo check ──→ clippy ──→ tests
+     │               │                                    │
+     │               └─── benchmarks ──────────────────→  │
+     │                                                    │
+     └──── self_benchmark.rs (dogfood Gate) ──────────────┘
+                         ↑
+                    quadratic: the test uses the system
+                    being tested to validate the test
+```
+
+### Test-to-Fix Traceability (Initial Audit)
+
+| Fix | Root Cause | Test That Catches It |
+|-----|-----------|---------------------|
+| serde `"rc"` feature | Arc<str> not Serialize | wire_format::coordinate_msgpack_round_trip |
+| `use redb::ReadableTable` | trait method not in scope | store_integration (any RedbCache test) |
+| LmdbCache::delete_prefix | hallucinated API | store_integration (any LmdbCache test) |
+| `T: Clone` on join_all | Outcome::map needs Clone | monad_laws::join_all_all_ok (Batch cases) |
+| DashMap Ref lifetime | flat_map escapes guard | store_integration::query_by_scope |
+| Dead logic in query() | unreachable branch | store_integration::query_by_entity_prefix |
+| `.unwrap()` → `.expect()` | clippy::unwrap_used deny | cargo clippy --all-features |
+| `///` → `//` | doc comment on non-item | cargo check (warning → error in CI) |
+
+---
+
 ## WHAT V1 IS
 
 ```

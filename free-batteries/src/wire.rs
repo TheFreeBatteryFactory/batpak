@@ -10,14 +10,12 @@ use std::fmt;
 /// ZERO internal dependencies. This module is declared FIRST in lib.rs.
 /// Every serializable type with a u128 field uses these helpers.
 /// [SPEC:BUILD ORDER STEP 4 — wire.rs is FIRST]
-
 pub mod u128_bytes {
     /// Usage: #[serde(with = "crate::wire::u128_bytes")]
     /// Annotated on: EventHeader.event_id, EventHeader.correlation_id,
     ///   Notification.event_id, Notification.correlation_id,
     ///   Committed.event_id, WaitCondition::Event.event_id,
     ///   CompensationAction::Notify.target_id, Outcome::Pending.resume_token
-
     use super::*;
 
     pub fn serialize<S: Serializer>(val: &u128, ser: S) -> Result<S::Ok, S::Error> {
@@ -38,16 +36,17 @@ pub mod u128_bytes {
             }
             fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<u128, E> {
                 // v must be exactly 16 bytes. Convert via from_be_bytes.
-                let arr: [u8; 16] = v.try_into().map_err(|_| {
-                    E::invalid_length(v.len(), &"16 bytes")
-                })?;
+                let arr: [u8; 16] = v
+                    .try_into()
+                    .map_err(|_| E::invalid_length(v.len(), &"16 bytes"))?;
                 Ok(u128::from_be_bytes(arr))
             }
             // Also handle seq format (some deserializers emit sequences not bytes)
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<u128, A::Error> {
                 let mut bytes = [0u8; 16];
                 for (i, byte) in bytes.iter_mut().enumerate() {
-                    *byte = seq.next_element()?
+                    *byte = seq
+                        .next_element()?
                         .ok_or_else(|| de::Error::invalid_length(i, &"16 bytes"))?;
                 }
                 Ok(u128::from_be_bytes(bytes))
@@ -60,7 +59,6 @@ pub mod u128_bytes {
 pub mod option_u128_bytes {
     /// Usage: #[serde(with = "crate::wire::option_u128_bytes")]
     /// Annotated on: EventHeader.causation_id, Notification.causation_id
-
     use super::*;
 
     pub fn serialize<S: Serializer>(val: &Option<u128>, ser: S) -> Result<S::Ok, S::Error> {
@@ -85,9 +83,9 @@ pub mod option_u128_bytes {
                 super::u128_bytes::deserialize(de).map(Some)
             }
             fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Option<u128>, E> {
-                let arr: [u8; 16] = v.try_into().map_err(|_| {
-                    E::invalid_length(v.len(), &"16 bytes")
-                })?;
+                let arr: [u8; 16] = v
+                    .try_into()
+                    .map_err(|_| E::invalid_length(v.len(), &"16 bytes"))?;
                 Ok(Some(u128::from_be_bytes(arr)))
             }
         }
@@ -99,7 +97,6 @@ pub mod vec_u128_bytes {
     /// Usage: #[serde(with = "crate::wire::vec_u128_bytes")]
     /// Annotated on: CompensationAction::Rollback.event_ids,
     ///   CompensationAction::Release.resource_ids
-
     use super::*;
 
     pub fn serialize<S: Serializer>(val: &[u128], ser: S) -> Result<S::Ok, S::Error> {
