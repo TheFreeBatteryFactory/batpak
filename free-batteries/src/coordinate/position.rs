@@ -5,7 +5,6 @@ use std::fmt;
 /// v1: depth=0, lane=0 always. Sequence is per-entity monotonic counter.
 /// Lane/depth vocabulary is scaffolding for future distributed fan-out.
 /// [SPEC:src/coordinate/position.rs]
-
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DagPosition {

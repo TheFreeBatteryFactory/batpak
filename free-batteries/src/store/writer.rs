@@ -23,7 +23,7 @@ pub(crate) enum WriterCommand {
     Append {
         entity: Arc<str>,
         scope: Arc<str>,
-        event: Event<Vec<u8>>,  // pre-serialized payload as msgpack bytes
+        event: Box<Event<Vec<u8>>>,  // pre-serialized payload as msgpack bytes
         kind: EventKind,
         correlation_id: u128,
         causation_id: Option<u128>,
@@ -41,7 +41,7 @@ pub(crate) enum WriterCommand {
 pub(crate) struct WriterHandle {
     pub tx: Sender<WriterCommand>,
     pub subscribers: Arc<SubscriberList>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    _thread: Option<std::thread::JoinHandle<()>>,
 }
 
 /// SubscriberList: push-based notification fanout via flume channels.
@@ -66,14 +66,11 @@ pub struct Notification {
 /// RestartPolicy: how the writer recovers from panics.
 /// [SPEC:src/store/writer.rs — RestartPolicy]
 /// EXACTLY two variants. Adding a third violates the RED FLAGS.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum RestartPolicy {
+    #[default]
     Once,
     Bounded { max_restarts: u32, within_ms: u64 },
-}
-
-impl Default for RestartPolicy {
-    fn default() -> Self { Self::Once }
 }
 
 impl SubscriberList {
@@ -92,7 +89,7 @@ impl SubscriberList {
     /// NEVER use blocking send() — one slow subscriber must not block the writer.
     /// [DEP:flume::Sender::try_send] → Result<(), TrySendError<T>>
     /// [DEP:flume::TrySendError::Full] / [DEP:flume::TrySendError::Disconnected]
-    pub(crate) fn broadcast(&self, notif: Notification) {
+    pub(crate) fn broadcast(&self, notif: &Notification) {
         let mut guard = self.senders.lock();
         guard.retain(|tx| match tx.try_send(notif.clone()) {
             Ok(()) => true,
@@ -106,23 +103,23 @@ impl WriterHandle {
     /// Spawn the background writer thread.
     /// [SPEC:src/store/writer.rs — "free-batteries-writer" thread]
     pub(crate) fn spawn(
-        config: Arc<StoreConfig>,
-        index: Arc<StoreIndex>,
-        subscribers: Arc<SubscriberList>,
+        config: &Arc<StoreConfig>,
+        index: &Arc<StoreIndex>,
+        subscribers: &Arc<SubscriberList>,
     ) -> Result<Self, StoreError> {
         let (tx, rx) = flume::bounded::<WriterCommand>(config.writer_channel_capacity);
-        let subs = Arc::clone(&subscribers);
-        let cfg = Arc::clone(&config);
-        let idx = Arc::clone(&index);
+        let subs = Arc::clone(subscribers);
+        let cfg = Arc::clone(config);
+        let idx = Arc::clone(index);
 
         let thread = std::thread::Builder::new()
             .name("free-batteries-writer".into())
             .spawn(move || {
                 writer_loop(rx, cfg, idx, subs);
             })
-            .map_err(|e| StoreError::Io(e))?;
+            .map_err(StoreError::Io)?;
 
-        Ok(Self { tx, subscribers, thread: Some(thread) })
+        Ok(Self { tx, subscribers: Arc::clone(subscribers), _thread: Some(thread) })
     }
 
     // NOTE: No send_append() method here. Store::append() and Store::append_reaction()
@@ -132,6 +129,8 @@ impl WriterHandle {
 }
 
 /// The writer's main loop. Runs on the background thread.
+/// Takes ownership of Arc values to keep them alive for the thread's lifetime.
+#[allow(clippy::needless_pass_by_value)]
 fn writer_loop(
     rx: Receiver<WriterCommand>,
     config: Arc<StoreConfig>,
@@ -152,7 +151,7 @@ fn writer_loop(
             WriterCommand::Append { entity, scope, event, kind,
                                     correlation_id, causation_id, respond } => {
                 let result = handle_append(
-                    &entity, &scope, event, kind, correlation_id, causation_id,
+                    &entity, &scope, *event, kind, correlation_id, causation_id,
                     &index, &mut active_segment, &mut segment_id,
                     &config, &subscribers,
                 );
@@ -166,7 +165,7 @@ fn writer_loop(
                 }
             }
             WriterCommand::Sync { respond } => {
-                let result = active_segment.sync().map_err(|e| e);
+                let result = active_segment.sync();
                 let _ = respond.send(result);
                 events_since_sync = 0;
             }
@@ -179,7 +178,7 @@ fn writer_loop(
                         Ok(WriterCommand::Append { entity, scope, event, kind,
                                                    correlation_id, causation_id, respond: r }) => {
                             let result = handle_append(
-                                &entity, &scope, event, kind, correlation_id, causation_id,
+                                &entity, &scope, *event, kind, correlation_id, causation_id,
                                 &index, &mut active_segment, &mut segment_id,
                                 &config, &subscribers,
                             );
@@ -203,8 +202,9 @@ fn writer_loop(
     }
 }
 
-/// The 10-step commit protocol.
+/// The 10-step commit protocol. Each param maps to a distinct commit step.
 /// [SPEC:src/store/writer.rs — handle_append]
+#[allow(clippy::too_many_arguments)]
 fn handle_append(
     entity: &Arc<str>,
     scope: &Arc<str>,
@@ -223,7 +223,7 @@ fn handle_append(
     // [SPEC:IMPLEMENTATION NOTES item 5 — DashMap guard lifetimes]
     // Clone the Arc<Mutex> OUT of DashMap, drop the DashMap entry guard,
     // THEN lock the Mutex. Never hold DashMap Ref across the commit.
-    let lock = index.entity_locks.entry(entity.clone())
+    let lock = index.entity_locks.entry(Arc::clone(entity))
         .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
         .clone();
     let _entity_guard = lock.lock();
@@ -305,7 +305,7 @@ fn handle_append(
     debug!(event_id = %event.header.event_id, clock = clock, "append committed");
 
     // STEP 10: Broadcast notification to subscribers.
-    subscribers.broadcast(Notification {
+    subscribers.broadcast(&Notification {
         event_id: event.header.event_id,
         correlation_id,
         causation_id,

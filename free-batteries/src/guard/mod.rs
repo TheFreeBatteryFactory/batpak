@@ -8,7 +8,6 @@ pub use receipt::Receipt;
 /// Gates are PREDICATES, not transformers. No I/O, no mutation, pure.
 /// Ctx is product-defined. Library is generic over it.
 /// [SPEC:src/guard/mod.rs]
-
 pub trait Gate<Ctx>: Send + Sync {
     fn name(&self) -> &'static str;
     fn evaluate(&self, ctx: &Ctx) -> Result<(), Denial>;

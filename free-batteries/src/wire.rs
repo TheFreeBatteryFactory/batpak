@@ -10,14 +10,12 @@ use std::fmt;
 /// ZERO internal dependencies. This module is declared FIRST in lib.rs.
 /// Every serializable type with a u128 field uses these helpers.
 /// [SPEC:BUILD ORDER STEP 4 — wire.rs is FIRST]
-
 pub mod u128_bytes {
     /// Usage: #[serde(with = "crate::wire::u128_bytes")]
     /// Annotated on: EventHeader.event_id, EventHeader.correlation_id,
     ///   Notification.event_id, Notification.correlation_id,
     ///   Committed.event_id, WaitCondition::Event.event_id,
     ///   CompensationAction::Notify.target_id, Outcome::Pending.resume_token
-
     use super::*;
 
     pub fn serialize<S: Serializer>(val: &u128, ser: S) -> Result<S::Ok, S::Error> {
@@ -60,7 +58,6 @@ pub mod u128_bytes {
 pub mod option_u128_bytes {
     /// Usage: #[serde(with = "crate::wire::option_u128_bytes")]
     /// Annotated on: EventHeader.causation_id, Notification.causation_id
-
     use super::*;
 
     pub fn serialize<S: Serializer>(val: &Option<u128>, ser: S) -> Result<S::Ok, S::Error> {
@@ -99,7 +96,6 @@ pub mod vec_u128_bytes {
     /// Usage: #[serde(with = "crate::wire::vec_u128_bytes")]
     /// Annotated on: CompensationAction::Rollback.event_ids,
     ///   CompensationAction::Release.resource_ids
-
     use super::*;
 
     pub fn serialize<S: Serializer>(val: &[u128], ser: S) -> Result<S::Ok, S::Error> {

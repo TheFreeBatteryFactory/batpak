@@ -32,7 +32,7 @@ compile_error!("INVARIANT 2: Store API is sync. Use spawn_blocking or flume recv
 pub struct Store {
     index: Arc<StoreIndex>,
     reader: Arc<Reader>,
-    cache: Box<dyn ProjectionCache>,
+    _cache: Box<dyn ProjectionCache>,
     writer: WriterHandle,
     config: Arc<StoreConfig>,
 }
@@ -122,7 +122,7 @@ pub struct AppendReceipt {
 
 /// AppendOptions: CAS, idempotency, custom correlation/causation.
 /// [SPEC:src/store/mod.rs — AppendOptions]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct AppendOptions {
     pub expected_sequence: Option<u32>,
     pub idempotency_key: Option<u128>,
@@ -170,12 +170,10 @@ impl Store {
         }
 
         let subscribers = Arc::new(SubscriberList::new());
-        let writer = WriterHandle::spawn(
-            Arc::clone(&config), Arc::clone(&index), Arc::clone(&subscribers),
-        )?;
+        let writer = WriterHandle::spawn(&config, &index, &subscribers)?;
 
         Ok(Self {
-            index, reader, cache: Box::new(NoCache), writer, config,
+            index, reader, _cache: Box::new(NoCache), writer, config,
         })
     }
 
@@ -202,7 +200,7 @@ impl Store {
         self.writer.tx.send(WriterCommand::Append {
             entity: coord.entity_arc(),
             scope: coord.scope_arc(),
-            event, kind,
+            event: Box::new(event), kind,
             correlation_id: event_id,
             causation_id: None,
             respond: tx,
@@ -229,7 +227,7 @@ impl Store {
         let (tx, rx) = flume::bounded(1);
         self.writer.tx.send(WriterCommand::Append {
             entity: coord.entity_arc(), scope: coord.scope_arc(),
-            event, kind, correlation_id, causation_id: Some(causation_id),
+            event: Box::new(event), kind, correlation_id, causation_id: Some(causation_id),
             respond: tx,
         }).map_err(|_| StoreError::WriterCrashed)?;
 
@@ -361,7 +359,7 @@ impl Store {
         self.writer.tx.send(WriterCommand::Append {
             entity: coord.entity_arc(),
             scope: coord.scope_arc(),
-            event, kind, correlation_id, causation_id,
+            event: Box::new(event), kind, correlation_id, causation_id,
             respond: tx,
         }).map_err(|_| StoreError::WriterCrashed)?;
 

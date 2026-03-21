@@ -8,7 +8,6 @@ use std::io::Write;
 /// Magic: b"FBAT" (4 bytes). Header: 32 bytes. Frame: [len:u32 BE][crc32:u32 BE][msgpack]
 /// Files named: {segment_id:06}.fbat (e.g., 000001.fbat). Sequential u64.
 /// [SPEC:src/store/segment.rs]
-
 pub const SEGMENT_MAGIC: &[u8; 4] = b"FBAT";
 pub const SEGMENT_HEADER_SIZE: usize = 32;
 
@@ -51,7 +50,6 @@ pub struct CompactionResult {
 /// [SPEC:WIRE FORMAT DECISIONS — ALWAYS rmp_serde::to_vec_named()]
 /// [DEP:rmp_serde::to_vec_named] → Result<Vec<u8>, encode::Error>
 /// [DEP:crc32fast::hash] → u32
-
 pub fn frame_encode<T: serde::Serialize>(data: &T) -> Result<Vec<u8>, StoreError> {
     let msgpack = rmp_serde::to_vec_named(data)
         .map_err(|e| StoreError::Serialization(e.to_string()))?;

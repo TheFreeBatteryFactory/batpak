@@ -112,20 +112,20 @@ impl StoreIndex {
         // Primary index: entity -> BTreeMap
         // [DEP:dashmap::DashMap::entry] — holds write lock, release fast
         self.streams
-            .entry(entity.clone())
-            .or_insert_with(BTreeMap::new)
+            .entry(Arc::clone(&entity))
+            .or_default()
             .insert(key.clone(), entry.clone());
 
         // Scope index
         self.scope_entities
             .entry(scope)
-            .or_insert_with(HashSet::new)
-            .insert(entity.clone());
+            .or_default()
+            .insert(Arc::clone(&entity));
 
         // Fact index
         self.by_fact
             .entry(entry.kind)
-            .or_insert_with(BTreeMap::new)
+            .or_default()
             .insert(key, entry.clone());
 
         // Point lookup

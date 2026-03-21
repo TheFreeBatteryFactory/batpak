@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 /// Reader: reads events from segment files. LRU file descriptor cache.
 /// Behind parking_lot::Mutex for Send + Sync. [SPEC:src/store/reader.rs]
 /// [SPEC:IMPLEMENTATION NOTES item 6 — Store is Send + Sync]
-
 pub(crate) struct Reader {
     data_dir: PathBuf,
     /// LRU FD cache: segment_id -> open File handle. Evicts oldest when full.
@@ -184,9 +183,9 @@ impl Reader {
         if let Some(pos) = cache.order.iter().position(|&id| id == segment_id) {
             cache.order.remove(pos);
             cache.order.push(segment_id);
-            return Ok(cache.fds[&segment_id]
+            return cache.fds[&segment_id]
                 .try_clone()
-                .map_err(StoreError::Io)?);
+                .map_err(StoreError::Io);
         }
 
         let path = self.data_dir.join(segment::segment_filename(segment_id));

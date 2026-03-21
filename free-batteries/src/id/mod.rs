@@ -5,7 +5,6 @@ use std::str::FromStr;
 /// EntityIdType: Layer 0 trait. No uuid dep.
 /// All IDs are u128 internally. No Uuid in public API. [SPEC:src/id/mod.rs]
 /// [SPEC:RED FLAGS — DO NOT put uuid::Uuid in the public API]
-
 pub trait EntityIdType:
     Copy + Clone + Eq + Hash + fmt::Debug + fmt::Display + FromStr + Send + Sync + 'static
 {
@@ -26,7 +25,6 @@ pub fn generate_v7_id() -> u128 {
 
 /// define_entity_id!: Layer 1+ macro. Uses generate_v7_id() helper.
 /// Downstream crates do NOT need uuid as a direct dependency.
-
 #[macro_export]
 macro_rules! define_entity_id {
     ($name:ident, $entity:literal) => {
