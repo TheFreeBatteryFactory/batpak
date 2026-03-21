@@ -21,6 +21,30 @@ ci: fmt clip test
 bench:
     cargo bench --all-features
 
+# Coverage: like `mix test --cover` — pings back what's NOT covered.
+cover:
+    ./scripts/coverage-feedback
+
+# Coverage with CI threshold gate (fails if below 70%)
+cover-check:
+    ./scripts/coverage-feedback --ci --threshold 70
+
+# Raw coverage JSON for tooling
+cover-json:
+    ./scripts/coverage-feedback --json
+
+# Benchmark with improvement report
+bench-report:
+    ./scripts/bench-report
+
+# Save benchmark baseline for future comparison
+bench-save:
+    ./scripts/bench-report --save
+
+# Compare benchmarks against saved baseline
+bench-compare:
+    ./scripts/bench-report --compare
+
 doc:
     cargo doc --all-features --no-deps --open
 
