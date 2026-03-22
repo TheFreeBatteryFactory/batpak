@@ -4,7 +4,7 @@ pub mod receipt;
 pub use denial::Denial;
 pub use receipt::Receipt;
 
-/// Gate<Ctx>: a predicate that evaluates a context and either permits or denies.
+/// `Gate<Ctx>`: a predicate that evaluates a context and either permits or denies.
 /// Gates are PREDICATES, not transformers. No I/O, no mutation, pure.
 /// Ctx is product-defined. Library is generic over it.
 /// [SPEC:src/guard/mod.rs]
@@ -16,7 +16,7 @@ pub trait Gate<Ctx>: Send + Sync {
     }
 }
 
-/// GateSet<Ctx>: ordered collection of gates. Fail-fast by default.
+/// `GateSet<Ctx>`: ordered collection of gates. Fail-fast by default.
 pub struct GateSet<Ctx> {
     gates: Vec<Box<dyn Gate<Ctx>>>,
 }
@@ -31,7 +31,7 @@ impl<Ctx> GateSet<Ctx> {
     }
 
     /// Fail-fast evaluation. First denial stops.
-    /// Returns Receipt<T> wrapping the proposal payload on success.
+    /// Returns `Receipt<T>` wrapping the proposal payload on success.
     pub fn evaluate<T>(
         &self,
         ctx: &Ctx,
