@@ -1,6 +1,6 @@
 # free-batteries
 
-Event-sourced state machines over coordinate spaces.
+Event-sourced state machines over coordinate spaces. Sync API. No tokio. No async.
 
 ## Features
 
