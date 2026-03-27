@@ -308,7 +308,7 @@ Store { index: Arc<StoreIndex>, reader: Arc<Reader>, cache: Box<dyn ProjectionCa
         writer: WriterHandle, config: Arc<StoreConfig> }
   Store: Send + Sync (all fields are Send + Sync)
   ::open(config: StoreConfig) -> Result<Self, StoreError>
-  ::open_default() -> Result<Self, StoreError>     // ./free-batteries-data/
+  ::open_default() -> Result<Self, StoreError>     // ./batpak-data/
   .append(&self, coord, kind, payload: &impl Serialize) -> Result<AppendReceipt, StoreError>
   .append_reaction(&self, coord, kind, payload, correlation_id: u128, causation_id: u128) -> Result<AppendReceipt, StoreError>
   .get(event_id: u128) -> Result<StoredEvent<serde_json::Value>, StoreError>
@@ -2279,7 +2279,7 @@ IMPL:
 /// compile_error guards for impossible configurations:
 #[cfg(feature = "async-store")]
 compile_error!(
-    "INVARIANT 2: free-batteries does not have an async Store API. \
+    "INVARIANT 2: batpak does not have an async Store API. \
      Async callers use spawn_blocking() or flume recv_async(). \
      See: src/store/subscription.rs for the async pattern."
 );
@@ -3032,7 +3032,7 @@ impl SubscriberList {
 
 impl WriterHandle {
     /// Spawn the background writer thread.
-    /// [SPEC:src/store/writer.rs — "free-batteries-writer" thread]
+    /// [SPEC:src/store/writer.rs — "batpak-writer" thread]
     pub(crate) fn spawn(
         config: Arc<StoreConfig>,
         index: Arc<StoreIndex>,
@@ -3044,7 +3044,7 @@ impl WriterHandle {
         let idx = Arc::clone(&index);
 
         let thread = std::thread::Builder::new()
-            .name("free-batteries-writer".into())
+            .name("batpak-writer".into())
             .spawn(move || {
                 writer_loop(rx, cfg, idx, subs);
             })
@@ -3676,7 +3676,7 @@ pub struct StoreConfig {
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {
-            data_dir: PathBuf::from("./free-batteries-data"),
+            data_dir: PathBuf::from("./batpak-data"),
             segment_max_bytes: 256 * 1024 * 1024,  // 256MB
             sync_every_n_events: 1000,
             fd_budget: 64,

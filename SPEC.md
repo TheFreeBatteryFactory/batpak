@@ -151,7 +151,7 @@ review — it's **making the toolchain the reviewer**.
 ## WHAT V1 IS
 
 ```
-free-batteries v1 is a coordinate-addressed append-only causal log with
+batpak v1 is a coordinate-addressed append-only causal log with
 typestate-aware transitions and projection replay.
 
 It IS:  a library for building event-sourced state machines over coordinate spaces.
@@ -177,7 +177,7 @@ It is NOT:  multi-lane, distributed, a transformer-gate algebra, or a generic
 ## FILE TREE
 
 ```
-free-batteries/
+batpak/
 ├── .cargo/config.toml
 ├── .config/nextest.toml
 ├── .github/workflows/ci.yml
@@ -266,7 +266,7 @@ free-batteries/
 
 ```toml
 [package]
-name = "free-batteries"
+name = "batpak"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
@@ -482,7 +482,7 @@ Panic messages follow the pattern:
 Crate root. Module declarations + getting-started guide in doc comments.
 
 Doc comment structure:
-  Paragraph 1: "free-batteries is a library for building event-sourced
+  Paragraph 1: "batpak is a library for building event-sourced
     state machines over user-defined coordinate spaces."
   Paragraph 2: Four concepts — Coordinate (where), Outcome (what happened),
     Gate (who decides), Store (the runtime).
@@ -514,7 +514,7 @@ Each module's doc comment teaches the concept it implements:
 ### `src/prelude.rs`
 
 ```
-15 types for 90% of usage. `use free_batteries::prelude::*`
+15 types for 90% of usage. `use batpak::prelude::*`
 
 Re-exports:
   Coordinate, Region, EventKind, DagPosition
@@ -986,7 +986,7 @@ Audit trails show "bypassed: {reason}" with empty gate list.
 pub struct Store { index, reader, cache, writer, config }
 
 Store::open(config: StoreConfig) -> Result<Self, StoreError>
-Store::open_default() -> Result<Self, StoreError>  // ./free-batteries-data/
+Store::open_default() -> Result<Self, StoreError>  // ./batpak-data/
 
 ALL METHODS ARE SYNC (Invariant 2):
 
@@ -1065,7 +1065,7 @@ pub enum StoreError {
 impl Display, Error, From<CoordinateError>, From<std::io::Error>.
 
 StoreConfig includes:
-  data_dir: PathBuf              (default: "./free-batteries-data")
+  data_dir: PathBuf              (default: "./batpak-data")
   segment_max_bytes: u64         (default: 256MB)
   sync_every_n_events: u32       (default: 1000)
   fd_budget: usize               (default: 64)
@@ -1106,7 +1106,7 @@ Types: SegmentHeader, FramePayload<P>, CompactionResult
 ### `src/store/writer.rs`
 
 ```
-Background OS thread ("free-batteries-writer"). Sync-first. flume channels.
+Background OS thread ("batpak-writer"). Sync-first. flume channels.
 
 WriterCommand { Append{entity,scope,event,respond}, Sync{respond}, Shutdown{respond} }
   All respond channels: flume::Sender (sync send from writer, async recv from caller)
@@ -1631,7 +1631,7 @@ steps above it. An implementing agent builds top to bottom, checking after
 each numbered step.
 
 ```
-1.  cargo init free-batteries --lib
+1.  cargo init batpak --lib
 2.  Create all config files (.cargo, clippy.toml, rust-toolchain.toml,
     nextest.toml, ci.yml, justfile, .gitignore, licenses, changelog, build.rs)
 3.  Write Cargo.toml
@@ -1711,7 +1711,7 @@ STEP 11 — Final checks
 ## HELLO WORLD (pure sync, no tokio)
 
 ```rust
-use free_batteries::prelude::*;
+use batpak::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = Store::open_default()?;
