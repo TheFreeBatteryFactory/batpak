@@ -381,3 +381,37 @@ fn errors_propagate_not_launder_to_defaults() {
          Common causes: CAS check missing or returning Ok on mismatch."
     );
 }
+
+// ===== INV-SEC: EventKind Category Enforcement =====
+// Products must not be able to create system (0x0) or effect (0xD) kinds via custom().
+
+#[test]
+#[should_panic(expected = "category 0x0 is reserved")]
+fn eventkind_rejects_system_category() {
+    let _ = EventKind::custom(0x0, 1);
+}
+
+#[test]
+#[should_panic(expected = "category 0xD is reserved")]
+fn eventkind_rejects_effect_category() {
+    let _ = EventKind::custom(0xD, 1);
+}
+
+#[test]
+fn eventkind_allows_product_categories() {
+    // Categories 0x1-0xC and 0xE-0xF are all valid for products
+    for cat in 1..=0xCu8 {
+        let kind = EventKind::custom(cat, 1);
+        assert_eq!(
+            kind.category(), cat,
+            "PROPERTY: EventKind::custom({cat}, 1) must preserve category."
+        );
+    }
+    for cat in [0xEu8, 0xF] {
+        let kind = EventKind::custom(cat, 1);
+        assert_eq!(
+            kind.category(), cat,
+            "PROPERTY: EventKind::custom({cat}, 1) must preserve category."
+        );
+    }
+}

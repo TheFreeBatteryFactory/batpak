@@ -9,11 +9,15 @@ pub struct EventKind(u16); // PRIVATE inner field — not pub
 
 impl EventKind {
     /// category:type encoding. Upper 4 bits = category, lower 12 = type.
-    /// Products use categories 0x1-0xF. System uses 0x0 and 0xD.
+    /// Products use categories 0x1-0xC, 0xE-0xF. System reserves 0x0 and 0xD.
     pub const fn custom(category: u8, type_id: u16) -> Self {
         // Validate: only lower 4 bits of category survive the shift.
         // category >= 16 would silently overflow into wrong namespace.
         assert!(category < 16, "EventKind category must be 0-15 (4 bits)");
+        // Categories 0x0 (system) and 0xD (effect) are reserved for library constants.
+        // Products must use 0x1-0xC or 0xE-0xF.
+        assert!(category != 0, "EventKind category 0x0 is reserved for system kinds (SYSTEM_INIT, etc.)");
+        assert!(category != 0xD, "EventKind category 0xD is reserved for effect kinds (EFFECT_ERROR, etc.)");
         Self(((category as u16) << 12) | (type_id & 0x0FFF))
     }
 

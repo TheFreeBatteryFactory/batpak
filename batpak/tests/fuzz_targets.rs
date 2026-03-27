@@ -182,8 +182,10 @@ proptest! {
     ))]
 
     /// EventKind custom() round-trips through category()/type_id().
+    /// Categories 0x0 (system) and 0xD (effect) are reserved — filter them out.
     #[test]
     fn fuzz_event_kind_roundtrip(cat in 0u8..16, type_id in 0u16..4096) {
+        prop_assume!(cat != 0 && cat != 0xD);
         let kind = EventKind::custom(cat, type_id);
         prop_assert_eq!(kind.category(), cat,
             "EVENTKIND CATEGORY MISMATCH: custom({}, {}).category() = {} != {}. \
@@ -196,8 +198,10 @@ proptest! {
     }
 
     /// EventKind serde round-trip.
+    /// Categories 0x0 (system) and 0xD (effect) are reserved — filter them out.
     #[test]
     fn fuzz_event_kind_serde(cat in 0u8..16, type_id in 0u16..4096) {
+        prop_assume!(cat != 0 && cat != 0xD);
         let kind = EventKind::custom(cat, type_id);
         let bytes = rmp_serde::to_vec_named(&kind).expect("serialize");
         let decoded: EventKind = rmp_serde::from_slice(&bytes).expect("deserialize");
@@ -206,8 +210,10 @@ proptest! {
     }
 
     /// EventKind with overflow type_id — lower 12 bits should be masked.
+    /// Categories 0x0 (system) and 0xD (effect) are reserved — filter them out.
     #[test]
     fn fuzz_event_kind_overflow(cat in 0u8..16, raw_type in 0u16..=u16::MAX) {
+        prop_assume!(cat != 0 && cat != 0xD);
         let kind = EventKind::custom(cat, raw_type);
         // type_id must be masked to 12 bits
         prop_assert_eq!(kind.type_id(), raw_type & 0x0FFF,
@@ -279,6 +285,7 @@ proptest! {
     }
 
     /// Region::matches_event with arbitrary inputs (must never panic).
+    /// Categories 0x0 (system) and 0xD (effect) are reserved — filter them out.
     #[test]
     fn fuzz_region_matches_event(
         prefix in "\\PC{0,10}",
@@ -288,6 +295,7 @@ proptest! {
         cat in 0u8..16,
         type_id in 0u16..4096,
     ) {
+        prop_assume!(cat != 0 && cat != 0xD);
         let region = Region::entity(&prefix).with_scope(&scope);
         let kind = EventKind::custom(cat, type_id);
         // Must never panic
@@ -462,6 +470,8 @@ proptest! {
         type_id in 0u16..4096,
         flags in any::<u8>(),
     ) {
+        // Categories 0x0 (system) and 0xD (effect) are reserved
+        prop_assume!(cat != 0 && cat != 0xD);
         let header = EventHeader::new(
             event_id, corr_id, caus_id, ts,
             DagPosition::new(depth, lane, seq),

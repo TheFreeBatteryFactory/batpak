@@ -849,7 +849,7 @@ impl Store {
         }
 
         // 3. Apply strategy filter
-        let tombstone_kind = EventKind::custom(0x0, 0xFFE); // system tombstone
+        let tombstone_kind = EventKind::TOMBSTONE;
         let mut kept_events: Vec<reader::ScannedEntry> = Vec::new();
         match &config.strategy {
             CompactionStrategy::Merge => {

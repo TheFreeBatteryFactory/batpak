@@ -623,7 +623,7 @@ fn compact_tombstone_updates_event_kind_in_index() {
     let dir = TempDir::new().expect("create temp dir");
     let live_kind = EventKind::custom(0xF, 1);
     let doomed_kind = EventKind::custom(0xF, 2);
-    let tombstone_kind = EventKind::custom(0x0, 0xFFE);
+    let tombstone_kind = EventKind::TOMBSTONE;
 
     // Phase 1: populate events, then close to seal all segments.
     {
