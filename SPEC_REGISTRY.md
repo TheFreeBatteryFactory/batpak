@@ -2374,7 +2374,7 @@ pub(crate) struct StoreIndex {
     pub(crate) entity_locks: DashMap<Arc<str>, Arc<parking_lot::Mutex<()>>>,
 }
 
-/// ClockKey: BTreeMap key. Ord: clock-first, uuid tiebreak.
+/// ClockKey: BTreeMap key. Ord: wall_ms-first, then clock, then uuid tiebreak.
 /// [SPEC:IMPLEMENTATION NOTES item 1]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClockKey {
@@ -3146,12 +3146,12 @@ fn writer_loop(
 
                 events_since_sync += 1;
                 if events_since_sync >= config.sync_every_n_events {
-                    let _ = active_segment.sync();
+                    let _ = active_segment.sync_with_mode(&config.sync_mode);
                     events_since_sync = 0;
                 }
             }
             WriterCommand::Sync { respond } => {
-                let result = active_segment.sync().map_err(|e| e);
+                let result = active_segment.sync_with_mode(&config.sync_mode);
                 let _ = respond.send(result);
                 events_since_sync = 0;
             }
@@ -3175,12 +3175,12 @@ fn writer_loop(
                             let _ = r.send(Ok(()));
                         }
                         Ok(WriterCommand::Sync { respond: r }) => {
-                            let _ = r.send(active_segment.sync());
+                            let _ = r.send(active_segment.sync_with_mode(&config.sync_mode));
                         }
                         Err(_) => break, // channel empty
                     }
                 }
-                let _ = active_segment.sync();
+                let _ = active_segment.sync_with_mode(&config.sync_mode);
                 let _ = respond.send(Ok(()));
                 return; // exit writer loop
             }
@@ -3225,8 +3225,12 @@ fn handle_append(
         .map(|e| e.clock + 1)
         .unwrap_or(0);
 
-    /// STEP 4: Set event header position.
-    let position = DagPosition::child(clock);
+    /// STEP 4: Set event header position with HLC wall clock.
+    /// Ensure wall_ms is monotonically non-decreasing per entity.
+    let raw_ms = (event.header.timestamp_us / 1000) as u64;
+    let last_ms = index.get_latest(entity).map(|e| e.wall_ms).unwrap_or(0);
+    let now_ms = raw_ms.max(last_ms);
+    let position = DagPosition::child_at(clock, now_ms, 0);
     event.header.position = position;
     event.header.event_kind = kind;
     event.header.correlation_id = correlation_id;
@@ -3253,7 +3257,7 @@ fn handle_append(
 
     /// STEP 7: Check segment rotation.
     if active_segment.needs_rotation(config.segment_max_bytes) {
-        active_segment.sync()?;
+        active_segment.sync_with_mode(&config.sync_mode)?;
         let old = std::mem::replace(
             active_segment,
             Segment::<Active>::create(&config.data_dir, *segment_id + 1)?,

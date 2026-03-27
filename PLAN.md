@@ -9,7 +9,7 @@ Codebase Audit Loop, organized by impact.
 
 ## Current State (Post Round 1)
 
-- 267 tests pass, 0 clippy warnings, 5 build.rs guards, 5 bench suites
+- 288+ tests pass, 0 clippy warnings, 5 build.rs guards, 5 bench suites
 - Big Bang compliance: 11 tests covering LAW-003/007, FM-007/022/023, INV-TYPE/TEMP/CONC/SEC
 - Gaps identified by 4 audit agents remain unaddressed
 
@@ -131,5 +131,5 @@ a non-empty Display message. This ensures no error variant is hollow.
 
 ## Validation
 After all changes: `cargo test`, `cargo clippy --all-features -- -D warnings`,
-`cargo bench` (spot-check). All 267+ tests must pass, zero warnings, zero new
+`cargo bench` (spot-check). All 288+ tests must pass, zero warnings, zero new
 clippy issues.
