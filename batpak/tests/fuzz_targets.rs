@@ -605,7 +605,82 @@ proptest! {
 }
 
 // ============================================================
-// FUZZ TARGET 10: WaitCondition + CompensationAction serde
+// FUZZ TARGET 10: Wire.rs uncovered visitor paths
+// INVARIANTS: INV-TYPE (wire format totality — all visitor paths exercised)
+// ============================================================
+
+/// Explicit test for Option<u128> None round-trip through msgpack.
+/// This exercises the visit_none path in option_u128_bytes.
+#[test]
+fn fuzz_option_u128_none_explicit() {
+    #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+    struct Wrapper {
+        #[serde(with = "batpak::wire::option_u128_bytes")]
+        v: Option<u128>,
+    }
+    let w = Wrapper { v: None };
+    let bytes = rmp_serde::to_vec_named(&w).expect("serialize None");
+    let decoded: Wrapper = rmp_serde::from_slice(&bytes).expect("deserialize None");
+    assert_eq!(
+        w, decoded,
+        "OPTION_U128 NONE ROUNDTRIP FAILED: None must survive msgpack roundtrip.\n\
+         Investigate: src/wire.rs option_u128_bytes visit_none.\n\
+         Run: cargo test --test fuzz_targets fuzz_option_u128_none_explicit"
+    );
+}
+
+/// u128 round-trip through serde_json, which uses visit_seq (not visit_bytes).
+/// This exercises the sequence-based visitor path in u128_bytes.
+#[test]
+fn fuzz_u128_json_roundtrip() {
+    #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+    struct Wrapper {
+        #[serde(with = "batpak::wire::u128_bytes")]
+        v: u128,
+    }
+    for val in [0u128, 1, u128::MAX, u128::MAX / 2, 42, 0xDEADBEEF_CAFEBABE] {
+        let w = Wrapper { v: val };
+        let json = serde_json::to_string(&w).expect("serialize to json");
+        let decoded: Wrapper = serde_json::from_str(&json).expect("deserialize from json");
+        assert_eq!(
+            w, decoded,
+            "U128 JSON ROUNDTRIP FAILED for {val}: visit_seq path must handle JSON arrays.\n\
+             Investigate: src/wire.rs u128_bytes visit_seq.\n\
+             Run: cargo test --test fuzz_targets fuzz_u128_json_roundtrip"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(
+        std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(256)
+    ))]
+
+    /// Feed JSON arrays of wrong lengths to u128_bytes deserializer (visit_seq) — must error, not panic.
+    #[test]
+    fn fuzz_u128_malformed_length(len in 0usize..33) {
+        prop_assume!(len != 16); // 16 is the valid length
+        // Build a JSON array with `len` u8 values, feed to deserializer via visit_seq path
+        let arr: Vec<u8> = vec![0xABu8; len];
+        let json = format!("{{\"_v\":{}}}", serde_json::to_string(&arr).expect("json array"));
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            #[serde(with = "batpak::wire::u128_bytes")]
+            _v: u128,
+        }
+        let result = serde_json::from_str::<Wrapper>(&json);
+        prop_assert!(result.is_err(),
+            "U128 MALFORMED LENGTH ACCEPTED: {} bytes should be rejected (expected 16).\n\
+             Investigate: src/wire.rs u128_bytes visit_seq length check.\n\
+             Run: cargo test --test fuzz_targets fuzz_u128_malformed_length", len);
+    }
+}
+
+// ============================================================
+// FUZZ TARGET 11: WaitCondition + CompensationAction serde
 // Recursive enum types — test deeply nested structures.
 // ============================================================
 

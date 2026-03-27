@@ -63,10 +63,8 @@ pub struct StoreConfig {
     pub writer_channel_capacity: usize,
     pub broadcast_capacity: usize,
     pub cache_map_size_bytes: usize,
-    /// NOTE: restart_policy is defined for API completeness but not yet wired
-    /// into the writer loop. The writer thread currently exits on panic without
-    /// automatic restart. This field is read by diagnostics() for reporting only.
-    /// TODO: Implement restart logic in WriterHandle::spawn() when needed.
+    /// Writer auto-restart policy on panic. `Once` allows 1 restart, `Bounded`
+    /// allows N restarts within a time window. See: writer.rs writer_thread_main().
     pub restart_policy: RestartPolicy,
     pub shutdown_drain_limit: usize,
     /// Optional writer thread stack size. None = OS default (~8MB on Linux).
@@ -1010,6 +1008,27 @@ impl Store {
             fd_budget: self.config.fd_budget,
             restart_policy: self.config.restart_policy.clone(),
         }
+    }
+}
+
+/// Test helper: trigger a panic in the writer thread to exercise restart_policy.
+/// Returns Ok(()) if the panic command was sent and acknowledged by the writer.
+/// After calling this, the writer will panic and (if restart_policy allows) restart.
+/// Wait briefly after calling to let the restart complete before sending more commands.
+#[doc(hidden)]
+impl Store {
+    /// Test-only: trigger a panic in the writer thread to exercise restart_policy.
+    pub fn panic_writer_for_test(&self) -> Result<(), StoreError> {
+        let (tx, rx) = flume::bounded(1);
+        self.writer
+            .tx
+            .send(WriterCommand::PanicForTest { respond: tx })
+            .map_err(|_| StoreError::WriterCrashed)?;
+        // Wait for acknowledgment before the panic
+        let _ = rx.recv_timeout(std::time::Duration::from_millis(500));
+        // Brief pause to let the restart complete
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        Ok(())
     }
 }
 

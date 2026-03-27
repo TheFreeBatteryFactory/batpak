@@ -10,13 +10,13 @@
 //! apply_transition, clock_range queries, fd_budget eviction,
 //! corrupt segment recovery.
 //!
-//! PROVES: LAW-003 (No Orphan Infrastructure — exercises full public API)
-//! DEFENDS: FM-009 (Polite Downgrade), FM-011 (Error Path Hollowing), FM-013 (Coverage Mirage)
+//! PROVES: LAW-001 (No Fake Success), LAW-003 (No Orphan Infrastructure — exercises full public API)
+//! DEFENDS: FM-009 (Polite Downgrade — restart_policy wired), FM-011 (Error Path Hollowing), FM-013 (Coverage Mirage)
 //! INVARIANTS: INV-CONC (CAS, idempotency), INV-TEMP (walk_ancestors, compaction), INV-PERF (fd_budget)
 //! [SPEC:tests/store_advanced.rs]
 
 use batpak::prelude::*;
-use batpak::store::{Store, StoreConfig};
+use batpak::store::{RestartPolicy, Store, StoreConfig};
 use batpak::typestate::Transition;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -1896,7 +1896,7 @@ fn project_calls_prefetch() {
     impl EventSourced<serde_json::Value> for Counter {
         fn from_events(events: &[batpak::prelude::Event<serde_json::Value>]) -> Option<Self> {
             Some(Counter {
-                count: events.len() as u32,
+                count: u32::try_from(events.len()).expect("test uses < 2^32 events"),
             })
         }
         fn apply_event(&mut self, _event: &batpak::prelude::Event<serde_json::Value>) {
@@ -1920,4 +1920,121 @@ fn project_calls_prefetch() {
     );
 
     store.close().expect("close");
+}
+
+// ================================================================
+// Writer restart_policy tests — PROVES LAW-001, DEFENDS FM-009
+// ================================================================
+
+/// RestartPolicy::Once allows one restart after panic.
+/// After restart, the store should still accept appends normally.
+#[test]
+fn writer_restart_once_recovers_from_panic() {
+    let dir = TempDir::new().expect("create temp dir");
+    let config = StoreConfig {
+        data_dir: dir.path().to_path_buf(),
+        segment_max_bytes: 64 * 1024,
+        restart_policy: RestartPolicy::Once,
+        ..StoreConfig::new("")
+    };
+    let store = Store::open(config).expect("open store");
+    let coord = Coordinate::new("restart:test", "restart:scope").expect("valid coord");
+    let kind = EventKind::custom(0xF, 1);
+
+    // Append before panic — should succeed
+    store.append(&coord, kind, &"before_panic").expect("append before panic");
+
+    // Trigger writer panic
+    store.panic_writer_for_test().expect("send panic command");
+
+    // Append after restart — should succeed because Once allows 1 restart
+    store.append(&coord, kind, &"after_panic").expect(
+        "RESTART FAILED: append after writer panic should succeed with RestartPolicy::Once.\n\
+         Investigate: src/store/writer.rs writer_thread_main() catch_unwind logic.\n\
+         Common causes: restart not re-creating segment, rx channel dead."
+    );
+
+    // Verify both events persisted
+    let entries = store.stream("restart:test");
+    assert_eq!(
+        entries.len(), 2,
+        "RESTART DATA LOSS: both events (before and after panic) should be persisted.\n\
+         Investigate: src/store/writer.rs writer_thread_main() segment re-creation.\n\
+         Run: cargo test --test store_advanced writer_restart_once_recovers_from_panic"
+    );
+}
+
+/// RestartPolicy::Once gives up after the 2nd panic.
+/// The writer thread should be dead, and further appends should fail with WriterCrashed.
+#[test]
+fn writer_restart_once_gives_up_after_second_panic() {
+    let dir = TempDir::new().expect("create temp dir");
+    let config = StoreConfig {
+        data_dir: dir.path().to_path_buf(),
+        segment_max_bytes: 64 * 1024,
+        restart_policy: RestartPolicy::Once,
+        ..StoreConfig::new("")
+    };
+    let store = Store::open(config).expect("open store");
+    let coord = Coordinate::new("restart:exhaust", "restart:scope").expect("valid coord");
+    let kind = EventKind::custom(0xF, 1);
+
+    // First panic — writer restarts (budget: 1)
+    store.panic_writer_for_test().expect("send first panic");
+
+    // Second panic — budget exhausted, writer exits
+    let _ = store.panic_writer_for_test();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Now the writer should be dead — append should fail
+    let result = store.append(&coord, kind, &"should_fail");
+    assert!(
+        result.is_err(),
+        "RESTART BUDGET NOT ENFORCED: append should fail after restart budget exhausted.\n\
+         Investigate: src/store/writer.rs writer_thread_main() budget_ok logic.\n\
+         Common causes: restart counter not incremented, budget check wrong.\n\
+         Run: cargo test --test store_advanced writer_restart_once_gives_up_after_second_panic"
+    );
+}
+
+/// RestartPolicy::Bounded respects max_restarts within the time window.
+#[test]
+fn writer_restart_bounded_respects_limit() {
+    let dir = TempDir::new().expect("create temp dir");
+    let config = StoreConfig {
+        data_dir: dir.path().to_path_buf(),
+        segment_max_bytes: 64 * 1024,
+        restart_policy: RestartPolicy::Bounded {
+            max_restarts: 2,
+            within_ms: 60_000, // 60s window — won't expire during test
+        },
+        ..StoreConfig::new("")
+    };
+    let store = Store::open(config).expect("open store");
+    let coord = Coordinate::new("restart:bounded", "restart:scope").expect("valid coord");
+    let kind = EventKind::custom(0xF, 1);
+
+    // First panic — restarts (1/2)
+    store.panic_writer_for_test().expect("first panic");
+    store.append(&coord, kind, &"after_panic_1").expect(
+        "append after 1st restart should succeed (budget 1/2)"
+    );
+
+    // Second panic — restarts (2/2)
+    store.panic_writer_for_test().expect("second panic");
+    store.append(&coord, kind, &"after_panic_2").expect(
+        "append after 2nd restart should succeed (budget 2/2)"
+    );
+
+    // Third panic — budget exhausted
+    let _ = store.panic_writer_for_test();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let result = store.append(&coord, kind, &"should_fail");
+    assert!(
+        result.is_err(),
+        "BOUNDED RESTART BUDGET NOT ENFORCED: append should fail after 3 panics with max_restarts=2.\n\
+         Investigate: src/store/writer.rs writer_thread_main() Bounded branch.\n\
+         Run: cargo test --test store_advanced writer_restart_bounded_respects_limit"
+    );
 }

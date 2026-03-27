@@ -14,7 +14,9 @@ use crate::store::segment::{self, Active, FramePayload, Segment};
 use crate::store::{AppendReceipt, StoreConfig, StoreError};
 use flume::{Receiver, Sender, TrySendError};
 use parking_lot::Mutex;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, info, trace};
 
 /// WriterCommand: messages sent to the background writer thread via flume.
@@ -33,6 +35,11 @@ pub(crate) enum WriterCommand {
         respond: Sender<Result<(), StoreError>>,
     },
     Shutdown {
+        respond: Sender<Result<(), StoreError>>,
+    },
+    /// Test-only: trigger a panic in the writer thread to exercise restart_policy.
+    #[doc(hidden)]
+    PanicForTest {
         respond: Sender<Result<(), StoreError>>,
     },
 }
@@ -138,7 +145,7 @@ impl WriterHandle {
         }
         let thread = builder
             .spawn(move || {
-                writer_loop(&rx, &cfg, &idx, &subs, initial_segment, initial_segment_id);
+                writer_thread_main(&rx, &cfg, &idx, &subs, initial_segment, initial_segment_id);
             })
             .map_err(StoreError::Io)?;
 
@@ -162,6 +169,104 @@ struct WriterState<'a> {
     segment_id: &'a mut u64,
     config: &'a StoreConfig,
     subscribers: &'a SubscriberList,
+}
+
+/// Writer thread entry point with panic recovery and restart logic.
+/// Wraps writer_loop() in catch_unwind, implementing RestartPolicy.
+/// The rx (command receiver) survives across restarts because it lives
+/// outside catch_unwind. Segments are re-created on restart since the
+/// previous one is dropped during unwind.
+/// [SPEC:src/store/writer.rs — RestartPolicy enforcement]
+fn writer_thread_main(
+    rx: &Receiver<WriterCommand>,
+    config: &StoreConfig,
+    index: &StoreIndex,
+    subscribers: &SubscriberList,
+    initial_segment: Segment<Active>,
+    initial_segment_id: u64,
+) {
+    let mut segment = initial_segment;
+    let mut seg_id = initial_segment_id;
+    let mut restarts: u32 = 0;
+    let mut window_start = Instant::now();
+
+    loop {
+        // catch_unwind needs AssertUnwindSafe because writer_loop borrows
+        // mutable state. This is safe: on panic, the segment is dropped
+        // (cleaned up by unwind) and we re-create it below.
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            writer_loop(rx, config, index, subscribers, segment, seg_id);
+        }));
+
+        match result {
+            Ok(()) => return, // clean shutdown via WriterCommand::Shutdown
+            Err(panic_info) => {
+                let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+
+                let budget_ok = match &config.restart_policy {
+                    RestartPolicy::Once => {
+                        if restarts >= 1 {
+                            false
+                        } else {
+                            restarts += 1;
+                            true
+                        }
+                    }
+                    RestartPolicy::Bounded {
+                        max_restarts,
+                        within_ms,
+                    } => {
+                        // Reset counter if window has elapsed
+                        if window_start.elapsed() > std::time::Duration::from_millis(*within_ms) {
+                            restarts = 0;
+                            window_start = Instant::now();
+                        }
+                        if restarts >= *max_restarts {
+                            false
+                        } else {
+                            restarts += 1;
+                            true
+                        }
+                    }
+                };
+
+                if !budget_ok {
+                    tracing::error!(
+                        "writer restart budget exhausted — thread exiting. \
+                         Last panic: {panic_msg}. Policy: {:?}",
+                        config.restart_policy
+                    );
+                    return;
+                }
+
+                tracing::warn!(
+                    "writer panic — restarting ({restarts}/{max}). Panic: {panic_msg}",
+                    max = match &config.restart_policy {
+                        RestartPolicy::Once => 1,
+                        RestartPolicy::Bounded { max_restarts, .. } => *max_restarts,
+                    }
+                );
+
+                // Re-create segment: the previous one was dropped during unwind.
+                seg_id = find_latest_segment_id(&config.data_dir).unwrap_or(seg_id) + 1;
+                segment = match Segment::<Active>::create(&config.data_dir, seg_id) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!(
+                            "writer restart failed — cannot create segment: {e}. Thread exiting."
+                        );
+                        return;
+                    }
+                };
+            }
+        }
+    }
 }
 
 /// The writer's main loop. Runs on the background thread.
@@ -237,6 +342,10 @@ fn writer_loop(
                         Ok(WriterCommand::Sync { respond: r }) => {
                             let _ = r.send(state.active_segment.sync_with_mode(&config.sync_mode));
                         }
+                        // test-only: discard PanicForTest during shutdown drain
+                        Ok(WriterCommand::PanicForTest { respond: r }) => {
+                            let _ = r.send(Ok(())); // discard during drain
+                        }
                         Err(_) => break, // channel empty
                     }
                 }
@@ -245,6 +354,13 @@ fn writer_loop(
                 }
                 let _ = respond.send(Ok(()));
                 return; // exit writer loop
+            }
+            // test-only: intentional panic to exercise restart_policy
+            #[allow(clippy::panic)] // intentional: this panic IS the test — it exercises catch_unwind in writer_thread_main
+            WriterCommand::PanicForTest { respond } => {
+                // Acknowledge receipt before panicking so the test knows the command was processed.
+                let _ = respond.send(Ok(()));
+                panic!("PanicForTest: intentional writer panic for restart_policy testing");
             }
         }
     }

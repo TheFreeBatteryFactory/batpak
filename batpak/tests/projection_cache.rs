@@ -1,6 +1,9 @@
 //! Direct tests of ProjectionCache trait methods per backend.
+//! Plus: integration tests with real Store operations (append → project → cache hit).
 //! Fulfills SPEC promise: "Every trait method on ProjectionCache is exercised
 //! against every backend (NoCache, RedbCache, LmdbCache)."
+//!
+//! Integration tests: `cargo test --features redb,lmdb --test projection_cache`
 //! [SPEC:tests/projection_cache.rs]
 
 use batpak::store::projection::{CacheMeta, NoCache, ProjectionCache};
@@ -146,6 +149,88 @@ mod redb_tests {
         let (cache, _dir) = redb_cache();
         cache.sync().expect("RedbCache::sync should not error.");
     }
+
+    // -- Integration: Store + RedbCache --
+
+    use batpak::prelude::*;
+
+    #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+    struct Counter {
+        count: u32,
+    }
+    impl EventSourced<serde_json::Value> for Counter {
+        fn from_events(events: &[batpak::prelude::Event<serde_json::Value>]) -> Option<Self> {
+            Some(Counter {
+                count: u32::try_from(events.len()).expect("test uses < 2^32 events"),
+            })
+        }
+        fn apply_event(&mut self, _event: &batpak::prelude::Event<serde_json::Value>) {
+            self.count += 1;
+        }
+        fn relevant_event_kinds() -> &'static [EventKind] {
+            &[]
+        }
+    }
+
+    #[test]
+    fn redb_projection_round_trip() {
+        let dir = TempDir::new().expect("temp dir");
+        let cache_path = dir.path().join("cache.redb");
+        let cache = RedbCache::open(&cache_path).expect("open redb cache");
+
+        let config = StoreConfig {
+            data_dir: dir.path().join("data"),
+            segment_max_bytes: 4096,
+            sync_every_n_events: 1,
+            ..StoreConfig::new("")
+        };
+        let store =
+            Store::open_with_cache(config, Box::new(cache)).expect("open store with redb cache");
+
+        let coord = Coordinate::new("entity:redb1", "scope:test").expect("coord");
+        let kind = EventKind::custom(0xF, 1);
+        store
+            .append(&coord, kind, &serde_json::json!({"x": 1}))
+            .expect("append 1");
+        store
+            .append(&coord, kind, &serde_json::json!({"x": 2}))
+            .expect("append 2");
+
+        // First project: cache miss, replays from segments
+        let result: Option<Counter> = store
+            .project("entity:redb1", &Freshness::Consistent)
+            .expect("project");
+        assert_eq!(
+            result,
+            Some(Counter { count: 2 }),
+            "REDB PROJECTION ROUND-TRIP: first project should replay 2 events.\n\
+             Investigate: src/store/mod.rs project, src/store/projection.rs RedbCache.\n\
+             Run: cargo test --features redb --test projection_cache redb_projection_round_trip"
+        );
+
+        // Second project: should hit cache (same watermark)
+        let result2: Option<Counter> = store
+            .project("entity:redb1", &Freshness::Consistent)
+            .expect("project 2");
+        assert_eq!(result2, Some(Counter { count: 2 }));
+
+        // Append more → cache should be stale → re-replay
+        store
+            .append(&coord, kind, &serde_json::json!({"x": 3}))
+            .expect("append 3");
+        let result3: Option<Counter> = store
+            .project("entity:redb1", &Freshness::Consistent)
+            .expect("project 3");
+        assert_eq!(
+            result3,
+            Some(Counter { count: 3 }),
+            "REDB CACHE INVALIDATION: after appending more events, project should re-replay.\n\
+             Investigate: src/store/mod.rs project watermark comparison.\n\
+             Run: cargo test --features redb --test projection_cache redb_projection_round_trip"
+        );
+
+        store.close().expect("close");
+    }
 }
 
 // ================================================================
@@ -228,5 +313,87 @@ mod lmdb_tests {
     fn lmdb_sync() {
         let (cache, _dir) = lmdb_cache();
         cache.sync().expect("LmdbCache::sync should not error.");
+    }
+
+    // -- Integration: Store + LmdbCache --
+
+    use batpak::prelude::*;
+
+    #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+    struct Counter {
+        count: u32,
+    }
+    impl EventSourced<serde_json::Value> for Counter {
+        fn from_events(events: &[batpak::prelude::Event<serde_json::Value>]) -> Option<Self> {
+            Some(Counter {
+                count: u32::try_from(events.len()).expect("test uses < 2^32 events"),
+            })
+        }
+        fn apply_event(&mut self, _event: &batpak::prelude::Event<serde_json::Value>) {
+            self.count += 1;
+        }
+        fn relevant_event_kinds() -> &'static [EventKind] {
+            &[]
+        }
+    }
+
+    #[test]
+    fn lmdb_projection_round_trip() {
+        let dir = TempDir::new().expect("temp dir");
+        let cache_path = dir.path().join("lmdb_cache");
+        let cache = LmdbCache::open(&cache_path, 10 * 1024 * 1024).expect("open lmdb cache");
+
+        let config = StoreConfig {
+            data_dir: dir.path().join("data"),
+            segment_max_bytes: 4096,
+            sync_every_n_events: 1,
+            ..StoreConfig::new("")
+        };
+        let store =
+            Store::open_with_cache(config, Box::new(cache)).expect("open store with lmdb cache");
+
+        let coord = Coordinate::new("entity:lmdb1", "scope:test").expect("coord");
+        let kind = EventKind::custom(0xF, 1);
+        store
+            .append(&coord, kind, &serde_json::json!({"x": 1}))
+            .expect("append 1");
+        store
+            .append(&coord, kind, &serde_json::json!({"x": 2}))
+            .expect("append 2");
+
+        // First project: cache miss, replays from segments
+        let result: Option<Counter> = store
+            .project("entity:lmdb1", &Freshness::Consistent)
+            .expect("project");
+        assert_eq!(
+            result,
+            Some(Counter { count: 2 }),
+            "LMDB PROJECTION ROUND-TRIP: first project should replay 2 events.\n\
+             Investigate: src/store/mod.rs project, src/store/projection.rs LmdbCache.\n\
+             Run: cargo test --features lmdb --test projection_cache lmdb_projection_round_trip"
+        );
+
+        // Second project: should hit cache
+        let result2: Option<Counter> = store
+            .project("entity:lmdb1", &Freshness::Consistent)
+            .expect("project 2");
+        assert_eq!(result2, Some(Counter { count: 2 }));
+
+        // Append more → cache stale → re-replay
+        store
+            .append(&coord, kind, &serde_json::json!({"x": 3}))
+            .expect("append 3");
+        let result3: Option<Counter> = store
+            .project("entity:lmdb1", &Freshness::Consistent)
+            .expect("project 3");
+        assert_eq!(
+            result3,
+            Some(Counter { count: 3 }),
+            "LMDB CACHE INVALIDATION: after appending more events, project should re-replay.\n\
+             Investigate: src/store/mod.rs project watermark comparison.\n\
+             Run: cargo test --features lmdb --test projection_cache lmdb_projection_round_trip"
+        );
+
+        store.close().expect("close");
     }
 }

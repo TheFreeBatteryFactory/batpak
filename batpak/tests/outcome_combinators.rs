@@ -1046,3 +1046,138 @@ fn join_all_and_flatten_accept_non_clone_types() {
          Run: cargo test --test outcome_combinators join_all_and_flatten"
     );
 }
+
+// ============================================================
+// Retry / Pending / Cancelled variant coverage for combinators
+// DEFENDS: FM-013 (Coverage Mirage — variant coverage, not just happy path)
+// ============================================================
+
+fn test_retry() -> Outcome<i32> {
+    Outcome::Retry {
+        after_ms: 500,
+        attempt: 1,
+        max_attempts: 3,
+        reason: "test retry".into(),
+    }
+}
+
+fn test_pending() -> Outcome<i32> {
+    Outcome::Pending {
+        condition: batpak::outcome::wait::WaitCondition::Timeout { resume_at_ms: 9999 },
+        resume_token: 42,
+    }
+}
+
+fn test_cancelled() -> Outcome<i32> {
+    Outcome::Cancelled {
+        reason: "test cancel".into(),
+    }
+}
+
+#[test]
+fn zip_retry_propagates() {
+    let result = batpak::outcome::zip(test_retry(), Outcome::Ok(1));
+    assert!(
+        result.is_retry(),
+        "ZIP RETRY PROPAGATION: zip(Retry, Ok) must yield Retry.\n\
+         Investigate: src/outcome/combine.rs zip Retry arm.\n\
+         Run: cargo test --test outcome_combinators zip_retry_propagates"
+    );
+    // Also test Ok first, Retry second
+    let result2 = batpak::outcome::zip(Outcome::Ok(1), test_retry());
+    assert!(
+        result2.is_retry(),
+        "ZIP RETRY PROPAGATION (reversed): zip(Ok, Retry) must yield Retry.\n\
+         Investigate: src/outcome/combine.rs zip Retry arm.\n\
+         Run: cargo test --test outcome_combinators zip_retry_propagates"
+    );
+}
+
+#[test]
+fn zip_pending_propagates() {
+    let result = batpak::outcome::zip(Outcome::Ok(1), test_pending());
+    assert!(
+        result.is_pending(),
+        "ZIP PENDING PROPAGATION: zip(Ok, Pending) must yield Pending.\n\
+         Investigate: src/outcome/combine.rs zip Pending arm.\n\
+         Run: cargo test --test outcome_combinators zip_pending_propagates"
+    );
+}
+
+#[test]
+fn zip_retry_beats_pending() {
+    // Priority: Err > Cancelled > Retry > Pending
+    let result = batpak::outcome::zip(test_retry(), test_pending());
+    assert!(
+        result.is_retry(),
+        "ZIP PRIORITY: zip(Retry, Pending) must yield Retry (Retry > Pending).\n\
+         Investigate: src/outcome/combine.rs zip priority order.\n\
+         Run: cargo test --test outcome_combinators zip_retry_beats_pending"
+    );
+}
+
+#[test]
+fn zip_cancelled_beats_retry() {
+    // Priority: Err > Cancelled > Retry > Pending
+    let result = batpak::outcome::zip(test_cancelled(), test_retry());
+    assert!(
+        result.is_cancelled(),
+        "ZIP PRIORITY: zip(Cancelled, Retry) must yield Cancelled (Cancelled > Retry).\n\
+         Investigate: src/outcome/combine.rs zip priority order.\n\
+         Run: cargo test --test outcome_combinators zip_cancelled_beats_retry"
+    );
+}
+
+#[test]
+fn join_all_retry_short_circuits() {
+    let outcomes = vec![Outcome::Ok(1), test_retry(), Outcome::Ok(3)];
+    let result = batpak::outcome::join_all(outcomes);
+    assert!(
+        result.is_retry(),
+        "JOIN_ALL RETRY SHORT-CIRCUIT: join_all with a Retry element must yield Retry.\n\
+         Investigate: src/outcome/combine.rs join_all Retry arm.\n\
+         Run: cargo test --test outcome_combinators join_all_retry_short_circuits"
+    );
+}
+
+#[test]
+fn join_all_pending_short_circuits() {
+    let outcomes = vec![Outcome::Ok(1), test_pending()];
+    let result = batpak::outcome::join_all(outcomes);
+    assert!(
+        result.is_pending(),
+        "JOIN_ALL PENDING SHORT-CIRCUIT: join_all with a Pending element must yield Pending.\n\
+         Investigate: src/outcome/combine.rs join_all Pending arm.\n\
+         Run: cargo test --test outcome_combinators join_all_pending_short_circuits"
+    );
+}
+
+#[test]
+fn join_all_cancelled_short_circuits() {
+    let outcomes = vec![Outcome::Ok(1), test_cancelled()];
+    let result = batpak::outcome::join_all(outcomes);
+    assert!(
+        result.is_cancelled(),
+        "JOIN_ALL CANCELLED SHORT-CIRCUIT: join_all with Cancelled element must yield Cancelled.\n\
+         Investigate: src/outcome/combine.rs join_all Cancelled arm.\n\
+         Run: cargo test --test outcome_combinators join_all_cancelled_short_circuits"
+    );
+}
+
+#[test]
+fn join_any_pending_propagates() {
+    let err = OutcomeError {
+        kind: ErrorKind::Internal,
+        message: "fail".into(),
+        compensation: None,
+        retryable: false,
+    };
+    let outcomes: Vec<Outcome<i32>> = vec![Outcome::Err(err), test_pending()];
+    let result = batpak::outcome::join_any(outcomes);
+    assert!(
+        result.is_pending(),
+        "JOIN_ANY PENDING PROPAGATION: join_any([Err, Pending]) must yield Pending.\n\
+         Investigate: src/outcome/combine.rs join_any 'other' arm.\n\
+         Run: cargo test --test outcome_combinators join_any_pending_propagates"
+    );
+}
