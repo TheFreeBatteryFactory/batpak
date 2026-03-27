@@ -308,7 +308,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn test_reader() -> (Reader, TempDir) {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("create temp dir for reader test");
         let reader = Reader::new(dir.path().to_path_buf(), 4);
         (reader, dir)
     }

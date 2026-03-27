@@ -1,3 +1,4 @@
+#![allow(clippy::panic, clippy::wildcard_enum_match_arm, clippy::unwrap_used)] // test assertions use panic; exhaustive match not needed in tests
 //! Tests for Outcome combinators not covered by monad_laws.rs.
 //! Covers: inspect, inspect_err, map_err, or_else, and_then_if,
 //! into_result, unwrap_or, unwrap_or_else, join_any, zip edge cases.

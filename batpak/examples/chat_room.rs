@@ -1,3 +1,4 @@
+#![allow(clippy::print_stdout, clippy::disallowed_methods)] // example binary — println and thread::spawn are fine
 //! # Chat Room — subscriptions, cursors, and real-time event streams
 //!
 //! A chat system demonstrating batpak's two consumption patterns:

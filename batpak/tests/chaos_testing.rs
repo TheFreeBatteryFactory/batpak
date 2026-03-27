@@ -5,7 +5,10 @@
     clippy::panic,
     clippy::print_stderr,
     clippy::unwrap_used,
-    clippy::inconsistent_digit_grouping
+    clippy::inconsistent_digit_grouping,
+    clippy::disallowed_methods,    // chaos tests use thread::spawn for stress probes
+    clippy::needless_borrows_for_generic_args,
+    clippy::unused_enumerate_index
 )]
 //! Chaos testing: fault injection, data corruption, concurrent stress.
 //! The library tests itself under adversarial conditions and feeds
@@ -145,9 +148,9 @@ fn chaos_concurrent_writer_stress() {
     let handles: Vec<_> = (0..n_threads)
         .map(|t| {
             let store = Arc::clone(&store);
-            std::thread::spawn(move || {
+            std::thread::Builder::new().name(format!("chaos-writer-{t}")).spawn(move || {
                 let coord =
-                    Coordinate::new(&format!("chaos:thread{t}"), "chaos:stress").expect("valid");
+                    Coordinate::new(format!("chaos:thread{t}").as_str(), "chaos:stress").expect("valid");
                 let kind = EventKind::custom(0xF, 1);
                 let mut successes = 0u64;
                 let mut errors = 0u64;
@@ -160,7 +163,7 @@ fn chaos_concurrent_writer_stress() {
                     }
                 }
                 (successes, errors)
-            })
+            }).expect("spawn thread")
         })
         .collect();
 
@@ -236,13 +239,13 @@ fn chaos_cas_contention() {
         .map(|t| {
             let store = Arc::clone(&store);
             let coord = coord.clone();
-            std::thread::spawn(move || {
+            std::thread::Builder::new().name(format!("chaos-cas-{t}")).spawn(move || {
                 let opts = AppendOptions {
                     expected_sequence: Some(0), // all compete: expect latest clock=0 after seed
                     ..Default::default()
                 };
                 store.append_with_options(&coord, kind, &serde_json::json!({"thread": t}), opts)
-            })
+            }).expect("spawn thread")
         })
         .collect();
 
@@ -328,13 +331,13 @@ fn chaos_idempotency_concurrent() {
         .map(|t| {
             let store = Arc::clone(&store);
             let coord = coord.clone();
-            std::thread::spawn(move || {
+            std::thread::Builder::new().name(format!("chaos-idem-{t}")).spawn(move || {
                 let opts = AppendOptions {
                     idempotency_key: Some(idem_key),
                     ..Default::default()
                 };
                 store.append_with_options(&coord, kind, &serde_json::json!({"thread": t}), opts)
-            })
+            }).expect("spawn thread")
         })
         .collect();
 
@@ -348,7 +351,7 @@ fn chaos_idempotency_concurrent() {
 
     // All should return the same event_id
     let first = event_ids[0];
-    for (_i, id) in event_ids.iter().enumerate() {
+    for id in event_ids.iter() {
         assert_eq!(
             *id, first,
             "CHAOS PROPERTY: all concurrent idempotent appends with the same key must return the same event_id.\n\
@@ -523,13 +526,13 @@ fn chaos_subscription_write_storm() {
 
     // Writer thread hammers events
     let store2 = Arc::clone(&store);
-    let writer = std::thread::spawn(move || {
+    let writer = std::thread::Builder::new().name("chaos-sub-writer".to_string()).spawn(move || {
         for i in 0..iterations {
             store2
                 .append(&coord, kind, &serde_json::json!({"i": i}))
                 .expect("append");
         }
-    });
+    }).expect("spawn thread");
 
     writer.join().expect("writer join");
 

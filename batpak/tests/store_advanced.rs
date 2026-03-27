@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,           // test assertions
+    clippy::disallowed_methods,    // chaos tests use thread::spawn for concurrency probes
+    clippy::cast_possible_truncation, // test data fits in target types
+    clippy::needless_borrows_for_generic_args
+)]
 //! Advanced Store tests: code paths missed by store_integration.rs.
 //! Covers: walk_ancestors, snapshot, diagnostics, append_reaction,
 //! subscription, cursor, compact, CAS failure, idempotency,

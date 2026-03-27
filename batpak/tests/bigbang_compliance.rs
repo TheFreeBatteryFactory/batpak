@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // compliance tests use thread::spawn for concurrency probes
 //! Big Bang Protocol compliance tests.
 //! Verifies constitutional laws, algebraic properties, and flow connectivity
 //! that the compiler and unit tests cannot catch.
@@ -99,7 +100,7 @@ fn idempotency_algebraic_duplicate_produces_no_new_event() {
     };
 
     let r1 = store
-        .append_with_options(&coord, kind, &"hello", opts.clone())
+        .append_with_options(&coord, kind, &"hello", opts)
         .expect("first append");
     let r2 = store
         .append_with_options(&coord, kind, &"hello", opts)
@@ -136,7 +137,7 @@ fn round_trip_fidelity_append_get_preserves_payload() {
     let payload = serde_json::json!({
         "string": "hello world",
         "number": 42,
-        "float": 3.14159,
+        "float": 3.15,
         "null_field": null,
         "array": [1, 2, 3],
         "nested": {"deep": {"deeper": true}},
@@ -578,7 +579,7 @@ fn error_variant_coverage_all_store_errors_display() {
     // Construct every StoreError variant and verify Display is non-empty.
     // FM-011: No hollow error paths.
     let variants: Vec<(&str, StoreError)> = vec![
-        ("Io", StoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, "test"))),
+        ("Io", StoreError::Io(std::io::Error::other("test"))),
         ("Serialization", StoreError::Serialization("test ser".into())),
         ("CrcMismatch", StoreError::CrcMismatch { segment_id: 1, offset: 42 }),
         ("CorruptSegment", StoreError::CorruptSegment { segment_id: 2, detail: "bad".into() }),

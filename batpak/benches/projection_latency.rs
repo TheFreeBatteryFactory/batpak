@@ -1,4 +1,5 @@
 //! Benchmark: projection replay latency for EventSourced.
+//!
 //! [SPEC:benches/projection_latency.rs]
 //!
 //! NOTE: Store::project() currently always replays from segments (the _cache

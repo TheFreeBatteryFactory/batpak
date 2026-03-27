@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_methods,    // concurrent tests use thread::spawn
+    clippy::needless_borrows_for_generic_args
+)]
 //! Integration tests for Store lifecycle.
 //! Append/get/query, segment rotation, cold start index rebuild, concurrent r/w.
 //! [SPEC:tests/store_integration.rs]
@@ -114,7 +118,7 @@ fn query_by_entity_prefix() {
 
     // Create events across different entities
     for i in 0..5 {
-        let coord = Coordinate::new(&format!("user:{i}"), "scope:test").expect("valid coord");
+        let coord = Coordinate::new(format!("user:{i}").as_str(), "scope:test").expect("valid coord");
         store.append(&coord, kind, &payload).expect("append");
     }
     // And some non-matching entities
@@ -449,18 +453,18 @@ fn concurrent_append_and_query() {
     // Writer thread
     let store_w = std::sync::Arc::clone(&store);
     let coord_w = coord.clone();
-    let writer = std::thread::spawn(move || {
+    let writer = std::thread::Builder::new().name("store-writer".to_string()).spawn(move || {
         for i in 0..100 {
             let payload = serde_json::json!({"i": i});
             store_w.append(&coord_w, kind, &payload).expect("append");
         }
-    });
+    }).expect("spawn thread");
 
     // Reader thread (queries while writes happen)
     // Verifies: concurrent reads don't crash, and event counts never decrease.
     // Yields between iterations so the writer thread has time to make progress.
     let store_r = std::sync::Arc::clone(&store);
-    let reader = std::thread::spawn(move || {
+    let reader = std::thread::Builder::new().name("store-reader".to_string()).spawn(move || {
         let mut max_seen = 0usize;
         for _ in 0..200 {
             let results = store_r.stream("entity:1");
@@ -477,7 +481,7 @@ fn concurrent_append_and_query() {
             std::thread::yield_now();
         }
         max_seen
-    });
+    }).expect("spawn thread");
 
     writer.join().expect("writer thread");
     let _max_seen = reader.join().expect("reader thread");

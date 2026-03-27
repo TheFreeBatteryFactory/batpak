@@ -348,10 +348,11 @@ fn store_config_all_fields_overridable() {
     // but never wired up, this test documents the expected behavior.
     let dir = TempDir::new().expect("create temp dir");
     let clock_fn: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| {
-        std::time::SystemTime::now()
+        #[allow(clippy::cast_possible_truncation)] // timestamp_us fits i64 until year 292,277
+        { std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_micros() as i64
+            .as_micros() as i64 }
     });
 
     let config = StoreConfig {

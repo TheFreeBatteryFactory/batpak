@@ -1,3 +1,4 @@
+#![allow(clippy::panic, clippy::inconsistent_digit_grouping)] // test assertions use panic; timestamp grouping is intentional
 //! Wire format golden tests.
 //! Verifies MessagePack serialization matches known-good byte sequences.
 //! [SPEC:tests/wire_format.rs]

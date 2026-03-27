@@ -1,5 +1,6 @@
 //! Benchmark: subscription fan-out latency with varying subscriber counts.
 //! Measures delivery latency for 1/10/100 subscribers receiving 10K events.
+//!
 //! [SPEC:benches/subscription_fanout.rs]
 
 use batpak::prelude::*;

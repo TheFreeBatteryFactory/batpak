@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // uses thread::spawn for subscription test
 //! Tests for every quiet straggler — pub functions that compile and pass clippy
 //! but have zero test coverage. Organized by module.
 //! [SPEC:tests/quiet_stragglers.rs]

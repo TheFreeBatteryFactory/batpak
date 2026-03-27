@@ -1,4 +1,5 @@
 //! Benchmark: index rebuild latency for 1K/10K/100K/1M events.
+//!
 //! [SPEC:benches/cold_start.rs]
 //!
 //! SPEC line 259: "criterion: index rebuild for 1K/10K/100K/1M events"

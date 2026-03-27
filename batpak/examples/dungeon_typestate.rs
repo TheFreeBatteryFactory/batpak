@@ -1,3 +1,4 @@
+#![allow(clippy::print_stdout)] // example binary — println! is the whole point
 //! # Dungeon Doors — compile-time state machines
 //!
 //! A door in a dungeon can be Open, Closed, or Locked. Not every transition

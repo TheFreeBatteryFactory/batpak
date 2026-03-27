@@ -1,3 +1,4 @@
+#![allow(clippy::print_stdout, clippy::needless_pass_by_value, clippy::needless_borrows_for_generic_args)] // example binary
 //! # Policy Gates — enforcing rules before events are committed
 //!
 //! A bank transfer system where every transfer must pass through policy gates

@@ -1,3 +1,4 @@
+#![allow(clippy::print_stdout, clippy::wildcard_enum_match_arm, clippy::cast_possible_truncation)] // example binary
 //! # Event-Sourced Counter — from first principles
 //!
 //! The simplest possible event-sourced system: a counter that only goes up.

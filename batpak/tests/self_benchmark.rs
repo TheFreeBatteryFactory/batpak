@@ -1,3 +1,4 @@
+#![allow(clippy::panic, clippy::print_stderr, clippy::cast_possible_truncation)] // benchmark reporting uses eprintln; gate failures use panic
 //! Self-benchmark test: the library dogfoods its own Gate system.
 //! Performance gates + correctness gates + resilience gates.
 //! [SPEC:tests/self_benchmark.rs]

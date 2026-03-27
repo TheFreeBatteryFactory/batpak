@@ -1,3 +1,4 @@
+#![allow(clippy::wildcard_enum_match_arm)] // proptest assertions use wildcard match
 //! Proptest verification of Outcome<T> monad laws.
 //! Left identity, right identity, associativity, and Batch distribution.
 //! [SPEC:tests/monad_laws.rs]

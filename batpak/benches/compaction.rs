@@ -5,6 +5,7 @@
 //!   large enough to reflect real I/O patterns — not 2KB)
 //! - sync_every_n_events: 100 (production-like, not 1-per-event)
 //! - Payload: ~200 bytes (realistic event size, not 15 bytes)
+//!
 //! [SPEC:benches/compaction.rs]
 
 use batpak::prelude::*;

@@ -2,7 +2,12 @@
     clippy::panic,
     clippy::print_stderr,
     clippy::unwrap_used,
-    clippy::inconsistent_digit_grouping
+    clippy::inconsistent_digit_grouping,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    clippy::unnecessary_cast,
+    clippy::needless_borrows_for_generic_args,
+    clippy::disallowed_methods // test harness uses thread::spawn for chaos probes
 )]
 //! Fuzz + Chaos Feedback Loop: the library dogfoods its own Gate system
 //! to evaluate fuzz and chaos testing results. Performance scores gate

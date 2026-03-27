@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::unwrap_used)] // tests use thread::spawn for producers
 //! Integration tests for SubscriptionOps: filter, take, and combined chains.
 //! [SPEC:tests/subscription_ops.rs]
 

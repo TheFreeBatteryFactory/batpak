@@ -1,4 +1,5 @@
 //! Benchmark: events/sec for 1K/10K/100K appends (single + concurrent).
+//!
 //! [SPEC:benches/write_throughput.rs]
 
 use batpak::prelude::*;
@@ -26,7 +27,7 @@ fn bench_write_throughput(c: &mut Criterion) {
         }
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
             b.iter_with_setup(
-                || setup_store(),
+                setup_store,
                 |(store, _dir)| {
                     let coord =
                         Coordinate::new("bench:entity", "bench:scope").expect("valid coord");
@@ -55,7 +56,7 @@ fn bench_durable_write_throughput(c: &mut Criterion) {
     for count in [1_000u64, 10_000] {
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
             b.iter_with_setup(
-                || setup_store(),
+                setup_store,
                 |(store, _dir)| {
                     let coord =
                         Coordinate::new("bench:entity", "bench:scope").expect("valid coord");
@@ -94,7 +95,7 @@ fn bench_concurrent_write_throughput(c: &mut Criterion) {
                 let mut handles = Vec::with_capacity(thread_count);
                 for t in 0..thread_count {
                     let store = Arc::clone(&store);
-                    handles.push(std::thread::spawn(move || {
+                    handles.push(std::thread::Builder::new().name(format!("bench-writer-{t}")).spawn(move || {
                         let entity = format!("bench:thread{t}");
                         let coord = Coordinate::new(&entity, "bench:scope").expect("valid coord");
                         let kind = EventKind::custom(0xF, 1);
@@ -102,7 +103,7 @@ fn bench_concurrent_write_throughput(c: &mut Criterion) {
                         for _ in 0..events_per_thread {
                             store.append(&coord, kind, &payload).expect("append");
                         }
-                    }));
+                    }).expect("spawn thread"));
                 }
                 for h in handles {
                     h.join().expect("thread join");

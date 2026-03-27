@@ -1,3 +1,4 @@
+#![allow(clippy::panic)] // test assertions use panic for expected-failure paths
 //! Gate and Pipeline integration tests.
 //! Registration order, fail-fast evaluation, Receipt TOCTOU guarantee, consumed-once.
 //! [SPEC:tests/gate_pipeline.rs]
