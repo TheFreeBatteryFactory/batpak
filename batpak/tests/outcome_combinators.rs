@@ -1319,10 +1319,7 @@ fn compensation_action_notify_carries_message() {
         message: "something went wrong".into(),
     };
     match &action {
-        CompensationAction::Notify {
-            target_id,
-            message,
-        } => {
+        CompensationAction::Notify { target_id, message } => {
             assert_eq!(*target_id, 42);
             assert_eq!(message, "something went wrong");
         }
@@ -1334,9 +1331,7 @@ fn compensation_action_notify_carries_message() {
 fn compensation_action_variants_are_distinguishable() {
     use batpak::outcome::CompensationAction;
     let variants: Vec<CompensationAction> = vec![
-        CompensationAction::Rollback {
-            event_ids: vec![1],
-        },
+        CompensationAction::Rollback { event_ids: vec![1] },
         CompensationAction::Notify {
             target_id: 1,
             message: "x".into(),
@@ -1358,4 +1353,108 @@ fn compensation_action_variants_are_distinguishable() {
             );
         }
     }
+}
+
+// ================================================================
+// Flatten combinators + OutcomeError display
+// ================================================================
+
+#[test]
+fn flatten_unwraps_nested_ok() {
+    let nested: Outcome<Outcome<i32>> = Outcome::Ok(Outcome::Ok(42));
+    let flat = nested.flatten();
+    assert_eq!(
+        flat,
+        Outcome::Ok(42),
+        "PROPERTY: Outcome::flatten on Ok(Ok(42)) must produce Ok(42).\n\
+         Investigate: src/outcome/mod.rs impl Outcome<Outcome<T>> flatten().\n\
+         Common causes: flatten() returning the outer Ok without unwrapping the inner, \
+         or not handling the doubly-nested case.\n\
+         Run: cargo test --test quiet_stragglers flatten_unwraps_nested_ok"
+    );
+}
+
+#[test]
+fn flatten_propagates_inner_err() {
+    let err = OutcomeError {
+        kind: ErrorKind::Internal,
+        message: "inner".into(),
+        compensation: None,
+        retryable: false,
+    };
+    let nested: Outcome<Outcome<i32>> = Outcome::Ok(Outcome::Err(err));
+    let flat = nested.flatten();
+    assert!(
+        flat.is_err(),
+        "PROPERTY: Outcome::flatten on Ok(Err) must propagate the inner error.\n\
+         Investigate: src/outcome/mod.rs impl Outcome<Outcome<T>> flatten().\n\
+         Common causes: flatten() treating Ok(Err) as Ok(default) by ignoring the \
+         inner variant, or only handling the outer layer.\n\
+         Run: cargo test --test quiet_stragglers flatten_propagates_inner_err"
+    );
+}
+
+#[test]
+fn flatten_propagates_outer_err() {
+    let err = OutcomeError {
+        kind: ErrorKind::Internal,
+        message: "outer".into(),
+        compensation: None,
+        retryable: false,
+    };
+    let nested: Outcome<Outcome<i32>> = Outcome::Err(err);
+    let flat = nested.flatten();
+    assert!(
+        flat.is_err(),
+        "PROPERTY: Outcome::flatten on Err must propagate the outer error unchanged.\n\
+         Investigate: src/outcome/mod.rs impl Outcome<Outcome<T>> flatten().\n\
+         Common causes: flatten() converting outer Err to Ok(default), or returning \
+         Outcome::Pending instead of the error.\n\
+         Run: cargo test --test quiet_stragglers flatten_propagates_outer_err"
+    );
+}
+
+#[test]
+fn flatten_distributes_over_batch() {
+    let nested: Outcome<Outcome<i32>> = Outcome::Batch(vec![
+        Outcome::Ok(Outcome::Ok(1)),
+        Outcome::Ok(Outcome::Ok(2)),
+    ]);
+    let flat = nested.flatten();
+    assert_eq!(
+        flat,
+        Outcome::Batch(vec![Outcome::Ok(1), Outcome::Ok(2)]),
+        "PROPERTY: Outcome::flatten on Batch must flatten each inner Outcome element.\n\
+         Investigate: src/outcome/mod.rs impl Outcome<Outcome<T>> flatten() Batch arm.\n\
+         Common causes: flatten() not recursing into Batch items, or collecting the \
+         batch as Outcome<Vec<Outcome<T>>> instead of Outcome::Batch(Vec<Outcome<T>>).\n\
+         Run: cargo test --test quiet_stragglers flatten_distributes_over_batch"
+    );
+}
+
+#[test]
+fn outcome_error_display() {
+    let err = OutcomeError {
+        kind: ErrorKind::Conflict,
+        message: "double booking".into(),
+        compensation: None,
+        retryable: false,
+    };
+    let s = format!("{err}");
+    assert!(
+        s.contains("Conflict"),
+        "PROPERTY: OutcomeError Display must include the ErrorKind name.\n\
+         Investigate: src/outcome/error.rs OutcomeError Display impl.\n\
+         Common causes: Display formatting only the message field without including \
+         the kind, or kind printed as a raw discriminant number instead of its name.\n\
+         Run: cargo test --test quiet_stragglers outcome_error_display"
+    );
+    assert!(
+        s.contains("double booking"),
+        "PROPERTY: OutcomeError Display must include the error message string.\n\
+         Investigate: src/outcome/error.rs OutcomeError Display impl.\n\
+         Common causes: Display printing only the kind and omitting the message, \
+         or message field not being formatted into the output string.\n\
+         Run: cargo test --test quiet_stragglers outcome_error_display"
+    );
 }

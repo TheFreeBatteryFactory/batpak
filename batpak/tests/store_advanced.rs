@@ -2311,3 +2311,115 @@ fn with_correlation_and_causation_combined() {
         "VARIANCE: default append should have None causation_id."
     );
 }
+
+// ================================================================
+// Reactive pattern
+// ================================================================
+
+use batpak::event::Reactive;
+
+struct OrderReactor;
+impl batpak::event::Reactive<serde_json::Value> for OrderReactor {
+    fn react(
+        &self,
+        event: &Event<serde_json::Value>,
+    ) -> Vec<(Coordinate, EventKind, serde_json::Value)> {
+        // When we see a "create_order" event, emit an "order_created" reaction
+        if event.event_kind() == EventKind::custom(0xA, 1) {
+            vec![(
+                Coordinate::new("order:reactions", "scope:test").expect("valid"),
+                EventKind::custom(0xA, 2),
+                serde_json::json!({"reacted_to": event.event_id().to_string()}),
+            )]
+        } else {
+            vec![]
+        }
+    }
+}
+
+#[test]
+fn reactive_subscribe_react_append_pattern() {
+    // This test proves the SPEC's "7 lines of glue" pattern works:
+    // subscribe → receive → react() → append_reaction()
+
+    let dir = TempDir::new().expect("temp dir");
+    let config = StoreConfig {
+        data_dir: dir.path().to_path_buf(),
+        sync_every_n_events: 1,
+        ..StoreConfig::new("")
+    };
+    let store = Arc::new(Store::open(config).expect("open"));
+    let coord = Coordinate::new("order:1", "scope:test").expect("valid");
+    let kind = EventKind::custom(0xA, 1); // "create_order"
+
+    // Subscribe before writing
+    let region = Region::all();
+    let sub = store.subscribe(&region);
+
+    // Write the root event from another thread
+    let store_w = Arc::clone(&store);
+    let coord_w = coord.clone();
+    let writer = std::thread::spawn(move || {
+        store_w
+            .append(&coord_w, kind, &serde_json::json!({"item": "widget"}))
+            .expect("append root")
+    });
+    let root_receipt = writer.join().expect("writer thread");
+
+    // Receive the notification
+    let rx = sub.receiver();
+    let notif = rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("should receive notification");
+
+    // React: the OrderReactor decides what to emit
+    let reactor = OrderReactor;
+    // Build a minimal event for the reactor (it only needs kind + event_id)
+    let header = EventHeader::new(
+        notif.event_id,
+        notif.correlation_id,
+        notif.causation_id,
+        0,
+        DagPosition::root(),
+        0,
+        notif.kind,
+    );
+    let event = Event::<serde_json::Value>::new(header, serde_json::Value::Null);
+    let reactions = reactor.react(&event);
+
+    assert_eq!(
+        reactions.len(),
+        1,
+        "PROPERTY: OrderReactor must produce exactly 1 reaction for a create_order event.\n\
+         Investigate: src/event/sourcing.rs Reactive trait react() method.\n\
+         Common causes: react() returning an empty vec because event_kind comparison \
+         fails, or EventKind::custom encoding mismatch between writer and reactor.\n\
+         Run: cargo test --test quiet_stragglers reactive_subscribe_react_append_pattern"
+    );
+
+    // Append reactions via append_reaction (the causal link)
+    for (react_coord, react_kind, react_payload) in reactions {
+        store
+            .append_reaction(
+                &react_coord,
+                react_kind,
+                &react_payload,
+                root_receipt.event_id,
+                root_receipt.event_id,
+            )
+            .expect("append reaction");
+    }
+
+    // Verify: 2 events total (root + reaction)
+    let stats = store.stats();
+    assert_eq!(
+        stats.event_count, 2,
+        "PROPERTY: After root event + 1 reaction, store must contain exactly 2 events.\n\
+         Investigate: src/store/mod.rs Store::append_reaction() src/event/sourcing.rs.\n\
+         Common causes: append_reaction() not writing to the store, or stats.event_count \
+         not counting reaction events that go to a different coordinate.\n\
+         Run: cargo test --test quiet_stragglers reactive_subscribe_react_append_pattern"
+    );
+
+    store.sync().expect("sync");
+}

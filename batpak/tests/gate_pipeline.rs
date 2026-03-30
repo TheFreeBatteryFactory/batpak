@@ -409,3 +409,253 @@ fn bypass_through_full_pipeline_commits_to_store() {
          DEFENDS: FM-007 (Island Syndrome — bypass path must connect to real store)."
     );
 }
+
+// ================================================================
+// From quiet_stragglers: pipeline, bypass, committed, denial, gateset
+// ================================================================
+
+struct StragglersTestBypassReason;
+impl batpak::pipeline::BypassReason for StragglersTestBypassReason {
+    fn name(&self) -> &'static str {
+        "test_bypass"
+    }
+    fn justification(&self) -> &'static str {
+        "testing bypass audit trail"
+    }
+}
+
+static STRAGGLERS_TEST_BYPASS: StragglersTestBypassReason = StragglersTestBypassReason;
+
+#[test]
+fn pipeline_bypass_returns_bypass_receipt() {
+    let proposal = Proposal::new(42);
+    let receipt = batpak::pipeline::Pipeline::<()>::bypass(proposal, &STRAGGLERS_TEST_BYPASS);
+
+    assert_eq!(
+        *receipt.payload(),
+        42,
+        "PROPERTY: BypassReceipt must carry the original proposal payload unchanged.\n\
+         Investigate: src/pipeline/mod.rs Pipeline::bypass().\n\
+         Common causes: bypass() discarding the proposal value, or BypassReceipt \
+         storing the wrong field.\n\
+         Run: cargo test --test quiet_stragglers pipeline_bypass_returns_bypass_receipt"
+    );
+    assert_eq!(
+        receipt.reason(),
+        "test_bypass",
+        "PROPERTY: BypassReceipt must record the BypassReason::name() as reason.\n\
+         Investigate: src/pipeline/mod.rs Pipeline::bypass() BypassReason::name().\n\
+         Common causes: bypass() storing justification() in reason field, or \
+         name() not being called at all.\n\
+         Run: cargo test --test quiet_stragglers pipeline_bypass_returns_bypass_receipt"
+    );
+    assert_eq!(
+        receipt.justification(),
+        "testing bypass audit trail",
+        "PROPERTY: BypassReceipt must record BypassReason::justification() verbatim.\n\
+         Investigate: src/pipeline/mod.rs Pipeline::bypass() BypassReason::justification().\n\
+         Common causes: bypass() storing name() in justification field, or \
+         justification() returning a hardcoded string instead of the impl's value.\n\
+         Run: cargo test --test quiet_stragglers pipeline_bypass_returns_bypass_receipt"
+    );
+}
+
+#[test]
+fn proposal_map_transforms_payload() {
+    let proposal = Proposal::new(21);
+    let doubled = proposal.map(|x| x * 2);
+    assert_eq!(
+        *doubled.payload(),
+        42,
+        "PROPERTY: Proposal::map must transform the payload using the provided closure.\n\
+         Investigate: src/pipeline/mod.rs Proposal::map().\n\
+         Common causes: map() cloning the old payload instead of applying the closure, \
+         or the closure not being called at all.\n\
+         Run: cargo test --test quiet_stragglers proposal_map_transforms_payload"
+    );
+}
+
+#[test]
+fn committed_serde_round_trip() {
+    let committed = batpak::pipeline::Committed {
+        payload: "test".to_string(),
+        event_id: 0xDEAD_BEEF_CAFE_BABE_1234_5678_9ABC_DEF0,
+        sequence: 42,
+        hash: [0xAA; 32],
+    };
+
+    // Serialize to msgpack then back — exercises u128_bytes wire format
+    let bytes = rmp_serde::to_vec_named(&committed).expect("serialize Committed");
+    let decoded: batpak::pipeline::Committed<String> =
+        rmp_serde::from_slice(&bytes).expect("deserialize Committed");
+
+    assert_eq!(
+        decoded.payload, "test",
+        "PROPERTY: Committed payload must survive msgpack serialization round-trip unchanged.\n\
+         Investigate: src/pipeline/mod.rs Committed Serialize/Deserialize impls.\n\
+         Common causes: payload field not tagged with serde attribute, or msgpack \
+         encoding changing string encoding between versions.\n\
+         Run: cargo test --test quiet_stragglers committed_serde_round_trip"
+    );
+    assert_eq!(
+        decoded.event_id, 0xDEAD_BEEF_CAFE_BABE_1234_5678_9ABC_DEF0,
+        "PROPERTY: Committed event_id must round-trip through u128_bytes wire format without loss.\n\
+         Investigate: src/pipeline/mod.rs src/wire.rs u128_bytes serde helper.\n\
+         Common causes: u128_bytes encoding as little-endian but decoding as big-endian, \
+         or serde_as attribute missing on the event_id field.\n\
+         Run: cargo test --test quiet_stragglers committed_serde_round_trip"
+    );
+    assert_eq!(
+        decoded.sequence, 42,
+        "PROPERTY: Committed sequence must survive msgpack serialization round-trip unchanged.\n\
+         Investigate: src/pipeline/mod.rs Committed Serialize/Deserialize impls.\n\
+         Common causes: sequence field not included in serialization, or deserialized \
+         into wrong numeric type causing truncation.\n\
+         Run: cargo test --test quiet_stragglers committed_serde_round_trip"
+    );
+    assert_eq!(
+        decoded.hash, [0xAA; 32],
+        "PROPERTY: Committed hash must survive msgpack serialization round-trip unchanged.\n\
+         Investigate: src/pipeline/mod.rs Committed Serialize/Deserialize impls.\n\
+         Common causes: hash field serialized as a sequence vs bytes causing length mismatch, \
+         or serde_bytes attribute missing from the hash field.\n\
+         Run: cargo test --test quiet_stragglers committed_serde_round_trip"
+    );
+}
+
+#[test]
+fn denial_is_error_trait() {
+    let denial = Denial::new("g", "msg");
+    // Verify it implements std::error::Error (this is a compile-time check + runtime use)
+    let err: &dyn std::error::Error = &denial;
+    let display = format!("{err}");
+    assert!(
+        display.contains("[g]") && display.contains("msg"),
+        "PROPERTY: Denial Display (via std::error::Error) must format as '[gate] message'.\n\
+         Investigate: src/guard/denial.rs Denial Display impl.\n\
+         Common causes: Display not wrapping the gate name in brackets, or printing \
+         only the message without the gate name prefix.\n\
+         Run: cargo test --test quiet_stragglers denial_is_error_trait"
+    );
+}
+
+#[test]
+fn denial_serialize() {
+    let denial = Denial::new("test_gate", "access denied")
+        .with_code("403")
+        .with_context("user", "alice");
+
+    let json = serde_json::to_string(&denial).expect("Denial should serialize");
+    assert!(
+        json.contains("test_gate"),
+        "PROPERTY: Serialized Denial JSON must include the gate name.\n\
+         Investigate: src/guard/denial.rs Denial Serialize impl.\n\
+         Common causes: gate field omitted from serde derive, or field renamed \
+         to something other than 'gate' in the serialized output.\n\
+         Run: cargo test --test quiet_stragglers denial_serialize"
+    );
+    assert!(
+        json.contains("403"),
+        "PROPERTY: Serialized Denial JSON must include the code field value.\n\
+         Investigate: src/guard/denial.rs Denial Serialize impl with_code().\n\
+         Common causes: code field serialized as null instead of the set value, \
+         or with_code() not storing the value in the struct.\n\
+         Run: cargo test --test quiet_stragglers denial_serialize"
+    );
+    assert!(
+        json.contains("alice"),
+        "PROPERTY: Serialized Denial JSON must include context key-value pairs.\n\
+         Investigate: src/guard/denial.rs Denial Serialize impl with_context().\n\
+         Common causes: context map not included in serialization, or with_context() \
+         not inserting into the context HashMap.\n\
+         Run: cargo test --test quiet_stragglers denial_serialize"
+    );
+}
+
+#[test]
+fn gateset_default() {
+    let gates = GateSet::<()>::default();
+    assert!(
+        gates.is_empty(),
+        "PROPERTY: GateSet::default() must produce an empty gate set.\n\
+         Investigate: src/guard/mod.rs GateSet Default impl.\n\
+         Common causes: Default not delegating to new(), or Default adding a \
+         built-in gate that should not be present.\n\
+         Run: cargo test --test quiet_stragglers gateset_default"
+    );
+}
+
+#[test]
+fn gateset_len_and_is_empty() {
+    let mut gates = GateSet::<()>::new();
+    assert!(
+        gates.is_empty(),
+        "PROPERTY: A newly created GateSet must be empty.\n\
+         Investigate: src/guard/mod.rs GateSet::new() is_empty().\n\
+         Common causes: GateSet::new() not initializing an empty inner collection, \
+         or is_empty() always returning false.\n\
+         Run: cargo test --test quiet_stragglers gateset_len_and_is_empty"
+    );
+    assert_eq!(
+        gates.len(),
+        0,
+        "PROPERTY: A newly created GateSet must have length 0.\n\
+         Investigate: src/guard/mod.rs GateSet::new() len().\n\
+         Common causes: len() returning 1 from a sentinel element, or GateSet \
+         pre-populated with a default gate.\n\
+         Run: cargo test --test quiet_stragglers gateset_len_and_is_empty"
+    );
+
+    struct DummyGate;
+    impl Gate<()> for DummyGate {
+        fn name(&self) -> &'static str {
+            "dummy"
+        }
+        fn evaluate(&self, _: &()) -> Result<(), Denial> {
+            Ok(())
+        }
+    }
+
+    gates.push(DummyGate);
+    assert!(
+        !gates.is_empty(),
+        "PROPERTY: GateSet must not be empty after pushing one gate.\n\
+         Investigate: src/guard/mod.rs GateSet::push() is_empty().\n\
+         Common causes: push() not actually inserting into the inner collection, \
+         or is_empty() not reflecting the current state.\n\
+         Run: cargo test --test quiet_stragglers gateset_len_and_is_empty"
+    );
+    assert_eq!(
+        gates.len(),
+        1,
+        "PROPERTY: GateSet must have length 1 after pushing one gate.\n\
+         Investigate: src/guard/mod.rs GateSet::push() len().\n\
+         Common causes: push() pushing a boxed copy without increasing the count, \
+         or len() reading a cached stale value.\n\
+         Run: cargo test --test quiet_stragglers gateset_len_and_is_empty"
+    );
+}
+
+#[test]
+fn gate_description_default() {
+    struct DescGate;
+    impl Gate<()> for DescGate {
+        fn name(&self) -> &'static str {
+            "desc_gate"
+        }
+        fn evaluate(&self, _: &()) -> Result<(), Denial> {
+            Ok(())
+        }
+        // description() uses default impl
+    }
+    let gate = DescGate;
+    assert_eq!(
+        gate.description(),
+        "",
+        "PROPERTY: The default Gate::description() impl must return an empty string.\n\
+         Investigate: src/guard/mod.rs Gate trait default description() impl.\n\
+         Common causes: default impl returning the gate name instead of \"\", or \
+         trait not providing a default impl and requiring every implementor to define it.\n\
+         Run: cargo test --test quiet_stragglers gate_description_default"
+    );
+}
