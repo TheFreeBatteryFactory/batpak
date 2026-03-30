@@ -171,6 +171,9 @@ fn bench_projection_caches(c: &mut Criterion) {
         const LMDB_MAP_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 
         let mut group = c.benchmark_group("projection_cache_lmdb");
+        // LMDB has a per-process TLS key limit (~126 environments). Capping sample_size
+        // prevents iter_batched from exhausting it when running cache_miss iterations.
+        group.sample_size(10);
 
         // Shared setup: 1000 events, cache pre-warmed
         let dir = TempDir::new().expect("create temp dir");
