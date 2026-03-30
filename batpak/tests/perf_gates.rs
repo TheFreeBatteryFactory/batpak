@@ -1,7 +1,7 @@
 #![allow(clippy::panic, clippy::print_stderr, clippy::cast_possible_truncation)] // benchmark reporting uses eprintln; gate failures use panic
-//! Self-benchmark test: the library dogfoods its own Gate system.
-//! Performance gates + correctness gates + resilience gates.
-//! [SPEC:tests/self_benchmark.rs]
+//! Performance gate tests: the library dogfoods its own Gate/Pipeline system
+//! to enforce its own throughput, latency, and correctness thresholds.
+//! [SPEC:tests/perf_gates.rs]
 //!
 //! PROVES: LAW-004 (Composition Over Construction — quadratic dogfooding)
 //! DEFENDS: FM-013 (Coverage Mirage — gates test themselves), FM-007 (Island Syndrome)

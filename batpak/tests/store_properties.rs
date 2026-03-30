@@ -1,7 +1,6 @@
 #![allow(clippy::disallowed_methods)] // compliance tests use thread::spawn for concurrency probes
-//! Big Bang Protocol compliance tests.
-//! Verifies constitutional laws, algebraic properties, and flow connectivity
-//! that the compiler and unit tests cannot catch.
+//! Store algebraic property tests: replay determinism, idempotency, commutativity,
+//! round-trip fidelity, law enforcement, flow connectivity, error propagation.
 //!
 //! PROVES: LAW-003 (No Orphan Infrastructure), LAW-007 (Codebase Accuses Itself)
 //! DEFENDS: FM-007 (Island Syndrome), FM-022 (Receipt Hollowing), FM-023 (Fallback Laundering)
