@@ -1,14 +1,12 @@
-//! Benchmark: projection replay latency for EventSourced.
+//! Projection replay latency benchmarks.
 //!
-//! [SPEC:benches/projection_latency.rs]
+//! Groups:
+//!   projection_replay   — NoCache (default): cold (OS page cache cold) vs warm
+//!   projection_cache_redb  — RedbCache: cache hit vs cache miss [feature = "redb"]
+//!   projection_cache_lmdb  — LmdbCache: cache hit vs cache miss [feature = "lmdb"]
 //!
-//! NOTE: Store::project() currently always replays from segments (the _cache
-//! field is not yet wired into the projection path). Both benchmarks measure
-//! segment replay; "replay_cold" is the first read (OS page cache cold),
-//! "replay_warm" is after the data is in the OS page cache.
-//!
-//! When the ProjectionCache is wired into project(), add a "redb_cache_hit"
-//! / "redb_cache_miss" benchmark group gated behind #[cfg(feature = "redb")].
+//! Run all:  cargo bench --all-features
+//! Run one:  cargo bench --features redb -- projection_cache_redb
 
 use batpak::prelude::*;
 use batpak::store::{Freshness, Store, StoreConfig};
@@ -90,5 +88,165 @@ fn bench_projection_replay(c: &mut Criterion) {
     store.close().expect("close");
 }
 
-criterion_group!(benches, bench_projection_replay);
+/// Projection cache benchmarks. Each backend gets a cache_hit and cache_miss group.
+/// cache_hit: cache is pre-warmed, project reads from cache without replaying segments.
+/// cache_miss: fresh cache per iteration via iter_batched — measures replay + cache write.
+fn bench_projection_caches(c: &mut Criterion) {
+    #[cfg(feature = "redb")]
+    {
+        use batpak::store::projection::RedbCache;
+
+        let mut group = c.benchmark_group("projection_cache_redb");
+
+        // Shared setup: 1000 events, cache pre-warmed
+        let dir = TempDir::new().expect("create temp dir");
+        let config = StoreConfig {
+            data_dir: dir.path().join("data"),
+            ..StoreConfig::new("")
+        };
+        let cache =
+            RedbCache::open(&dir.path().join("cache.redb")).expect("open redb cache");
+        let store = Store::open_with_cache(config, Box::new(cache))
+            .expect("open store with redb cache");
+        let coord = Coordinate::new("bench:entity", "bench:scope").expect("valid coord");
+        let kind = EventKind::custom(0xF, 1);
+        let payload = serde_json::json!({"x": 1});
+        for _ in 0..1_000 {
+            store.append(&coord, kind, &payload).expect("append");
+        }
+        store.sync().expect("sync");
+        // Warm the cache: first project populates it
+        let _: Option<Counter> = store
+            .project("bench:entity", &Freshness::Consistent)
+            .expect("warm redb cache");
+
+        // cache_hit: cache is valid, no segment replay needed
+        group.bench_function("cache_hit", |b| {
+            b.iter(|| {
+                let _: Option<Counter> = store
+                    .project("bench:entity", &Freshness::Consistent)
+                    .expect("project");
+            });
+        });
+
+        // cache_miss: fresh cache each iteration — measures full replay + cache write
+        group.bench_function("cache_miss", |b| {
+            b.iter_batched(
+                || {
+                    let iter_dir = TempDir::new().expect("iter temp dir");
+                    let cfg = StoreConfig {
+                        data_dir: iter_dir.path().join("data"),
+                        ..StoreConfig::new("")
+                    };
+                    let c = RedbCache::open(&iter_dir.path().join("c.redb"))
+                        .expect("open cache");
+                    let s = Store::open_with_cache(cfg, Box::new(c))
+                        .expect("open store");
+                    let coord =
+                        Coordinate::new("bench:entity", "bench:scope").expect("coord");
+                    let kind = EventKind::custom(0xF, 1);
+                    let payload = serde_json::json!({"x": 1});
+                    for _ in 0..1_000 {
+                        s.append(&coord, kind, &payload).expect("append");
+                    }
+                    s.sync().expect("sync");
+                    (s, iter_dir)
+                },
+                |(s, _dir)| {
+                    let _: Option<Counter> = s
+                        .project("bench:entity", &Freshness::Consistent)
+                        .expect("project");
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+
+        group.finish();
+        store.close().expect("close");
+    }
+
+    #[cfg(feature = "lmdb")]
+    {
+        use batpak::store::projection::LmdbCache;
+        const LMDB_MAP_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
+
+        let mut group = c.benchmark_group("projection_cache_lmdb");
+
+        // Shared setup: 1000 events, cache pre-warmed
+        let dir = TempDir::new().expect("create temp dir");
+        let config = StoreConfig {
+            data_dir: dir.path().join("data"),
+            ..StoreConfig::new("")
+        };
+        let cache =
+            LmdbCache::open(&dir.path().join("lmdb_cache"), LMDB_MAP_SIZE)
+                .expect("open lmdb cache");
+        let store = Store::open_with_cache(config, Box::new(cache))
+            .expect("open store with lmdb cache");
+        let coord = Coordinate::new("bench:entity", "bench:scope").expect("valid coord");
+        let kind = EventKind::custom(0xF, 1);
+        let payload = serde_json::json!({"x": 1});
+        for _ in 0..1_000 {
+            store.append(&coord, kind, &payload).expect("append");
+        }
+        store.sync().expect("sync");
+        // Warm the cache: first project populates it
+        let _: Option<Counter> = store
+            .project("bench:entity", &Freshness::Consistent)
+            .expect("warm lmdb cache");
+
+        // cache_hit: cache is valid, no segment replay needed
+        group.bench_function("cache_hit", |b| {
+            b.iter(|| {
+                let _: Option<Counter> = store
+                    .project("bench:entity", &Freshness::Consistent)
+                    .expect("project");
+            });
+        });
+
+        // cache_miss: fresh cache each iteration — measures full replay + cache write
+        group.bench_function("cache_miss", |b| {
+            b.iter_batched(
+                || {
+                    let iter_dir = TempDir::new().expect("iter temp dir");
+                    let cfg = StoreConfig {
+                        data_dir: iter_dir.path().join("data"),
+                        ..StoreConfig::new("")
+                    };
+                    let c = LmdbCache::open(
+                        &iter_dir.path().join("lmdb_c"),
+                        LMDB_MAP_SIZE,
+                    )
+                    .expect("open cache");
+                    let s = Store::open_with_cache(cfg, Box::new(c))
+                        .expect("open store");
+                    let coord =
+                        Coordinate::new("bench:entity", "bench:scope").expect("coord");
+                    let kind = EventKind::custom(0xF, 1);
+                    let payload = serde_json::json!({"x": 1});
+                    for _ in 0..1_000 {
+                        s.append(&coord, kind, &payload).expect("append");
+                    }
+                    s.sync().expect("sync");
+                    (s, iter_dir)
+                },
+                |(s, _dir)| {
+                    let _: Option<Counter> = s
+                        .project("bench:entity", &Freshness::Consistent)
+                        .expect("project");
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+
+        group.finish();
+        store.close().expect("close");
+    }
+
+    // If neither feature is enabled, this function is a no-op
+    #[cfg(not(any(feature = "redb", feature = "lmdb")))]
+    let _ = c;
+}
+
+criterion_group!(benches, bench_projection_replay, bench_projection_caches);
 criterion_main!(benches);
