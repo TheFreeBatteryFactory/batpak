@@ -55,3 +55,22 @@ config.fd_budget = 256;                          // many open segments
 config.writer_channel_capacity = 16384;          // high burst tolerance
 config.broadcast_capacity = 32768;               // slow consumer tolerance
 ```
+
+## Projection Cache Backends
+
+`Store::open` uses `NoCache` by default. For `project()` workloads that repeatedly fold
+large event streams, use a persistent cache backend via `Store::open_with_cache`.
+
+### LmdbCache (`feature = "lmdb"`)
+
+```rust
+let mut config = StoreConfig::new("/var/lib/events");
+config.cache_map_size_bytes = 128 * 1024 * 1024;  // 128 MB LMDB map
+let store = Store::open_with_cache(config, Box::new(LmdbCache::new(&config)?))?;
+```
+
+> **Windows limitation:** LMDB does not release TLS (thread-local storage) keys when
+> environments are closed. Benchmarks that open many LMDB environments in rapid succession
+> (e.g. `cargo bench -- projection_cache_lmdb/cache_miss`) will panic with `MDB_TLS_FULL`
+> on Windows. Run cache-miss benchmarks on Linux or macOS where LMDB cleans up TLS on
+> environment close.

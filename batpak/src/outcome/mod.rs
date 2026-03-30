@@ -99,6 +99,13 @@ impl<T> Outcome<T> {
 
     /// map: transform the Ok value. Distributes over Batch.
     /// [SPEC:src/outcome/mod.rs — combinators distribute over Batch via F: Clone]
+    ///
+    /// # Example
+    /// ```
+    /// use batpak::prelude::*;
+    /// let doubled: Outcome<i32> = Outcome::ok(21).map(|x| x * 2);
+    /// assert_eq!(doubled, Outcome::ok(42));
+    /// ```
     pub fn map<U, F: FnOnce(T) -> U + Clone>(self, f: F) -> Outcome<U> {
         match self {
             Self::Ok(v) => Outcome::Ok(f(v)),

@@ -312,10 +312,14 @@ impl Store {
         Self::open(StoreConfig::new("./batpak-data"))
     }
 
+    /// Open a store at the given config's data directory. Creates the directory if absent.
+    /// Uses `NoCache` for projection (no external cache backend).
     pub fn open(config: StoreConfig) -> Result<Self, StoreError> {
         Self::open_with_cache(config, Box::new(NoCache))
     }
 
+    /// Open a store with a custom projection cache backend.
+    /// Use `RedbCache` or `LmdbCache` (feature-gated) for cache-accelerated `project()` calls.
     pub fn open_with_cache(
         config: StoreConfig,
         cache: Box<dyn ProjectionCache>,

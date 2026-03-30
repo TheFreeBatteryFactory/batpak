@@ -10,6 +10,14 @@ pub struct EventKind(u16); // PRIVATE inner field — not pub
 impl EventKind {
     /// category:type encoding. Upper 4 bits = category, lower 12 = type.
     /// Products use categories 0x1-0xC, 0xE-0xF. System reserves 0x0 and 0xD.
+    ///
+    /// # Example
+    /// ```
+    /// use batpak::prelude::*;
+    /// let kind = EventKind::custom(0xF, 1);
+    /// assert!(!kind.is_system());
+    /// assert!(!kind.is_effect());
+    /// ```
     pub const fn custom(category: u8, type_id: u16) -> Self {
         // Validate: only lower 4 bits of category survive the shift.
         // category >= 16 would silently overflow into wrong namespace.

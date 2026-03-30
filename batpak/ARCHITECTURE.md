@@ -151,3 +151,17 @@ These are enforced at compile time (via `build.rs` and `compile_error!` guards):
 4. **No unsafe serialization** — `build.rs` rejects transmute, mem::read, pointer_cast
 5. **Blake3 only** — `compile_error!` prevents sha256 feature
 6. **Sync store API** — `compile_error!` prevents async-store feature
+
+## Build-Time Invariant Enforcement
+
+`build.rs` runs five compile-time checks that enforce structural invariants. These are not optional — they fail the build immediately.
+
+| Check | What it enforces |
+|-------|-----------------|
+| `check_pub_items_have_tests` | Every `pub` item in `src/` must appear by name in at least one test file. Items tested only indirectly are listed in the allowlist with a written justification. |
+| `check_allow_justifications` | Every `#[allow(...)]` in `src/` must have a comment on the same line explaining why. Prevents silent lint suppression. |
+| `check_no_stubs_in_src` | No placeholder strings (`todo!`, `unimplemented!`, stub sentinels) in `src/`. |
+| `check_no_tokio_in_deps` | `tokio` must not appear in `Cargo.toml` dependencies. Enforces the sync-only design invariant. |
+| `check_store_config_field_usage` | Every field of `StoreConfig` must be referenced in `src/store/mod.rs`. Prevents dead config fields. |
+
+When adding a new `pub` item, either add a test that names it, or add it to the allowlist in `build.rs` with a justification explaining where it is exercised.
