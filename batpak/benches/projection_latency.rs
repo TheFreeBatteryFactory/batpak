@@ -171,11 +171,6 @@ fn bench_projection_caches(c: &mut Criterion) {
         const LMDB_MAP_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 
         let mut group = c.benchmark_group("projection_cache_lmdb");
-        // LMDB has a per-process TLS key limit (~126 environments). SmallInput batches
-        // ~11 setups per sample, so 100 samples = ~1100 environments. Use LargeInput
-        // (1 setup/sample) + sample_size(10) + short warmup to stay well under the limit.
-        group.sample_size(10);
-        group.warm_up_time(std::time::Duration::from_millis(500));
 
         // Shared setup: 1000 events, cache pre-warmed
         let dir = TempDir::new().expect("create temp dir");
@@ -209,7 +204,12 @@ fn bench_projection_caches(c: &mut Criterion) {
             });
         });
 
-        // cache_miss: fresh cache each iteration — measures full replay + cache write
+        // cache_miss: fresh cache each iteration — measures full replay + cache write.
+        // Skipped on Windows: LMDB does not release TLS keys when environments are
+        // closed/dropped (MDB_TLS_FULL). Criterion's iter_batched creates one environment
+        // per iteration; over 100 samples this exhausts the per-process TLS key budget.
+        // Run this bench on Linux/macOS where LMDB cleans up TLS on env close.
+        #[cfg(not(target_os = "windows"))]
         group.bench_function("cache_miss", |b| {
             b.iter_batched(
                 || {
@@ -240,7 +240,7 @@ fn bench_projection_caches(c: &mut Criterion) {
                         .project("bench:entity", &Freshness::Consistent)
                         .expect("project");
                 },
-                criterion::BatchSize::LargeInput,
+                criterion::BatchSize::SmallInput,
             );
         });
 
