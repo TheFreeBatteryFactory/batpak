@@ -66,11 +66,27 @@ large event streams, use a persistent cache backend via `Store::open_with_cache`
 ```rust
 let mut config = StoreConfig::new("/var/lib/events");
 config.cache_map_size_bytes = 128 * 1024 * 1024;  // 128 MB LMDB map
-let store = Store::open_with_cache(config, Box::new(LmdbCache::new(&config)?))?;
+let store = Store::open_with_cache(
+    config.clone(),
+    Box::new(LmdbCache::open("/var/lib/events-cache", config.cache_map_size_bytes)?),
+)?;
 ```
 
-> **Windows limitation:** LMDB does not release TLS (thread-local storage) keys when
-> environments are closed. Benchmarks that open many LMDB environments in rapid succession
-> (e.g. `cargo bench -- projection_cache_lmdb/cache_miss`) will panic with `MDB_TLS_FULL`
-> on Windows. Run cache-miss benchmarks on Linux or macOS where LMDB cleans up TLS on
-> environment close.
+## Benchmark Surfaces
+
+Use separate surfaces for backend-neutral and backend-specific performance work:
+
+- `just bench-neutral` measures reopen/replay/write/fanout/compaction without cache backend noise
+- `just bench-redb` measures redb-backed projection cache behavior
+- `just bench-lmdb` measures LMDB-backed projection cache behavior
+
+Save or compare baselines per OS and surface:
+
+```bash
+just bench-save surface=neutral
+just bench-compare surface=neutral
+just bench-save surface=lmdb
+```
+
+LMDB cache-miss benchmarks are now Windows-safe because they reuse one environment and
+measure uncached entities instead of creating a fresh LMDB environment per sample.

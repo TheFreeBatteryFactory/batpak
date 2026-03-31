@@ -235,7 +235,7 @@ impl Gate<PerfContext> for ProjectionGate {
                 "projection_replay",
                 format!(
                     "Projection replay {:.1}ms > max {:.1}ms for {} events. \
-                     Investigate: src/store/mod.rs project(), \
+                     Investigate: src/store/projection_flow.rs project(), \
                      src/store/reader.rs read_entry deserialization.",
                     ctx.projection_ms, self.max_ms, ctx.event_count
                 ),
@@ -576,7 +576,7 @@ impl Gate<CorrectnessContext> for SnapshotBootGate {
             Err(Denial::new(
                 "snapshot_bootable",
                 "Snapshot did not produce a bootable store. \
-                 Investigate: src/store/mod.rs snapshot(), Store::open cold start.",
+                 Investigate: src/store/mod.rs snapshot(), src/store/reader.rs scan_segment.",
             ))
         }
     }
@@ -837,7 +837,7 @@ fn projection_latency_gate() {
         }
         panic!(
             "PROJECTION LATENCY GATE FAILED: {:.1}ms > 5000ms max.\n\
-             Investigate: src/store/mod.rs project(), src/store/reader.rs.",
+             Investigate: src/store/projection_flow.rs project(), src/store/reader.rs.",
             projection_ms
         );
     }

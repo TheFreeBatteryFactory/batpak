@@ -84,6 +84,56 @@ fn frame_decode_valid_round_trip() {
     assert_eq!(decoded, "test_data");
 }
 
+#[test]
+fn append_frames_from_segment_copies_frame_bytes_exactly() {
+    use batpak::store::segment::{frame_encode, Segment, SEGMENT_MAGIC};
+
+    fn frame_bytes(path: &std::path::Path) -> Vec<u8> {
+        let bytes = std::fs::read(path).expect("read segment");
+        assert_eq!(
+            &bytes[..4],
+            SEGMENT_MAGIC,
+            "segment should start with FBAT magic"
+        );
+        let header_len = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        bytes[(8 + header_len)..].to_vec()
+    }
+
+    let dir = TempDir::new().expect("tmpdir");
+    let source_path;
+    {
+        let mut source = Segment::create(dir.path(), 1).expect("create source segment");
+        let frame_a = frame_encode(&serde_json::json!({"a": 1})).expect("encode frame a");
+        let frame_b = frame_encode(&serde_json::json!({"b": 2})).expect("encode frame b");
+        source.write_frame(&frame_a).expect("write frame a");
+        source.write_frame(&frame_b).expect("write frame b");
+        source
+            .sync_with_mode(&SyncMode::SyncData)
+            .expect("sync source");
+        source_path = source.path.clone();
+        let _sealed = source.seal();
+    }
+
+    let destination_path;
+    {
+        let mut destination = Segment::create(dir.path(), 2).expect("create destination segment");
+        destination
+            .append_frames_from_segment(&source_path)
+            .expect("append frames");
+        destination
+            .sync_with_mode(&SyncMode::SyncData)
+            .expect("sync destination");
+        destination_path = destination.path.clone();
+        let _sealed = destination.seal();
+    }
+
+    assert_eq!(
+        frame_bytes(&destination_path),
+        frame_bytes(&source_path),
+        "APPEND FRAMES: destination segment should contain exactly the source frame bytes after both headers are stripped."
+    );
+}
+
 // ===== Subscription lifecycle =====
 
 #[test]

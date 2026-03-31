@@ -70,6 +70,17 @@ Traceability and architectural proof live in `../traceability/` and `docs/adr/`.
 
 See [TUNING.md](TUNING.md) for configuration reference and tradeoff guidance.
 
+## Benchmarks
+
+Benchmark surfaces are split so backend-neutral paths are not confused with
+backend-specific cache behavior.
+
+- `just bench-neutral` runs backend-neutral benches with default features
+- `just bench-redb` runs redb cache benches
+- `just bench-lmdb` runs LMDB cache benches
+- `just bench-save surface=neutral|redb|lmdb` saves a per-OS, per-surface baseline
+- `just bench-compare surface=neutral|redb|lmdb` compares against that baseline
+
 ## License
 
 MIT OR Apache-2.0

@@ -100,19 +100,19 @@ impl Store {
         entries.sort_by_key(|e| e.file_name());
 
         for dir_entry in &entries {
-            let scanned = reader.scan_segment(&dir_entry.path())?;
+            let scanned = reader.scan_segment_index(&dir_entry.path())?;
             for se in scanned {
                 let coord = Coordinate::new(&se.entity, &se.scope)?;
-                let clock = se.event.header.position.sequence;
+                let clock = se.header.position.sequence;
                 let entry = IndexEntry {
-                    event_id: se.event.header.event_id,
-                    correlation_id: se.event.header.correlation_id,
-                    causation_id: se.event.header.causation_id,
+                    event_id: se.header.event_id,
+                    correlation_id: se.header.correlation_id,
+                    causation_id: se.header.causation_id,
                     coord,
-                    kind: se.event.header.event_kind,
-                    wall_ms: se.event.header.position.wall_ms,
+                    kind: se.header.event_kind,
+                    wall_ms: se.header.position.wall_ms,
                     clock,
-                    hash_chain: se.event.hash_chain.clone().unwrap_or_default(),
+                    hash_chain: se.hash_chain,
                     disk_pos: DiskPos {
                         segment_id: se.segment_id,
                         offset: se.offset,

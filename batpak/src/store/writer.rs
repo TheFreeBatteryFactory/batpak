@@ -10,7 +10,7 @@ compile_error!(
 use crate::coordinate::{Coordinate, DagPosition};
 use crate::event::{Event, EventKind, HashChain};
 use crate::store::index::{DiskPos, IndexEntry, StoreIndex};
-use crate::store::segment::{self, Active, FramePayload, Segment};
+use crate::store::segment::{self, Active, FramePayloadRef, Segment};
 use crate::store::{AppendReceipt, StoreConfig, StoreError};
 use flume::{Receiver, Sender, TrySendError};
 use parking_lot::Mutex;
@@ -419,9 +419,11 @@ impl WriterState<'_> {
         let _entity_guard = lock.lock();
         trace!(entity = %entity, "entity lock acquired");
 
+        let latest = self.index.get_latest(entity);
+
         // STEP 1a: CAS check (under entity lock — no TOCTOU).
         if let Some(expected) = guards.expected_sequence {
-            let actual = self.index.get_latest(entity).map(|e| e.clock).unwrap_or(0);
+            let actual = latest.as_ref().map(|entry| entry.clock).unwrap_or(0);
             if actual != expected {
                 return Err(StoreError::SequenceMismatch {
                     entity: entity.to_string(),
@@ -444,18 +446,13 @@ impl WriterState<'_> {
 
         // STEP 2: Get prev_hash from index (or [0u8;32] for genesis).
         // Clone the value out of the DashMap Ref immediately.
-        let prev_hash = self
-            .index
-            .get_latest(entity)
-            .map(|e| e.hash_chain.event_hash)
+        let prev_hash = latest
+            .as_ref()
+            .map(|entry| entry.hash_chain.event_hash)
             .unwrap_or([0u8; 32]);
 
         // STEP 3: Compute sequence (latest.clock + 1, or 0).
-        let clock = self
-            .index
-            .get_latest(entity)
-            .map(|e| e.clock + 1)
-            .unwrap_or(0);
+        let clock = latest.as_ref().map(|entry| entry.clock + 1).unwrap_or(0);
 
         // STEP 4: Set event header position with HLC wall clock.
         // Ensure wall_ms is monotonically non-decreasing per entity to prevent
@@ -463,11 +460,7 @@ impl WriterState<'_> {
         // [CROSS-POLLINATION:czap/hlc.ts — HLC for global causal ordering]
         #[allow(clippy::cast_sign_loss)] // timestamp_us is always positive (from SystemTime)
         let raw_ms = (event.header.timestamp_us / 1000) as u64;
-        let last_ms = self
-            .index
-            .get_latest(entity)
-            .map(|e| e.wall_ms)
-            .unwrap_or(0);
+        let last_ms = latest.as_ref().map(|entry| entry.wall_ms).unwrap_or(0);
         let now_ms = raw_ms.max(last_ms);
         let position = DagPosition::child_at(clock, now_ms, 0);
         event.header.position = position;
@@ -492,10 +485,10 @@ impl WriterState<'_> {
 
         // STEP 6: Serialize to MessagePack + CRC32 frame.
         // [SPEC:WIRE FORMAT DECISIONS — rmp_serde::to_vec_named() ALWAYS]
-        let frame_payload = FramePayload {
-            event: event.clone(),
-            entity: entity.to_string(),
-            scope: scope.to_string(),
+        let frame_payload = FramePayloadRef {
+            event: &event,
+            entity: entity.as_ref(),
+            scope: scope.as_ref(),
         };
         let frame = segment::frame_encode(&frame_payload)?;
 
@@ -526,12 +519,13 @@ impl WriterState<'_> {
             #[allow(clippy::cast_possible_truncation)] // checked_payload_len already verified < u32::MAX
             length: frame.len() as u32,
         };
+        let coord =
+            Coordinate::new(entity.as_ref(), scope.as_ref()).map_err(StoreError::Coordinate)?;
         let entry = IndexEntry {
             event_id: event.header.event_id,
             correlation_id,
             causation_id,
-            coord: Coordinate::new(entity.as_ref(), scope.as_ref())
-                .map_err(StoreError::Coordinate)?,
+            coord: coord.clone(),
             kind,
             wall_ms: now_ms,
             clock,
@@ -547,8 +541,7 @@ impl WriterState<'_> {
             event_id: event.header.event_id,
             correlation_id,
             causation_id,
-            coord: Coordinate::new(entity.as_ref(), scope.as_ref())
-                .map_err(StoreError::Coordinate)?,
+            coord,
             kind,
             sequence: global_seq,
         });

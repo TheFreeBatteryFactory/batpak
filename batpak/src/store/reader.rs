@@ -1,11 +1,12 @@
 use crate::coordinate::Coordinate;
-use crate::event::{Event, StoredEvent};
+use crate::event::{Event, EventHeader, HashChain, StoredEvent};
 use crate::store::segment::{self, FramePayload, SEGMENT_MAGIC};
 use crate::store::{DiskPos, StoreError};
 use parking_lot::Mutex;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
 /// Reader: reads events from segment files. LRU file descriptor cache + buffer pool.
@@ -32,9 +33,31 @@ pub(crate) struct ScannedEntry {
     pub event: Event<serde_json::Value>,
     pub entity: String,
     pub scope: String,
+}
+
+pub(crate) struct ScannedIndexEntry {
+    pub header: EventHeader,
+    pub entity: String,
+    pub scope: String,
+    pub hash_chain: HashChain,
     pub segment_id: u64,
     pub offset: u64,
     pub length: u32,
+}
+
+#[derive(Deserialize)]
+struct IndexScanFramePayload {
+    event: IndexScanEvent,
+    entity: String,
+    scope: String,
+}
+
+#[derive(Deserialize)]
+struct IndexScanEvent {
+    header: EventHeader,
+    #[serde(rename = "payload")]
+    _payload: serde::de::IgnoredAny,
+    hash_chain: Option<HashChain>,
 }
 
 impl Reader {
@@ -152,11 +175,9 @@ impl Reader {
     /// Scan an entire segment for cold start. Returns all events in order.
     pub(crate) fn scan_segment(&self, path: &Path) -> Result<Vec<ScannedEntry>, StoreError> {
         let mut file = File::open(path).map_err(StoreError::Io)?;
-        let mut all_bytes = Vec::new();
-        file.read_to_end(&mut all_bytes).map_err(StoreError::Io)?;
-
-        // Verify magic
-        if all_bytes.len() < 4 || &all_bytes[..4] != SEGMENT_MAGIC {
+        let mut magic = [0u8; 4];
+        file.read_exact(&mut magic).map_err(StoreError::Io)?;
+        if &magic != SEGMENT_MAGIC {
             return Err(StoreError::CorruptSegment {
                 segment_id: 0,
                 detail: "bad magic".into(),
@@ -176,23 +197,13 @@ impl Reader {
             }
         };
 
-        // Read header_len (u32 BE) after magic, then header bytes
-        if all_bytes.len() < 8 {
-            return Err(StoreError::CorruptSegment {
-                segment_id,
-                detail: "segment too short for magic + header_len".into(),
-            });
-        }
-        let header_len =
-            u32::from_be_bytes([all_bytes[4], all_bytes[5], all_bytes[6], all_bytes[7]]) as usize;
-        if all_bytes.len() < 8 + header_len {
-            return Err(StoreError::CorruptSegment {
-                segment_id,
-                detail: "segment truncated in header".into(),
-            });
-        }
-        let header_slice = &all_bytes[8..8 + header_len];
-        let header: segment::SegmentHeader = rmp_serde::from_slice(header_slice)
+        let mut header_len_buf = [0u8; 4];
+        file.read_exact(&mut header_len_buf)
+            .map_err(StoreError::Io)?;
+        let header_len = u32::from_be_bytes(header_len_buf) as usize;
+        let mut header_buf = vec![0u8; header_len];
+        file.read_exact(&mut header_buf).map_err(StoreError::Io)?;
+        let header: segment::SegmentHeader = rmp_serde::from_slice(&header_buf)
             .map_err(|e| StoreError::Serialization(e.to_string()))?;
 
         // Version check — reject unknown segment versions
@@ -203,41 +214,55 @@ impl Reader {
             });
         }
 
-        let mut cursor = 8 + header_len; // past magic + header_len + header
+        let mut cursor = (8 + header_len) as u64; // past magic + header_len + header
 
         // Read frames until EOF. Each frame: [len:u32 BE][crc32:u32 BE][msgpack]
         let mut entries = Vec::new();
-        while cursor < all_bytes.len() {
-            let remaining = &all_bytes[cursor..];
-            if remaining.len() < 8 {
-                break;
-            } // not enough for a frame header
+        loop {
+            let frame_offset = cursor;
+            let mut frame_header = [0u8; 8];
+            match file.read_exact(&mut frame_header) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::UnexpectedEof => break,
+                Err(error) => return Err(StoreError::Io(error)),
+            }
 
-            let frame_offset = cursor as u64;
-            match segment::frame_decode(remaining) {
+            let payload_len = u32::from_be_bytes([
+                frame_header[0],
+                frame_header[1],
+                frame_header[2],
+                frame_header[3],
+            ]) as usize;
+            let mut frame_buf = self.acquire_buffer(8 + payload_len);
+            frame_buf[..8].copy_from_slice(&frame_header);
+            if let Err(error) = file.read_exact(&mut frame_buf[8..]) {
+                self.release_buffer(frame_buf);
+                if error.kind() == ErrorKind::UnexpectedEof {
+                    break;
+                }
+                return Err(StoreError::Io(error));
+            }
+
+            let mut stop_scan = false;
+            match segment::frame_decode(&frame_buf) {
                 Ok((msgpack, frame_size)) => {
-                    // Deserialize frame payload
                     match rmp_serde::from_slice::<FramePayload<serde_json::Value>>(msgpack) {
                         Ok(payload) => {
                             entries.push(ScannedEntry {
                                 event: payload.event,
                                 entity: payload.entity,
                                 scope: payload.scope,
-                                segment_id,
-                                offset: frame_offset,
-                                #[allow(clippy::cast_possible_truncation)] // frame_size < segment_max_bytes < u32::MAX
-                                length: frame_size as u32,
                             });
                         }
-                        Err(e) => {
+                        Err(error) => {
                             tracing::warn!(
                                 segment_id,
                                 offset = frame_offset,
-                                "skipping unreadable frame: {e}"
+                                "skipping unreadable frame: {error}"
                             );
                         }
                     }
-                    cursor += frame_size;
+                    cursor += frame_size as u64;
                 }
                 Err(segment::FrameDecodeError::CrcMismatch { .. }) => {
                     tracing::warn!(
@@ -245,11 +270,129 @@ impl Reader {
                         offset = frame_offset,
                         "CRC mismatch, skipping frame"
                     );
-                    break; // CRC mismatch = stop scanning this segment
+                    stop_scan = true;
                 }
-                Err(_) => break, // truncated or corrupt — stop
+                Err(_) => stop_scan = true, // truncated or corrupt — stop
+            }
+            self.release_buffer(frame_buf);
+            if stop_scan {
+                break;
             }
         }
+        Ok(entries)
+    }
+
+    /// Scan only the metadata required to rebuild the in-memory index.
+    pub(crate) fn scan_segment_index(
+        &self,
+        path: &Path,
+    ) -> Result<Vec<ScannedIndexEntry>, StoreError> {
+        let mut file = File::open(path).map_err(StoreError::Io)?;
+        let mut magic = [0u8; 4];
+        file.read_exact(&mut magic).map_err(StoreError::Io)?;
+        if &magic != SEGMENT_MAGIC {
+            return Err(StoreError::CorruptSegment {
+                segment_id: 0,
+                detail: "bad magic".into(),
+            });
+        }
+
+        let segment_id = match path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            Some(id) => id,
+            None => {
+                tracing::warn!(?path, "skipping segment with unparseable filename");
+                return Ok(Vec::new());
+            }
+        };
+
+        let mut header_len_buf = [0u8; 4];
+        file.read_exact(&mut header_len_buf)
+            .map_err(StoreError::Io)?;
+        let header_len = u32::from_be_bytes(header_len_buf) as usize;
+        let mut header_buf = vec![0u8; header_len];
+        file.read_exact(&mut header_buf).map_err(StoreError::Io)?;
+        let header: segment::SegmentHeader = rmp_serde::from_slice(&header_buf)
+            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        if header.version != 1 {
+            return Err(StoreError::CorruptSegment {
+                segment_id,
+                detail: format!("unsupported segment version: {}", header.version),
+            });
+        }
+
+        let mut cursor = (8 + header_len) as u64;
+        let mut entries = Vec::new();
+        loop {
+            let frame_offset = cursor;
+            let mut frame_header = [0u8; 8];
+            match file.read_exact(&mut frame_header) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::UnexpectedEof => break,
+                Err(error) => return Err(StoreError::Io(error)),
+            }
+
+            let payload_len = u32::from_be_bytes([
+                frame_header[0],
+                frame_header[1],
+                frame_header[2],
+                frame_header[3],
+            ]) as usize;
+            let mut frame_buf = self.acquire_buffer(8 + payload_len);
+            frame_buf[..8].copy_from_slice(&frame_header);
+            if let Err(error) = file.read_exact(&mut frame_buf[8..]) {
+                self.release_buffer(frame_buf);
+                if error.kind() == ErrorKind::UnexpectedEof {
+                    break;
+                }
+                return Err(StoreError::Io(error));
+            }
+
+            let mut stop_scan = false;
+            match segment::frame_decode(&frame_buf) {
+                Ok((msgpack, frame_size)) => {
+                    match rmp_serde::from_slice::<IndexScanFramePayload>(msgpack) {
+                        Ok(payload) => {
+                            entries.push(ScannedIndexEntry {
+                                header: payload.event.header,
+                                entity: payload.entity,
+                                scope: payload.scope,
+                                hash_chain: payload.event.hash_chain.unwrap_or_default(),
+                                segment_id,
+                                offset: frame_offset,
+                                #[allow(clippy::cast_possible_truncation)] // frame_size < segment_max_bytes < u32::MAX
+                                length: frame_size as u32,
+                            });
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                segment_id,
+                                offset = frame_offset,
+                                "skipping unreadable frame metadata: {error}"
+                            );
+                        }
+                    }
+                    cursor += frame_size as u64;
+                }
+                Err(segment::FrameDecodeError::CrcMismatch { .. }) => {
+                    tracing::warn!(
+                        segment_id,
+                        offset = frame_offset,
+                        "CRC mismatch, skipping frame"
+                    );
+                    stop_scan = true;
+                }
+                Err(_) => stop_scan = true,
+            }
+            self.release_buffer(frame_buf);
+            if stop_scan {
+                break;
+            }
+        }
+
         Ok(entries)
     }
 

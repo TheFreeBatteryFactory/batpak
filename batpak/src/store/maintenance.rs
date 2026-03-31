@@ -97,45 +97,6 @@ pub(crate) fn compact(
         });
     }
 
-    let mut all_events: Vec<reader::ScannedEntry> = Vec::new();
-    for (_, path) in &sealed {
-        all_events.extend(store.reader.scan_segment(path)?);
-    }
-
-    let tombstone_kind = EventKind::TOMBSTONE;
-    let mut kept_events: Vec<reader::ScannedEntry> = Vec::new();
-    match &config.strategy {
-        CompactionStrategy::Merge => kept_events = all_events,
-        CompactionStrategy::Retention(predicate) => {
-            for entry in all_events {
-                let coord = Coordinate::new(&entry.entity, &entry.scope)?;
-                let stored = StoredEvent {
-                    coordinate: coord,
-                    event: entry.event.clone(),
-                };
-                if predicate(&stored) {
-                    kept_events.push(entry);
-                }
-            }
-        }
-        CompactionStrategy::Tombstone(predicate) => {
-            for entry in all_events {
-                let coord = Coordinate::new(&entry.entity, &entry.scope)?;
-                let stored = StoredEvent {
-                    coordinate: coord,
-                    event: entry.event.clone(),
-                };
-                if predicate(&stored) {
-                    kept_events.push(entry);
-                } else {
-                    let mut tombstone = entry;
-                    tombstone.event.header.event_kind = tombstone_kind;
-                    kept_events.push(tombstone);
-                }
-            }
-        }
-    }
-
     let merged_id = sealed[0].0;
     let merged_path = store
         .config
@@ -148,14 +109,58 @@ pub(crate) fn compact(
 
     let _ = std::fs::remove_file(&merged_path);
     let mut merged_segment = segment::Segment::<Active>::create(&store.config.data_dir, merged_id)?;
-    for entry in &kept_events {
-        let frame_payload = FramePayload {
-            event: entry.event.clone(),
-            entity: entry.entity.clone(),
-            scope: entry.scope.clone(),
-        };
-        let frame = segment::frame_encode(&frame_payload)?;
-        merged_segment.write_frame(&frame)?;
+    match &config.strategy {
+        CompactionStrategy::Merge => {
+            for (_, path) in &sealed {
+                merged_segment.append_frames_from_segment(path)?;
+            }
+        }
+        CompactionStrategy::Retention(predicate) => {
+            let mut all_events: Vec<reader::ScannedEntry> = Vec::new();
+            for (_, path) in &sealed {
+                all_events.extend(store.reader.scan_segment(path)?);
+            }
+            for entry in all_events {
+                let coord = Coordinate::new(&entry.entity, &entry.scope)?;
+                let stored = StoredEvent {
+                    coordinate: coord,
+                    event: entry.event.clone(),
+                };
+                if predicate(&stored) {
+                    let frame_payload = FramePayload {
+                        event: entry.event,
+                        entity: entry.entity,
+                        scope: entry.scope,
+                    };
+                    let frame = segment::frame_encode(&frame_payload)?;
+                    merged_segment.write_frame(&frame)?;
+                }
+            }
+        }
+        CompactionStrategy::Tombstone(predicate) => {
+            let mut all_events: Vec<reader::ScannedEntry> = Vec::new();
+            for (_, path) in &sealed {
+                all_events.extend(store.reader.scan_segment(path)?);
+            }
+            let tombstone_kind = EventKind::TOMBSTONE;
+            for mut entry in all_events {
+                let coord = Coordinate::new(&entry.entity, &entry.scope)?;
+                let stored = StoredEvent {
+                    coordinate: coord,
+                    event: entry.event.clone(),
+                };
+                if !predicate(&stored) {
+                    entry.event.header.event_kind = tombstone_kind;
+                }
+                let frame_payload = FramePayload {
+                    event: entry.event,
+                    entity: entry.entity,
+                    scope: entry.scope,
+                };
+                let frame = segment::frame_encode(&frame_payload)?;
+                merged_segment.write_frame(&frame)?;
+            }
+        }
     }
 
     merged_segment.sync_with_mode(&store.config.sync_mode)?;
@@ -190,19 +195,19 @@ pub(crate) fn compact(
     remaining.sort_by_key(|entry| entry.file_name());
 
     for dir_entry in &remaining {
-        let scanned = store.reader.scan_segment(&dir_entry.path())?;
+        let scanned = store.reader.scan_segment_index(&dir_entry.path())?;
         for scanned_entry in scanned {
             let coord = Coordinate::new(&scanned_entry.entity, &scanned_entry.scope)?;
-            let clock = scanned_entry.event.header.position.sequence;
+            let clock = scanned_entry.header.position.sequence;
             let entry = IndexEntry {
-                event_id: scanned_entry.event.header.event_id,
-                correlation_id: scanned_entry.event.header.correlation_id,
-                causation_id: scanned_entry.event.header.causation_id,
+                event_id: scanned_entry.header.event_id,
+                correlation_id: scanned_entry.header.correlation_id,
+                causation_id: scanned_entry.header.causation_id,
                 coord,
-                kind: scanned_entry.event.header.event_kind,
-                wall_ms: scanned_entry.event.header.position.wall_ms,
+                kind: scanned_entry.header.event_kind,
+                wall_ms: scanned_entry.header.position.wall_ms,
                 clock,
-                hash_chain: scanned_entry.event.hash_chain.clone().unwrap_or_default(),
+                hash_chain: scanned_entry.hash_chain,
                 disk_pos: DiskPos {
                     segment_id: scanned_entry.segment_id,
                     offset: scanned_entry.offset,

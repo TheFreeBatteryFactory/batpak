@@ -1,60 +1,53 @@
-//! Benchmark: subscription fan-out latency with varying subscriber counts.
-//! Measures delivery latency for 1/10/100 subscribers receiving 10K events.
+//! Benchmark: subscriber fanout under append load.
 //!
 //! [SPEC:benches/subscription_fanout.rs]
 
+mod common;
+
 use batpak::prelude::*;
 use batpak::store::{Store, StoreConfig};
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use std::sync::Arc;
+use common::{apply_profile, throughput_elements, BenchProfile};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use tempfile::TempDir;
 
-fn setup_store() -> (Arc<Store>, TempDir) {
-    let dir = TempDir::new().expect("create temp dir");
-    let config = StoreConfig {
-        data_dir: dir.path().to_path_buf(),
-        broadcast_capacity: 16384,
-        ..StoreConfig::new("")
-    };
-    let store = Arc::new(Store::open(config).expect("open store"));
-    (store, dir)
-}
+fn bench_append_with_subscribers(c: &mut Criterion) {
+    let mut group = c.benchmark_group("append_with_subscribers");
+    apply_profile(&mut group, BenchProfile::Heavy);
 
-fn bench_fanout(c: &mut Criterion) {
-    let mut group = c.benchmark_group("subscription_fanout");
-    group.sample_size(10);
-
-    let event_count = 10_000u64;
-
-    for sub_count in [1usize, 10, 100] {
+    for subscribers in [1usize, 10, 100] {
+        let event_count = 10_000u64;
+        throughput_elements(&mut group, event_count);
         group.bench_with_input(
-            BenchmarkId::new("subscribers", sub_count),
-            &sub_count,
-            |b, &n_subs| {
-                b.iter_with_setup(
+            BenchmarkId::new("subscribers", subscribers),
+            &subscribers,
+            |b, &subscribers| {
+                b.iter_batched(
                     || {
-                        let (store, dir) = setup_store();
-                        let region = Region::entity("bench:fan");
-                        let subs: Vec<_> = (0..n_subs).map(|_| store.subscribe(&region)).collect();
-                        (store, dir, subs)
-                    },
-                    |(store, _dir, subs)| {
+                        let dir = TempDir::new().expect("create temp dir");
+                        let config = StoreConfig {
+                            data_dir: dir.path().to_path_buf(),
+                            broadcast_capacity: 20_000,
+                            ..StoreConfig::new("")
+                        };
+                        let store = Store::open(config).expect("open store");
+                        let region = Region::entity("fanout:entity");
+                        for _ in 0..subscribers {
+                            let _ = store.subscribe(&region);
+                        }
                         let coord =
-                            Coordinate::new("bench:fan", "bench:scope").expect("valid coord");
+                            Coordinate::new("fanout:entity", "fanout:scope").expect("valid");
                         let kind = EventKind::custom(0xF, 1);
-                        let payload = serde_json::json!({"x": 1});
-
-                        // Append events — subscribers receive via broadcast
-                        for _ in 0..event_count {
-                            store.append(&coord, kind, &payload).expect("append");
-                        }
-
-                        // Drain all subscriber channels
-                        for sub in &subs {
-                            let rx = sub.receiver();
-                            while rx.try_recv().is_ok() {}
-                        }
+                        (store, dir, coord, kind)
                     },
+                    |(store, dir, coord, kind)| {
+                        for i in 0..event_count {
+                            store
+                                .append(&coord, kind, &serde_json::json!({"i": i}))
+                                .expect("append");
+                        }
+                        (store, dir)
+                    },
+                    BatchSize::SmallInput,
                 );
             },
         );
@@ -63,5 +56,67 @@ fn bench_fanout(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_fanout);
+fn bench_drain_notifications(c: &mut Criterion) {
+    let mut group = c.benchmark_group("drain_notifications");
+    apply_profile(&mut group, BenchProfile::Heavy);
+
+    for subscribers in [1usize, 10, 100] {
+        let event_count = 10_000u64;
+        throughput_elements(&mut group, event_count * subscribers as u64);
+        group.bench_with_input(
+            BenchmarkId::new("subscribers", subscribers),
+            &subscribers,
+            |b, &subscribers| {
+                b.iter_batched(
+                    || {
+                        let dir = TempDir::new().expect("create temp dir");
+                        let config = StoreConfig {
+                            data_dir: dir.path().to_path_buf(),
+                            broadcast_capacity: 20_000,
+                            ..StoreConfig::new("")
+                        };
+                        let store = Store::open(config).expect("open store");
+                        let coord =
+                            Coordinate::new("fanout:entity", "fanout:scope").expect("valid");
+                        let kind = EventKind::custom(0xF, 1);
+                        let region = Region::entity("fanout:entity");
+                        let mut receivers = Vec::new();
+                        for _ in 0..subscribers {
+                            receivers.push(store.subscribe(&region));
+                        }
+                        for i in 0..event_count {
+                            store
+                                .append(&coord, kind, &serde_json::json!({"i": i}))
+                                .expect("append");
+                        }
+                        store.sync().expect("sync");
+                        (store, dir, receivers)
+                    },
+                    |(store, dir, receivers)| {
+                        for rx in receivers {
+                            let mut seen = 0u64;
+                            while seen < event_count {
+                                if rx.recv().is_some() {
+                                    seen += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                        (store, dir)
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_append_with_subscribers,
+    bench_drain_notifications
+);
 criterion_main!(benches);

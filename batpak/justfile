@@ -56,17 +56,25 @@ cover-check:
 cover-json:
     ./scripts/coverage-feedback --json
 
-bench:
-    cargo bench --all-features
+bench: bench-neutral
 
-bench-report:
-    ./scripts/bench-report
+bench-neutral:
+    cargo bench
 
-bench-save:
-    ./scripts/bench-report --save
+bench-redb:
+    cargo bench --features redb
 
-bench-compare:
-    ./scripts/bench-report --compare
+bench-lmdb:
+    cargo bench --features lmdb
+
+bench-report surface="neutral":
+    python ./scripts/bench-report --surface {{surface}}
+
+bench-save surface="neutral":
+    python ./scripts/bench-report --surface {{surface}} --save
+
+bench-compare surface="neutral":
+    python ./scripts/bench-report --surface {{surface}} --compare
 
 fuzz:
     PROPTEST_CASES=10000 cargo test --test fuzz_targets --all-features --release -- --nocapture

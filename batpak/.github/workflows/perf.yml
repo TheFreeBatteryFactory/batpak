@@ -1,0 +1,29 @@
+name: Performance Reports
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * 1"
+
+jobs:
+  criterion:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        surface: [neutral, redb, lmdb]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: batpak
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Criterion surface
+        run: python ./scripts/bench-report --surface ${{ matrix.surface }}
+      - name: Upload Criterion artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-${{ matrix.os }}-${{ matrix.surface }}
+          path: batpak/target/criterion

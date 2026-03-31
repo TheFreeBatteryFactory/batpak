@@ -1,7 +1,7 @@
 use crate::event::Event;
 use crate::store::StoreError;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 // NOTE: No `use crate::wire::*` needed. serde(with) resolves via string path.
 
 /// Segment file format: magic(4) + header_len(4 BE) + header(msgpack) + frames
@@ -27,6 +27,13 @@ pub struct FramePayload<P> {
     pub event: Event<P>,
     pub entity: String,
     pub scope: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct FramePayloadRef<'a, P> {
+    pub event: &'a Event<P>,
+    pub entity: &'a str,
+    pub scope: &'a str,
 }
 
 /// Typestate for segment lifecycle.
@@ -181,6 +188,38 @@ impl Segment<Active> {
             f.write_all(frame).map_err(StoreError::Io)?;
         }
         self.written_bytes += frame.len() as u64;
+        Ok(offset)
+    }
+
+    /// Append all frame bytes from an existing segment file, skipping that file's header.
+    pub fn append_frames_from_segment(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<u64, StoreError> {
+        let mut source = std::fs::File::open(path).map_err(StoreError::Io)?;
+        let mut magic = [0u8; 4];
+        source.read_exact(&mut magic).map_err(StoreError::Io)?;
+        if &magic != SEGMENT_MAGIC {
+            return Err(StoreError::CorruptSegment {
+                segment_id: 0,
+                detail: "bad magic".into(),
+            });
+        }
+
+        let mut header_len_buf = [0u8; 4];
+        source
+            .read_exact(&mut header_len_buf)
+            .map_err(StoreError::Io)?;
+        let header_len = u32::from_be_bytes(header_len_buf) as u64;
+        source
+            .seek(SeekFrom::Start(8 + header_len))
+            .map_err(StoreError::Io)?;
+
+        let offset = self.written_bytes;
+        if let Some(ref mut destination) = self.file {
+            let copied = std::io::copy(&mut source, destination).map_err(StoreError::Io)?;
+            self.written_bytes += copied;
+        }
         Ok(offset)
     }
 

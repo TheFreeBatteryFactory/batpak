@@ -235,6 +235,71 @@ mod redb_tests {
 
         store.close().expect("close");
     }
+
+    #[test]
+    fn redb_delete_prefix_then_project_repopulates_cache() {
+        let dir = TempDir::new().expect("temp dir");
+        let cache_path = dir.path().join("cache.redb");
+        let config = StoreConfig {
+            data_dir: dir.path().join("data"),
+            segment_max_bytes: 4096,
+            sync_every_n_events: 1,
+            ..StoreConfig::new("")
+        };
+        let coord = Coordinate::new("entity:redb-miss", "scope:test").expect("coord");
+        let kind = EventKind::custom(0xF, 1);
+
+        {
+            let cache = RedbCache::open(&cache_path).expect("open redb cache");
+            let store =
+                Store::open_with_cache(config.clone(), Box::new(cache)).expect("open store");
+            store
+                .append(&coord, kind, &serde_json::json!({"x": 1}))
+                .expect("append 1");
+            store
+                .append(&coord, kind, &serde_json::json!({"x": 2}))
+                .expect("append 2");
+            let _: Option<Counter> = store
+                .project("entity:redb-miss", &Freshness::Consistent)
+                .expect("warm cache");
+            store.close().expect("close");
+        }
+
+        {
+            let cache = RedbCache::open(&cache_path).expect("reopen cache");
+            assert!(
+                cache.get(b"entity:redb-miss").expect("get").is_some(),
+                "REDB CACHE MISS PROOF: cache key should exist after warming projection."
+            );
+            let deleted = cache
+                .delete_prefix(b"entity:redb-miss")
+                .expect("delete prefix");
+            assert_eq!(
+                deleted, 1,
+                "REDB CACHE MISS PROOF: delete_prefix should remove exactly one warmed cache key."
+            );
+            assert!(
+                cache.get(b"entity:redb-miss").expect("get").is_none(),
+                "REDB CACHE MISS PROOF: delete_prefix must actually clear the cache key before replay."
+            );
+        }
+
+        {
+            let cache = RedbCache::open(&cache_path).expect("reopen cache for store");
+            let store = Store::open_with_cache(config, Box::new(cache)).expect("reopen store");
+            let result: Option<Counter> = store
+                .project("entity:redb-miss", &Freshness::Consistent)
+                .expect("project after delete");
+            assert_eq!(result, Some(Counter { count: 2 }));
+            store.close().expect("close");
+        }
+
+        let cache = RedbCache::open(&cache_path).expect("final reopen cache");
+        assert!(
+            cache.get(b"entity:redb-miss").expect("get").is_some(),
+            "REDB CACHE MISS PROOF: projecting after delete_prefix must repopulate the cache key."
+        );
+    }
 }
 
 // ================================================================
@@ -421,6 +486,72 @@ mod lmdb_tests {
         );
 
         store.close().expect("close");
+    }
+
+    #[test]
+    fn lmdb_delete_prefix_then_project_repopulates_cache() {
+        let dir = TempDir::new().expect("temp dir");
+        let cache_path = dir.path().join("lmdb_cache");
+        let config = StoreConfig {
+            data_dir: dir.path().join("data"),
+            segment_max_bytes: 4096,
+            sync_every_n_events: 1,
+            ..StoreConfig::new("")
+        };
+        let coord = Coordinate::new("entity:lmdb-miss", "scope:test").expect("coord");
+        let kind = EventKind::custom(0xF, 1);
+
+        {
+            let cache = LmdbCache::open(&cache_path, 10 * 1024 * 1024).expect("open lmdb cache");
+            let store =
+                Store::open_with_cache(config.clone(), Box::new(cache)).expect("open store");
+            store
+                .append(&coord, kind, &serde_json::json!({"x": 1}))
+                .expect("append 1");
+            store
+                .append(&coord, kind, &serde_json::json!({"x": 2}))
+                .expect("append 2");
+            let _: Option<Counter> = store
+                .project("entity:lmdb-miss", &Freshness::Consistent)
+                .expect("warm cache");
+            store.close().expect("close");
+        }
+
+        {
+            let cache = LmdbCache::open(&cache_path, 10 * 1024 * 1024).expect("reopen cache");
+            assert!(
+                cache.get(b"entity:lmdb-miss").expect("get").is_some(),
+                "LMDB CACHE MISS PROOF: cache key should exist after warming projection."
+            );
+            let deleted = cache
+                .delete_prefix(b"entity:lmdb-miss")
+                .expect("delete prefix");
+            assert_eq!(
+                deleted, 1,
+                "LMDB CACHE MISS PROOF: delete_prefix should remove exactly one warmed cache key."
+            );
+            assert!(
+                cache.get(b"entity:lmdb-miss").expect("get").is_none(),
+                "LMDB CACHE MISS PROOF: delete_prefix must actually clear the cache key before replay."
+            );
+        }
+
+        {
+            let cache =
+                LmdbCache::open(&cache_path, 10 * 1024 * 1024).expect("reopen cache for store");
+            let store = Store::open_with_cache(config, Box::new(cache)).expect("reopen store");
+            let result: Option<Counter> = store
+                .project("entity:lmdb-miss", &Freshness::Consistent)
+                .expect("project after delete");
+            assert_eq!(result, Some(Counter { count: 2 }));
+            store.close().expect("close");
+        }
+
+        let cache = LmdbCache::open(&cache_path, 10 * 1024 * 1024).expect("final reopen cache");
+        assert!(
+            cache.get(b"entity:lmdb-miss").expect("get").is_some(),
+            "LMDB CACHE MISS PROOF: projecting after delete_prefix must repopulate the cache key."
+        );
     }
 }
 

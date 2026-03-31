@@ -1,102 +1,84 @@
-#!/usr/bin/env bash
-# bench-report: run benchmarks, compare against baseline, report what needs
-# improvement. Uses criterion's built-in baseline comparison.
-#
-# Usage:
-#   ./scripts/bench-report              # run + compare against saved baseline
-#   ./scripts/bench-report --save       # run + save as new baseline
-#   ./scripts/bench-report --compare    # compare only (don't re-run)
-#
-# [SPEC:scripts/bench-report]
+#!/usr/bin/env python3
+"""Run or compare Criterion benchmarks against per-OS, per-surface baselines."""
 
-set -euo pipefail
+from __future__ import annotations
 
-MODE="run"
+import argparse
+import platform
+import subprocess
+import sys
+from pathlib import Path
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --save)    MODE="save"; shift ;;
-        --compare) MODE="compare"; shift ;;
-        *)         echo "Unknown arg: $1"; exit 1 ;;
-    esac
-done
 
-BASELINE_DIR="target/criterion"
+def os_slug() -> str:
+    system = platform.system().lower()
+    if system.startswith("windows"):
+        return "windows"
+    if system.startswith("linux"):
+        return "linux"
+    if system.startswith("darwin"):
+        return "macos"
+    return "other"
 
-if [[ "$MODE" == "save" ]]; then
-    echo "Running benchmarks and saving baseline..."
-    cargo bench --all-features -- --save-baseline known-good
-    echo ""
-    echo "Baseline saved. Future runs will compare against this."
-    exit 0
-fi
 
-if [[ "$MODE" == "compare" ]]; then
-    if [[ ! -d "$BASELINE_DIR" ]]; then
-        echo "No baseline found. Run: ./scripts/bench-report --save"
-        exit 1
-    fi
-    echo "Comparing against saved baseline..."
-    cargo bench --all-features -- --baseline known-good 2>&1
-    exit 0
-fi
+def cargo_command(surface: str) -> list[str]:
+    if surface == "neutral":
+        return [
+            "cargo",
+            "bench",
+            "--bench",
+            "cold_start",
+            "--bench",
+            "compaction",
+            "--bench",
+            "projection_latency",
+            "--bench",
+            "subscription_fanout",
+            "--bench",
+            "write_throughput",
+        ]
+    if surface == "redb":
+        return ["cargo", "bench", "--features", "redb", "--bench", "projection_latency"]
+    if surface == "lmdb":
+        return ["cargo", "bench", "--features", "lmdb", "--bench", "projection_latency"]
+    raise ValueError(f"unsupported surface: {surface}")
 
-# Default: run and show results with improvement suggestions
-echo "Running benchmarks..."
-echo ""
 
-# Run benchmarks, capture output
-OUTPUT=$(cargo bench --all-features 2>&1)
-echo "$OUTPUT"
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--surface", required=True, choices=["neutral", "redb", "lmdb"])
+    parser.add_argument("--save", action="store_true")
+    parser.add_argument("--compare", action="store_true")
+    args = parser.parse_args()
 
-echo ""
-echo "================================================================"
-echo "  BENCHMARK IMPROVEMENT REPORT"
-echo "================================================================"
-echo ""
+    if args.save and args.compare:
+        parser.error("--save and --compare are mutually exclusive")
 
-# Parse criterion output for timing data and suggest improvements.
-# Criterion output format: "group/param    time: [low est high]"
-echo "$OUTPUT" | awk '
-/time:/ {
-    # Extract benchmark name and timing
-    name = ""
-    for (i = 1; i <= NF; i++) {
-        if ($i == "time:") break
-        if (name != "") name = name " "
-        name = name $i
-    }
+    baseline = f"{os_slug()}-{args.surface}-v3"
+    command = cargo_command(args.surface)
 
-    # Find the estimate (middle value in [low est high])
-    for (i = 1; i <= NF; i++) {
-        if ($i ~ /^[0-9]+\.[0-9]+$/ && $(i+1) ~ /^(ns|µs|ms|s)$/) {
-            value = $i
-            unit = $(i+1)
+    if args.save:
+        command += ["--", "--save-baseline", baseline]
+        print(f"Running {args.surface} benchmarks and saving baseline {baseline}...")
+    elif args.compare:
+        target_dir = Path("target") / "criterion"
+        baseline_exists = target_dir.exists() and any(
+            path.is_dir() and path.name == baseline for path in target_dir.rglob(baseline)
+        )
+        if not baseline_exists:
+            print(
+                f"Baseline {baseline} does not exist yet. Run "
+                f"'python ./scripts/bench-report --surface {args.surface} --save' first."
+            )
+            return 1
+        command += ["--", "--baseline", baseline]
+        print(f"Comparing {args.surface} benchmarks against baseline {baseline}...")
+    else:
+        print(f"Running {args.surface} benchmarks...")
+        print(f"Baseline name: {baseline}")
 
-            # Normalize to ms
-            ms = value
-            if (unit == "ns") ms = value / 1000000
-            else if (unit == "µs") ms = value / 1000
-            else if (unit == "s") ms = value * 1000
+    return subprocess.call(command)
 
-            break
-        }
-    }
 
-    gsub(/^[ \t]+/, "", name)
-    gsub(/[ \t]+$/, "", name)
-    if (name != "" && ms + 0 > 0) {
-        printf "  %-45s %10.2f ms\n", name, ms
-    }
-}
-'
-
-echo ""
-echo "  Investigate slow benchmarks:"
-echo "    - write_throughput: src/store/writer.rs (10-step commit)"
-echo "    - cold_start:      src/store/mod.rs Store::open + src/store/reader.rs"
-echo "    - projection:      src/store/projection.rs + src/store/reader.rs"
-echo ""
-echo "  Save a baseline:      ./scripts/bench-report --save"
-echo "  Compare to baseline:  ./scripts/bench-report --compare"
-echo "================================================================"
+if __name__ == "__main__":
+    sys.exit(main())
