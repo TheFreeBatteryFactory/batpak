@@ -509,11 +509,11 @@ fn fuzz_chaos_feedback_loop() {
 fn run_extended_fuzz_chaos() {
     eprintln!("  EXTENDED: High-volume frame_decode fuzz...");
     let n = 50_000;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let start = Instant::now();
     for _ in 0..n {
-        let len: usize = rng.gen_range(0..4096);
-        let data: Vec<u8> = (0..len).map(|_| rng.gen()).collect();
+        let len: usize = rng.random_range(0..4096);
+        let data: Vec<u8> = (0..len).map(|_| rng.random()).collect();
         // catch_unwind would be ideal but proptest handles this;
         // we just verify no panics by continuing
         let _ = frame_decode(&data);

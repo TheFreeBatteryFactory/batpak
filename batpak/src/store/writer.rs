@@ -38,6 +38,7 @@ pub(crate) enum WriterCommand {
         respond: Sender<Result<(), StoreError>>,
     },
     /// Test-only: trigger a panic in the writer thread to exercise restart_policy.
+    #[cfg(feature = "test-support")]
     #[doc(hidden)]
     PanicForTest {
         respond: Sender<Result<(), StoreError>>,
@@ -154,6 +155,18 @@ impl WriterHandle {
             subscribers: Arc::clone(subscribers),
             _thread: Some(thread),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_parts_for_test(
+        tx: Sender<WriterCommand>,
+        subscribers: Arc<SubscriberList>,
+    ) -> Self {
+        Self {
+            tx,
+            subscribers,
+            _thread: None,
+        }
     }
 
     // NOTE: No send_append() method here. Store::append() and Store::append_reaction()
@@ -343,6 +356,7 @@ fn writer_loop(
                             let _ = r.send(state.active_segment.sync_with_mode(&config.sync_mode));
                         }
                         // test-only: discard PanicForTest during shutdown drain
+                        #[cfg(feature = "test-support")]
                         Ok(WriterCommand::PanicForTest { respond: r }) => {
                             let _ = r.send(Ok(())); // discard during drain
                         }
@@ -356,6 +370,8 @@ fn writer_loop(
                 return; // exit writer loop
             }
             // test-only: intentional panic to exercise restart_policy
+            #[cfg(feature = "test-support")]
+            // intentional: this panic IS the test - it exercises catch_unwind in writer_thread_main
             #[allow(clippy::panic)]
             // intentional: this panic IS the test — it exercises catch_unwind in writer_thread_main
             WriterCommand::PanicForTest { respond } => {

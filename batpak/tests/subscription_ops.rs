@@ -429,10 +429,7 @@ fn ops_channel_closed_returns_none() {
     let mut ops = sub.ops();
 
     // Close the store — this shuts down the writer, which closes broadcast channels
-    let store_clone = match Arc::try_unwrap(store) {
-        Ok(s) => s,
-        Err(_) => panic!("Arc should have single owner"),
-    };
+    let store_clone = Arc::into_inner(store).unwrap();
     store_clone.close().expect("close");
 
     // After channel closes, recv should return None

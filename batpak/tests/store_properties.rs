@@ -872,7 +872,10 @@ fn append_options_with_idempotency_builder() {
          Investigate: src/store/mod.rs AppendOptions::with_idempotency.\n\
          Common causes: builder returning Self without setting idempotency_key."
     );
-    assert!(opts.expected_sequence.is_none(), "unset fields must remain None");
+    assert!(
+        opts.expected_sequence.is_none(),
+        "unset fields must remain None"
+    );
     assert_eq!(opts.flags, 0, "unset flags must remain 0");
 }
 
@@ -886,21 +889,29 @@ fn append_options_with_cas_builder() {
          Investigate: src/store/mod.rs AppendOptions::with_cas.\n\
          Common causes: method setting wrong field, or returning Self unchanged."
     );
-    assert!(opts.idempotency_key.is_none(), "unset fields must remain None");
+    assert!(
+        opts.idempotency_key.is_none(),
+        "unset fields must remain None"
+    );
 }
 
 #[test]
 fn append_options_with_flags_builder() {
     let opts = AppendOptions::new().with_flags(0x03);
     assert_eq!(
-        opts.flags,
-        0x03,
+        opts.flags, 0x03,
         "PROPERTY: with_flags(f) must set flags to f.\n\
          Investigate: src/store/mod.rs AppendOptions::with_flags.\n\
          Common causes: flags field not updated, or OR'd with previous value."
     );
-    assert!(opts.expected_sequence.is_none(), "unset fields must remain None");
-    assert!(opts.idempotency_key.is_none(), "unset fields must remain None");
+    assert!(
+        opts.expected_sequence.is_none(),
+        "unset fields must remain None"
+    );
+    assert!(
+        opts.idempotency_key.is_none(),
+        "unset fields must remain None"
+    );
 }
 
 #[test]
@@ -926,7 +937,10 @@ fn append_options_with_causation_builder() {
          Investigate: src/store/mod.rs AppendOptions::with_causation.\n\
          Common causes: method writing to correlation_id by mistake."
     );
-    assert!(opts.correlation_id.is_none(), "correlation_id must not be set");
+    assert!(
+        opts.correlation_id.is_none(),
+        "correlation_id must not be set"
+    );
 }
 
 #[test]

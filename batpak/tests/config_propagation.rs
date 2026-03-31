@@ -405,3 +405,54 @@ fn store_config_all_fields_overridable() {
 
     store.close().expect("close");
 }
+
+#[test]
+fn store_config_debug_lists_all_integrity_relevant_fields() {
+    let dir = TempDir::new().expect("create temp dir");
+    let clock_fn: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| 4242);
+    let config = StoreConfig {
+        data_dir: dir.path().to_path_buf(),
+        segment_max_bytes: 11_111,
+        sync_every_n_events: 7,
+        fd_budget: 13,
+        writer_channel_capacity: 17,
+        broadcast_capacity: 19,
+        cache_map_size_bytes: 23,
+        restart_policy: batpak::store::RestartPolicy::Bounded {
+            max_restarts: 2,
+            within_ms: 3000,
+        },
+        shutdown_drain_limit: 29,
+        writer_stack_size: Some(31 * 1024),
+        clock: Some(clock_fn),
+        sync_mode: SyncMode::SyncData,
+    };
+
+    let debug = format!("{config:?}");
+
+    for needle in [
+        "StoreConfig",
+        "data_dir",
+        "segment_max_bytes: 11111",
+        "sync_every_n_events: 7",
+        "fd_budget: 13",
+        "writer_channel_capacity: 17",
+        "broadcast_capacity: 19",
+        "cache_map_size_bytes: 23",
+        "restart_policy: Bounded",
+        "max_restarts: 2",
+        "within_ms: 3000",
+        "shutdown_drain_limit: 29",
+        "writer_stack_size: Some(31744)",
+        "clock: Some(\"<fn>\")",
+        "sync_mode: SyncData",
+    ] {
+        assert!(
+            debug.contains(needle),
+            "PROPERTY: StoreConfig debug output must include every integrity-relevant field and the clock placeholder.\n\
+             Missing fragment: {needle}\n\
+             Investigate: src/store/mod.rs Debug impl for StoreConfig.\n\
+             Common causes: no-op Debug impl, forgotten field, or leaking an opaque closure instead of the <fn> placeholder."
+        );
+    }
+}

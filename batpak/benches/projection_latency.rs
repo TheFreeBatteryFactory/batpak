@@ -104,10 +104,9 @@ fn bench_projection_caches(c: &mut Criterion) {
             data_dir: dir.path().join("data"),
             ..StoreConfig::new("")
         };
-        let cache =
-            RedbCache::open(&dir.path().join("cache.redb")).expect("open redb cache");
-        let store = Store::open_with_cache(config, Box::new(cache))
-            .expect("open store with redb cache");
+        let cache = RedbCache::open(dir.path().join("cache.redb")).expect("open redb cache");
+        let store =
+            Store::open_with_cache(config, Box::new(cache)).expect("open store with redb cache");
         let coord = Coordinate::new("bench:entity", "bench:scope").expect("valid coord");
         let kind = EventKind::custom(0xF, 1);
         let payload = serde_json::json!({"x": 1});
@@ -138,12 +137,9 @@ fn bench_projection_caches(c: &mut Criterion) {
                         data_dir: iter_dir.path().join("data"),
                         ..StoreConfig::new("")
                     };
-                    let c = RedbCache::open(&iter_dir.path().join("c.redb"))
-                        .expect("open cache");
-                    let s = Store::open_with_cache(cfg, Box::new(c))
-                        .expect("open store");
-                    let coord =
-                        Coordinate::new("bench:entity", "bench:scope").expect("coord");
+                    let c = RedbCache::open(iter_dir.path().join("c.redb")).expect("open cache");
+                    let s = Store::open_with_cache(cfg, Box::new(c)).expect("open store");
+                    let coord = Coordinate::new("bench:entity", "bench:scope").expect("coord");
                     let kind = EventKind::custom(0xF, 1);
                     let payload = serde_json::json!({"x": 1});
                     for _ in 0..1_000 {
@@ -179,10 +175,9 @@ fn bench_projection_caches(c: &mut Criterion) {
             ..StoreConfig::new("")
         };
         let cache =
-            LmdbCache::open(&dir.path().join("lmdb_cache"), LMDB_MAP_SIZE)
-                .expect("open lmdb cache");
-        let store = Store::open_with_cache(config, Box::new(cache))
-            .expect("open store with lmdb cache");
+            LmdbCache::open(dir.path().join("lmdb_cache"), LMDB_MAP_SIZE).expect("open lmdb cache");
+        let store =
+            Store::open_with_cache(config, Box::new(cache)).expect("open store with lmdb cache");
         let coord = Coordinate::new("bench:entity", "bench:scope").expect("valid coord");
         let kind = EventKind::custom(0xF, 1);
         let payload = serde_json::json!({"x": 1});
@@ -218,15 +213,10 @@ fn bench_projection_caches(c: &mut Criterion) {
                         data_dir: iter_dir.path().join("data"),
                         ..StoreConfig::new("")
                     };
-                    let c = LmdbCache::open(
-                        &iter_dir.path().join("lmdb_c"),
-                        LMDB_MAP_SIZE,
-                    )
-                    .expect("open cache");
-                    let s = Store::open_with_cache(cfg, Box::new(c))
-                        .expect("open store");
-                    let coord =
-                        Coordinate::new("bench:entity", "bench:scope").expect("coord");
+                    let c = LmdbCache::open(&iter_dir.path().join("lmdb_c"), LMDB_MAP_SIZE)
+                        .expect("open cache");
+                    let s = Store::open_with_cache(cfg, Box::new(c)).expect("open store");
+                    let coord = Coordinate::new("bench:entity", "bench:scope").expect("coord");
                     let kind = EventKind::custom(0xF, 1);
                     let payload = serde_json::json!({"x": 1});
                     for _ in 0..1_000 {

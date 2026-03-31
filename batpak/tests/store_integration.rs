@@ -249,6 +249,54 @@ fn query_by_scope() {
 }
 
 #[test]
+fn by_scope_wrapper_matches_exact_scope_results() {
+    let (store, _dir) = test_store();
+    let kind = EventKind::custom(0xF, 1);
+    let payload = serde_json::json!({"x": 1});
+
+    let coord_a1 = Coordinate::new("entity:scope:1", "scope:wrapper").expect("valid coord");
+    let coord_a2 = Coordinate::new("entity:scope:2", "scope:wrapper").expect("valid coord");
+    let coord_b = Coordinate::new("entity:scope:other", "scope:other").expect("valid coord");
+
+    store.append(&coord_a1, kind, &payload).expect("append a1");
+    store.append(&coord_a2, kind, &payload).expect("append a2");
+    store.append(&coord_b, kind, &payload).expect("append b");
+
+    let wrapped = store.by_scope("scope:wrapper");
+    let queried = store.query(&Region::scope("scope:wrapper"));
+
+    assert_eq!(
+        wrapped.len(),
+        2,
+        "SCOPE WRAPPER FAILED: Store::by_scope('scope:wrapper') should return exactly 2 events.\n\
+         Check: src/store/mod.rs by_scope() wrapper and src/store/index.rs scope query path.\n\
+         Common causes: by_scope() returning an empty vec, forwarding the wrong Region, or widening to prefix semantics.\n\
+         Run: cargo test by_scope_wrapper_matches_exact_scope_results -- --nocapture",
+    );
+    assert_eq!(
+        wrapped.len(),
+        queried.len(),
+        "SCOPE WRAPPER DIVERGENCE: Store::by_scope() must match query(Region::scope(...)) exactly.\n\
+         Check: src/store/mod.rs by_scope() wrapper.\n\
+         Common causes: wrapper drift, wrong Region helper, or accidental empty/default return.\n\
+         Run: cargo test by_scope_wrapper_matches_exact_scope_results -- --nocapture",
+    );
+
+    for (idx, entry) in wrapped.iter().enumerate() {
+        assert_eq!(
+            entry.coord.scope(),
+            "scope:wrapper",
+            "SCOPE WRAPPER CONTAMINATION: entry[{idx}] has scope '{}', expected 'scope:wrapper'.\n\
+             Check: src/store/mod.rs by_scope() and src/store/index.rs query() scope filtering.\n\
+             Run: cargo test by_scope_wrapper_matches_exact_scope_results -- --nocapture",
+            entry.coord.scope()
+        );
+    }
+
+    store.close().expect("close");
+}
+
+#[test]
 fn query_by_fact() {
     let (store, _dir) = test_store();
     let coord = Coordinate::new("entity:1", "scope:test").expect("valid coord");

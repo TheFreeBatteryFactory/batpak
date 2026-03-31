@@ -1,9 +1,29 @@
 use crate::store::StoreError;
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CacheCapabilities {
+    pub supports_prefetch: bool,
+}
+
+impl CacheCapabilities {
+    pub const fn none() -> Self {
+        Self {
+            supports_prefetch: false,
+        }
+    }
+
+    pub const fn prefetch_hints() -> Self {
+        Self {
+            supports_prefetch: true,
+        }
+    }
+}
+
 // ProjectionCache: trait for caching projected state.
 // Three impls: NoCache (default), RedbCache (optional), LmdbCache (optional).
 pub trait ProjectionCache: Send + Sync + 'static {
+    fn capabilities(&self) -> CacheCapabilities;
     fn get(&self, key: &[u8]) -> Result<Option<(Vec<u8>, CacheMeta)>, StoreError>;
     fn put(&self, key: &[u8], value: &[u8], meta: CacheMeta) -> Result<(), StoreError>;
     fn delete_prefix(&self, prefix: &[u8]) -> Result<u64, StoreError>;
@@ -34,6 +54,10 @@ pub enum Freshness {
 pub struct NoCache;
 
 impl ProjectionCache for NoCache {
+    fn capabilities(&self) -> CacheCapabilities {
+        CacheCapabilities::none()
+    }
+
     fn get(&self, _key: &[u8]) -> Result<Option<(Vec<u8>, CacheMeta)>, StoreError> {
         Ok(None) // always miss — forces replay
     }
@@ -72,6 +96,10 @@ impl RedbCache {
 
 #[cfg(feature = "redb")]
 impl ProjectionCache for RedbCache {
+    fn capabilities(&self) -> CacheCapabilities {
+        CacheCapabilities::none()
+    }
+
     fn get(&self, key: &[u8]) -> Result<Option<(Vec<u8>, CacheMeta)>, StoreError> {
         let txn = self
             .db
@@ -207,15 +235,7 @@ pub struct LmdbCache {
 impl LmdbCache {
     pub fn open(path: impl AsRef<std::path::Path>, map_size: usize) -> Result<Self, StoreError> {
         std::fs::create_dir_all(path.as_ref()).map_err(StoreError::Io)?;
-        // SAFETY: We guarantee this path is opened at most once per process.
-        // The Store owns the LmdbCache exclusively.
-        let env = unsafe {
-            heed::EnvOpenOptions::new()
-                .map_size(map_size)
-                .max_dbs(1)
-                .open(path.as_ref())
-                .map_err(|e| StoreError::CacheFailed(e.to_string()))?
-        };
+        let env = open_lmdb_env(path.as_ref(), map_size)?;
         let mut wtxn = env
             .write_txn()
             .map_err(|e| StoreError::CacheFailed(e.to_string()))?;
@@ -230,6 +250,10 @@ impl LmdbCache {
 
 #[cfg(feature = "lmdb")]
 impl ProjectionCache for LmdbCache {
+    fn capabilities(&self) -> CacheCapabilities {
+        CacheCapabilities::none()
+    }
+
     fn get(&self, key: &[u8]) -> Result<Option<(Vec<u8>, CacheMeta)>, StoreError> {
         let txn = self
             .env
@@ -299,8 +323,8 @@ impl ProjectionCache for LmdbCache {
             .map_err(|e| StoreError::CacheFailed(e.to_string()))?
             .is_some()
         {
-            // SAFETY: We do not hold any references to the current entry;
-            // the .is_some() check consumed the Option without binding.
+            // SAFETY: The iterator has been advanced and the current entry is not
+            // retained outside this loop body before deletion.
             unsafe {
                 iter.del_current()
                     .map_err(|e| StoreError::CacheFailed(e.to_string()))?;
@@ -340,4 +364,18 @@ fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
     }
     // All bytes are 0xFF — no finite successor exists
     None
+}
+
+#[cfg(feature = "lmdb")]
+fn open_lmdb_env(path: &std::path::Path, map_size: usize) -> Result<heed::Env, StoreError> {
+    // SAFETY: LmdbCache owns the environment and opens exactly one LMDB environment
+    // per on-disk cache path within the current process. Callers do not share the
+    // same directory across multiple open environments.
+    unsafe {
+        heed::EnvOpenOptions::new()
+            .map_size(map_size)
+            .max_dbs(1)
+            .open(path)
+            .map_err(|e| StoreError::CacheFailed(e.to_string()))
+    }
 }

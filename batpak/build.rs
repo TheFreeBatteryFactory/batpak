@@ -9,6 +9,7 @@ use std::path::Path;
 fn main() {
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=src/");
+    link_windows_lmdb_security_support();
 
     check_no_tokio_in_deps();
     check_no_banned_patterns();
@@ -16,6 +17,14 @@ fn main() {
     check_allow_justifications();
     check_no_stubs_in_src();
     check_pub_items_have_tests();
+}
+
+fn link_windows_lmdb_security_support() {
+    let is_windows = std::env::var_os("CARGO_CFG_WINDOWS").is_some();
+    let has_lmdb = std::env::var_os("CARGO_FEATURE_LMDB").is_some();
+    if is_windows && has_lmdb {
+        println!("cargo:rustc-link-lib=Advapi32");
+    }
 }
 
 /// Audit Loop Layer 2 enforcement: no stub markers in production src/.

@@ -21,7 +21,7 @@
 
 use batpak::event::Reactive;
 use batpak::prelude::*;
-use batpak::store::{RestartPolicy, Store, StoreConfig};
+use batpak::store::{Store, StoreConfig};
 use batpak::typestate::Transition;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -55,6 +55,15 @@ fn walk_ancestors_follows_chain() {
     // Walk from the last event — should find ancestors in chain
     let last_id = receipts.last().expect("has receipts").event_id;
     let ancestors = store.walk_ancestors(last_id, 10);
+    let actual_ids: Vec<_> = ancestors
+        .iter()
+        .map(|stored| stored.event.event_id())
+        .collect();
+    let expected_ids: Vec<_> = receipts
+        .iter()
+        .rev()
+        .map(|receipt| receipt.event_id)
+        .collect();
 
     // Must return more than just the starting event — the chain has 5 events
     assert!(
@@ -85,6 +94,15 @@ fn walk_ancestors_follows_chain() {
          Run: cargo test --test store_advanced walk_ancestors_follows_chain"
     );
 
+    assert_eq!(
+        actual_ids,
+        expected_ids,
+        "PROPERTY: walk_ancestors must return the exact ancestor chain in reverse append order.\n\
+         Investigate: src/store/mod.rs walk_ancestors parent lookup.\n\
+         Common causes: matching the wrong prev_hash, skipping an ancestor, or traversing descendants instead of ancestors.\n\
+         Run: cargo test --test store_advanced walk_ancestors_follows_chain"
+    );
+
     store.close().expect("close");
 }
 
@@ -111,6 +129,65 @@ fn walk_ancestors_respects_limit() {
          Investigate: src/store/mod.rs walk_ancestors limit logic.\n\
          Common causes: limit parameter ignored, off-by-one in loop termination condition.\n\
          Run: cargo test --test store_advanced walk_ancestors_respects_limit"
+    );
+
+    store.close().expect("close");
+}
+
+#[test]
+fn walk_ancestors_from_middle_excludes_descendants() {
+    let (store, _dir) = test_store();
+    let coord = Coordinate::new("entity:middle", "scope:test").expect("valid coord");
+    let kind = EventKind::custom(0xF, 1);
+
+    let receipts: Vec<_> = (0..5)
+        .map(|i| {
+            let payload = serde_json::json!({"step": i});
+            store.append(&coord, kind, &payload).expect("append")
+        })
+        .collect();
+
+    let anchor = receipts[2].event_id;
+    let ancestors = store.walk_ancestors(anchor, 10);
+    let actual_ids: Vec<_> = ancestors
+        .iter()
+        .map(|stored| stored.event.event_id())
+        .collect();
+    let expected_ids: Vec<_> = receipts[..=2]
+        .iter()
+        .rev()
+        .map(|receipt| receipt.event_id)
+        .collect();
+
+    assert_eq!(
+        actual_ids,
+        expected_ids,
+        "PROPERTY: walk_ancestors from a middle event must exclude later descendants and only return the anchor plus its true ancestors.\n\
+         Investigate: src/store/mod.rs walk_ancestors fallback clock filter and hash-chain traversal.\n\
+         Common causes: including entries with greater clock than the anchor or following the wrong chain link.\n\
+         Run: cargo test --test store_advanced walk_ancestors_from_middle_excludes_descendants"
+    );
+
+    store.close().expect("close");
+}
+
+#[test]
+fn walk_ancestors_zero_limit_returns_empty() {
+    let (store, _dir) = test_store();
+    let coord = Coordinate::new("entity:zero-limit", "scope:test").expect("valid coord");
+    let kind = EventKind::custom(0xF, 1);
+
+    let receipt = store
+        .append(&coord, kind, &serde_json::json!({"step": 0}))
+        .expect("append");
+    let ancestors = store.walk_ancestors(receipt.event_id, 0);
+
+    assert!(
+        ancestors.is_empty(),
+        "PROPERTY: walk_ancestors(limit=0) must return no events.\n\
+         Investigate: src/store/mod.rs walk_ancestors limit guard.\n\
+         Common causes: off-by-one in loop termination or ignoring the limit before reading the first ancestor.\n\
+         Run: cargo test --test store_advanced walk_ancestors_zero_limit_returns_empty"
     );
 
     store.close().expect("close");
@@ -1359,12 +1436,12 @@ fn index_entry_causation_helpers() {
 
 #[test]
 fn append_with_flags_round_trips() {
-    use batpak::event::header::{FLAG_REQUIRES_ACK, FLAG_TRANSACTIONAL};
+    use batpak::event::header::{FLAG_REPLAY, FLAG_REQUIRES_ACK, FLAG_TRANSACTIONAL};
 
     let (store, _dir) = test_store();
     let coord = Coordinate::new("entity:flags", "scope:test").expect("valid coord");
     let kind = EventKind::custom(0xF, 1);
-    let flags = FLAG_REQUIRES_ACK | FLAG_TRANSACTIONAL;
+    let flags = FLAG_REQUIRES_ACK | FLAG_TRANSACTIONAL | FLAG_REPLAY;
 
     let opts = AppendOptions {
         flags,
@@ -1392,6 +1469,12 @@ fn append_with_flags_round_trips() {
         stored.event.header.is_transactional(),
         "PROPERTY: FLAG_TRANSACTIONAL must be readable via is_transactional() accessor.\n\
          Investigate: src/event/header.rs is_transactional.\n\
+         Run: cargo test --test store_advanced append_with_flags_round_trips"
+    );
+    assert!(
+        stored.event.header.is_replay(),
+        "PROPERTY: FLAG_REPLAY must be readable via is_replay() accessor.\n\
+         Investigate: src/event/header.rs is_replay.\n\
          Run: cargo test --test store_advanced append_with_flags_round_trips"
     );
 
@@ -1838,218 +1921,6 @@ fn react_loop_spawns_and_processes() {
     );
 
     store.sync().expect("sync");
-}
-
-// --- ProjectionCache::prefetch wiring ---
-
-#[test]
-fn project_calls_prefetch() {
-    use batpak::store::projection::{CacheMeta, ProjectionCache};
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    // Custom cache that tracks prefetch calls
-    struct TrackingCache {
-        prefetch_called: Arc<AtomicBool>,
-    }
-
-    impl ProjectionCache for TrackingCache {
-        fn get(&self, _key: &[u8]) -> Result<Option<(Vec<u8>, CacheMeta)>, StoreError> {
-            Ok(None) // always miss
-        }
-        fn put(&self, _key: &[u8], _value: &[u8], _meta: CacheMeta) -> Result<(), StoreError> {
-            Ok(())
-        }
-        fn delete_prefix(&self, _prefix: &[u8]) -> Result<u64, StoreError> {
-            Ok(0)
-        }
-        fn sync(&self) -> Result<(), StoreError> {
-            Ok(())
-        }
-        fn prefetch(&self, _key: &[u8], _predicted_meta: CacheMeta) -> Result<(), StoreError> {
-            self.prefetch_called.store(true, Ordering::SeqCst);
-            Ok(())
-        }
-    }
-
-    let prefetch_called = Arc::new(AtomicBool::new(false));
-    let cache = TrackingCache {
-        prefetch_called: Arc::clone(&prefetch_called),
-    };
-
-    let dir = TempDir::new().expect("create temp dir");
-    let config = StoreConfig {
-        data_dir: dir.path().to_path_buf(),
-        segment_max_bytes: 4096,
-        sync_every_n_events: 1,
-        ..StoreConfig::new("")
-    };
-    let store = batpak::store::Store::open_with_cache(config, Box::new(cache))
-        .expect("open store with tracking cache");
-
-    // Append an event so project has something to work with
-    let coord = Coordinate::new("entity:pf", "scope:test").expect("valid coord");
-    let kind = EventKind::custom(0xF, 1);
-    store
-        .append(&coord, kind, &serde_json::json!({"data": 1}))
-        .expect("append");
-
-    // Define a minimal EventSourced type
-    #[derive(serde::Serialize, serde::Deserialize)]
-    struct Counter {
-        count: u32,
-    }
-    impl EventSourced<serde_json::Value> for Counter {
-        fn from_events(events: &[batpak::prelude::Event<serde_json::Value>]) -> Option<Self> {
-            Some(Counter {
-                count: u32::try_from(events.len()).expect("test uses < 2^32 events"),
-            })
-        }
-        fn apply_event(&mut self, _event: &batpak::prelude::Event<serde_json::Value>) {
-            self.count += 1;
-        }
-        fn relevant_event_kinds() -> &'static [EventKind] {
-            &[]
-        }
-    }
-
-    let _result: Option<Counter> = store
-        .project("entity:pf", &Freshness::Consistent)
-        .expect("project");
-
-    assert!(
-        prefetch_called.load(Ordering::SeqCst),
-        "PROPERTY: Store::project must call cache.prefetch() before checking the cache.\n\
-         Investigate: src/store/mod.rs project, src/store/projection.rs prefetch.\n\
-         Common causes: prefetch call not added to project(), called after cache.get().\n\
-         Run: cargo test --test store_advanced project_calls_prefetch"
-    );
-
-    store.close().expect("close");
-}
-
-// ================================================================
-// Writer restart_policy tests — PROVES LAW-001, DEFENDS FM-009
-// These tests use panic_writer_for_test() which interacts badly under high
-// parallelism (INV-CONC). Serialized to prevent hangs.
-// ================================================================
-
-/// RestartPolicy::Once allows one restart after panic.
-/// After restart, the store should still accept appends normally.
-#[test]
-#[serial_test::serial(writer_restart)]
-fn writer_restart_once_recovers_from_panic() {
-    let dir = TempDir::new().expect("create temp dir");
-    let config = StoreConfig {
-        data_dir: dir.path().to_path_buf(),
-        segment_max_bytes: 64 * 1024,
-        restart_policy: RestartPolicy::Once,
-        ..StoreConfig::new("")
-    };
-    let store = Store::open(config).expect("open store");
-    let coord = Coordinate::new("restart:test", "restart:scope").expect("valid coord");
-    let kind = EventKind::custom(0xF, 1);
-
-    // Append before panic — should succeed
-    store
-        .append(&coord, kind, &"before_panic")
-        .expect("append before panic");
-
-    // Trigger writer panic
-    store.panic_writer_for_test().expect("send panic command");
-
-    // Append after restart — should succeed because Once allows 1 restart
-    store.append(&coord, kind, &"after_panic").expect(
-        "RESTART FAILED: append after writer panic should succeed with RestartPolicy::Once.\n\
-         Investigate: src/store/writer.rs writer_thread_main() catch_unwind logic.\n\
-         Common causes: restart not re-creating segment, rx channel dead.",
-    );
-
-    // Verify both events persisted
-    let entries = store.stream("restart:test");
-    assert_eq!(
-        entries.len(),
-        2,
-        "RESTART DATA LOSS: both events (before and after panic) should be persisted.\n\
-         Investigate: src/store/writer.rs writer_thread_main() segment re-creation.\n\
-         Run: cargo test --test store_advanced writer_restart_once_recovers_from_panic"
-    );
-}
-
-/// RestartPolicy::Once gives up after the 2nd panic.
-/// The writer thread should be dead, and further appends should fail with WriterCrashed.
-#[test]
-#[serial_test::serial(writer_restart)]
-fn writer_restart_once_gives_up_after_second_panic() {
-    let dir = TempDir::new().expect("create temp dir");
-    let config = StoreConfig {
-        data_dir: dir.path().to_path_buf(),
-        segment_max_bytes: 64 * 1024,
-        restart_policy: RestartPolicy::Once,
-        ..StoreConfig::new("")
-    };
-    let store = Store::open(config).expect("open store");
-    let coord = Coordinate::new("restart:exhaust", "restart:scope").expect("valid coord");
-    let kind = EventKind::custom(0xF, 1);
-
-    // First panic — writer restarts (budget: 1)
-    store.panic_writer_for_test().expect("send first panic");
-
-    // Second panic — budget exhausted, writer exits
-    let _ = store.panic_writer_for_test();
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    // Now the writer should be dead — append should fail
-    let result = store.append(&coord, kind, &"should_fail");
-    assert!(
-        result.is_err(),
-        "RESTART BUDGET NOT ENFORCED: append should fail after restart budget exhausted.\n\
-         Investigate: src/store/writer.rs writer_thread_main() budget_ok logic.\n\
-         Common causes: restart counter not incremented, budget check wrong.\n\
-         Run: cargo test --test store_advanced writer_restart_once_gives_up_after_second_panic"
-    );
-}
-
-/// RestartPolicy::Bounded respects max_restarts within the time window.
-#[test]
-#[serial_test::serial(writer_restart)]
-fn writer_restart_bounded_respects_limit() {
-    let dir = TempDir::new().expect("create temp dir");
-    let config = StoreConfig {
-        data_dir: dir.path().to_path_buf(),
-        segment_max_bytes: 64 * 1024,
-        restart_policy: RestartPolicy::Bounded {
-            max_restarts: 2,
-            within_ms: 60_000, // 60s window — won't expire during test
-        },
-        ..StoreConfig::new("")
-    };
-    let store = Store::open(config).expect("open store");
-    let coord = Coordinate::new("restart:bounded", "restart:scope").expect("valid coord");
-    let kind = EventKind::custom(0xF, 1);
-
-    // First panic — restarts (1/2)
-    store.panic_writer_for_test().expect("first panic");
-    store
-        .append(&coord, kind, &"after_panic_1")
-        .expect("append after 1st restart should succeed (budget 1/2)");
-
-    // Second panic — restarts (2/2)
-    store.panic_writer_for_test().expect("second panic");
-    store
-        .append(&coord, kind, &"after_panic_2")
-        .expect("append after 2nd restart should succeed (budget 2/2)");
-
-    // Third panic — budget exhausted
-    let _ = store.panic_writer_for_test();
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    let result = store.append(&coord, kind, &"should_fail");
-    assert!(
-        result.is_err(),
-        "BOUNDED RESTART BUDGET NOT ENFORCED: append should fail after 3 panics with max_restarts=2.\n\
-         Investigate: src/store/writer.rs writer_thread_main() Bounded branch.\n\
-         Run: cargo test --test store_advanced writer_restart_bounded_respects_limit"
-    );
 }
 
 // ===== Wave 2C: Cursor edge case tests =====

@@ -10,7 +10,7 @@
 //! DEFENDS: FM-009 (Polite Downgrade — BestEffort must eventually refresh)
 //! INVARIANTS: INV-TYPE (cache round-trip fidelity), INV-TEMP (freshness semantics)
 
-use batpak::store::projection::{CacheMeta, NoCache, ProjectionCache};
+use batpak::store::projection::{CacheCapabilities, CacheMeta, NoCache, ProjectionCache};
 
 fn test_meta() -> CacheMeta {
     CacheMeta {
@@ -314,6 +314,28 @@ mod lmdb_tests {
     }
 
     #[test]
+    fn lmdb_delete_prefix_is_idempotent_after_iterator_deletion() {
+        let (cache, _dir) = lmdb_cache();
+        let meta = test_meta();
+
+        cache.put(b"user:1", b"alice", meta.clone()).expect("put");
+        cache.put(b"user:2", b"bob", meta).expect("put");
+
+        let first = cache.delete_prefix(b"user:").expect("delete prefix");
+        let second = cache.delete_prefix(b"user:").expect("delete prefix again");
+        cache.sync().expect("sync");
+
+        assert_eq!(
+            first, 2,
+            "LMDB DELETE PREFIX IDEMPOTENCE: first delete should remove both matching entries."
+        );
+        assert_eq!(
+            second, 0,
+            "LMDB DELETE PREFIX IDEMPOTENCE: repeating the delete after iterator-driven removal must be a clean no-op."
+        );
+    }
+
+    #[test]
     fn lmdb_sync() {
         let (cache, _dir) = lmdb_cache();
         cache.sync().expect("LmdbCache::sync should not error.");
@@ -409,10 +431,12 @@ mod lmdb_tests {
 // ================================================================
 
 // Shared Counter type for projection tests
+#[cfg(feature = "redb")]
 #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
 struct BestEffortCounter {
     count: u32,
 }
+#[cfg(feature = "redb")]
 impl batpak::prelude::EventSourced<serde_json::Value> for BestEffortCounter {
     fn from_events(events: &[batpak::prelude::Event<serde_json::Value>]) -> Option<Self> {
         Some(BestEffortCounter {
@@ -590,6 +614,11 @@ fn redb_delete_prefix_empty_prefix_deletes_all() {
 fn nocache_prefetch_is_noop() {
     let cache = NoCache;
     let meta = test_meta();
+    assert_eq!(
+        cache.capabilities(),
+        CacheCapabilities::none(),
+        "NoCache must explicitly report that it does not support prefetch hints."
+    );
     cache
         .prefetch(b"any_key", meta)
         .expect("NoCache::prefetch should not error — it's a no-op by default.");

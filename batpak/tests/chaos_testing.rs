@@ -85,11 +85,11 @@ fn chaos_corrupted_segment_bytes() {
     for seg in &segments {
         let mut data = std::fs::read(seg.path()).expect("read segment");
         // Skip magic bytes (first 4), corrupt some bytes after header
-        let corrupt_count = rng.gen_range(1..=5);
+        let corrupt_count = rng.random_range(1..=5);
         for _ in 0..corrupt_count {
-            let pos = rng.gen_range(40..data.len().max(41));
+            let pos = rng.random_range(40..data.len().max(41));
             if pos < data.len() {
-                data[pos] ^= rng.gen::<u8>() | 1; // ensure at least 1 bit flips
+                data[pos] ^= rng.random::<u8>() | 1; // ensure at least 1 bit flips
             }
         }
         std::fs::write(seg.path(), &data).expect("write corrupted");
@@ -487,8 +487,8 @@ fn chaos_frame_decode_random_bombardment() {
     let mut err_count = 0u64;
 
     for _ in 0..iterations {
-        let len = rng.gen_range(0..2048);
-        let data: Vec<u8> = (0..len).map(|_| rng.gen()).collect();
+        let len = rng.random_range(0..2048);
+        let data: Vec<u8> = (0..len).map(|_| rng.random()).collect();
         match frame_decode(&data) {
             Ok(_) => ok_count += 1,
             Err(_) => err_count += 1,
