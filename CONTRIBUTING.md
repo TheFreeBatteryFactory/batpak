@@ -2,65 +2,58 @@
 
 ## Canonical Environment
 
-The canonical development environment is the checked-in Dev Container in [`.devcontainer/devcontainer.json`](.devcontainer/devcontainer.json). Native Windows and Linux development are still supported, but they must pass the same integrity gates.
-
-From the repo root:
+The checked-in devcontainer is the canonical environment. Native Windows and Linux are supported too, but they should use the same root-first commands:
 
 ```bash
-cd batpak
-cargo run --manifest-path tools/integrity/Cargo.toml -- doctor --strict
+cargo xtask doctor
+cargo xtask ci
 ```
 
-`doctor --strict` verifies the expected toolchain, integrity tooling, and line-ending contract before you start.
+If your local toolchain is missing standard cargo helpers, run:
+
+```bash
+cargo xtask setup --install-tools
+```
 
 ## Daily Commands
 
-From [`batpak/`](batpak/):
-
 ```bash
-just doctor
-just traceability
-just structural
-just ci
+cargo xtask doctor
+cargo xtask traceability
+cargo xtask structural
+cargo xtask pre-commit
+cargo xtask ci
 ```
 
-The canonical full gate set is also available through [`scripts/verify-all.sh`](scripts/verify-all.sh).
+`just` recipes are wrappers around the same commands.
 
-## Code Style
+## Contributor Workflow
 
-- `cargo fmt --check`
-- `cargo clippy --all-features --all-targets -- -D warnings`
-- `cargo deny check`
-- No `unwrap()`, `panic!()`, `todo!()`, or `dbg!()` in production code
-- Synchronous API only; no async runtime dependency in production
-- Host-specific linker or environment overrides must stay out of the repo
+1. Make the change.
+2. Update docs, examples, traceability, and ADRs if the public surface or behavior changed.
+3. Run `cargo xtask pre-commit`.
+4. Run `cargo xtask ci` before pushing.
 
-## Traceability And Decisions
+## Public Surface Rules
 
-- Requirement, invariant, flow, and proving-artifact links live under [`traceability/`](traceability/).
-- Architecture decisions live under [`batpak/docs/adr/`](batpak/docs/adr/).
-- If you add a new public surface, named flow, or invariant, update those registries in the same change.
+- No async runtime dependency in production.
+- No `unwrap()`, `todo!()`, `dbg!()`, or `panic!()` in production code.
+- Keep host-specific linker and machine overrides out of the repo.
+- New public APIs should have:
+  - a doc comment or guide entry
+  - an example or test by name
+  - traceability updates when behavior or invariants change
 
-## Before Submitting
+## Docs And Release Hygiene
 
-Run this from [`batpak/`](batpak/):
+- User-facing docs live in `guide/`
+- Deep reference docs live in `docs/reference/`
+- ADRs live in `docs/adr/`
+- Specs and audit records live in `docs/spec/` and `docs/audits/`
+
+Before release-oriented changes, run:
 
 ```bash
-just ci
-```
-
-That expands to:
-
-```bash
-cargo run --manifest-path tools/integrity/Cargo.toml -- doctor --strict
-cargo run --manifest-path tools/integrity/Cargo.toml -- traceability-check
-cargo run --manifest-path tools/integrity/Cargo.toml -- structural-check
-cargo fmt --check
-cargo clippy --all-features --all-targets -- -D warnings
-cargo deny check
-cargo nextest run --profile ci --all-features
-cargo test --doc --all-features
-cargo check --all-features
-cargo check --no-default-features
-cargo bench --no-run --all-features
+cargo xtask docs
+cargo xtask release --dry-run
 ```

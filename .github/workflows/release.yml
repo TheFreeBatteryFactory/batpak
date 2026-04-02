@@ -1,0 +1,15 @@
+name: Release Readiness
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release in canonical container
+        run: bash ./scripts/run-in-devcontainer.sh 'cargo xtask release --dry-run'

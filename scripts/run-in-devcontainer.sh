@@ -11,6 +11,6 @@ image_tag="${BATPAK_DEVCONTAINER_IMAGE:-batpak-devcontainer}"
   -e CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}" \
   -e PROPTEST_CASES="${PROPTEST_CASES:-256}" \
   -v "${repo_root}:/workspace/batpak" \
-  -w /workspace/batpak/batpak \
+  -w /workspace/batpak \
   "${image_tag}" \
   bash -lc "$*"

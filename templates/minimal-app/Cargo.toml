@@ -1,0 +1,10 @@
+[package]
+name = "batpak-minimal-app"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+batpak = { path = "../..", features = ["blake3"] }
+serde_json = "1"

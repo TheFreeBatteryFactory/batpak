@@ -1,4 +1,0 @@
-# Repository-local Cargo config must stay portable.
-# Put host-specific linker or environment overrides in:
-#   - ~/.cargo/config.toml
-#   - .cargo/config.local.toml (gitignored, user-managed)

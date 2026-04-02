@@ -9,6 +9,7 @@
   artifacts:
     - ART-CI
     - ART-JUST
+    - ART-XTASK
     - ART-VERIFY
     - ART-DENY-CONFIG
 - id: REQ-TRACE-BIDIR
@@ -43,3 +44,8 @@
   artifacts:
     - ART-STRUCTURAL-CHECK
     - ART-PUB-ALLOWLIST
+- id: REQ-DX-ROOT-FIRST
+  summary: The repository must present a root-first, beginner-friendly command and documentation surface without hiding the maintainer lane.
+  artifacts:
+    - ART-XTASK
+    - ART-DX-DOCS

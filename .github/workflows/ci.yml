@@ -1,0 +1,141 @@
+name: Integrity CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 7 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+  PROPTEST_CASES: 256
+
+jobs:
+  integrity-linux-container:
+    name: Integrity (ubuntu-devcontainer)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Canonical container integrity gates
+        run: |
+          bash ./scripts/run-in-devcontainer.sh 'cargo xtask ci'
+
+  integrity-windows-native:
+    name: Integrity (windows-native)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt,llvm-tools-preview
+      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@cargo-deny
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@cargo-mutants
+      - uses: taiki-e/install-action@mdbook
+      - uses: Swatinem/rust-cache@v2
+      - name: Integrity
+        run: cargo xtask ci
+
+  feature-isolation:
+    runs-on: ubuntu-latest
+    needs: [integrity-linux-container, integrity-windows-native]
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - ""
+          - "--features blake3"
+          - "--features redb"
+          - "--features lmdb"
+          - "--features test-support"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Feature-isolation test matrix
+        run: bash ./scripts/run-in-devcontainer.sh "cargo test ${{ matrix.features }}"
+
+  coverage:
+    runs-on: ubuntu-latest
+    needs: [integrity-linux-container, integrity-windows-native]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Coverage threshold check
+        run: |
+          bash ./scripts/run-in-devcontainer.sh 'cargo xtask cover --ci --threshold 80'
+
+  quickstart-smoke:
+    runs-on: ubuntu-latest
+    needs: [integrity-linux-container]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the beginner quickstart
+        run: bash ./scripts/run-in-devcontainer.sh 'cargo run --example quickstart'
+
+  template-smoke:
+    runs-on: ubuntu-latest
+    needs: [integrity-linux-container]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the starter template
+        run: bash ./scripts/run-in-devcontainer.sh 'cargo run --manifest-path templates/minimal-app/Cargo.toml'
+
+  mutants:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mutation smoke (all features)
+        run: bash ./scripts/run-in-devcontainer.sh 'cargo xtask mutants smoke'
+
+  mutants-full:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        surface:
+          - name: all-features
+            command: >-
+              cargo mutants --file "src/store/*.rs" --file src/wire.rs --file "src/guard/*.rs" --file "src/pipeline/*.rs" --exclude src/store/ancestors_clock.rs --all-features --test-tool cargo
+          - name: no-default-features
+            command: >-
+              cargo mutants --file "src/store/*.rs" --exclude src/store/ancestors_hash.rs --no-default-features --test-tool cargo
+        shard:
+          - 1/12
+          - 2/12
+          - 3/12
+          - 4/12
+          - 5/12
+          - 6/12
+          - 7/12
+          - 8/12
+          - 9/12
+          - 10/12
+          - 11/12
+          - 12/12
+    name: Mutation full (${{ matrix.surface.name }} shard ${{ matrix.shard }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: Full mutation shard
+        run: bash ./scripts/run-in-devcontainer.sh '${{ matrix.surface.command }} --shard ${{ matrix.shard }}'
+
+  docs:
+    runs-on: ubuntu-latest
+    needs: [integrity-linux-container, integrity-windows-native]
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build rustdoc in canonical container
+        run: bash ./scripts/run-in-devcontainer.sh 'cargo xtask docs'
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/site
+      - id: deploy
+        uses: actions/deploy-pages@v4

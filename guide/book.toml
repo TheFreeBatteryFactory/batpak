@@ -1,0 +1,9 @@
+[book]
+title = "batpak Guide"
+authors = ["TheFreeBatteryFactory"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "navy"
+git-repository-url = "https://github.com/TheFreeBatteryFactory/batpak"

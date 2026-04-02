@@ -1,59 +1,76 @@
 # batpak
 
-**Battery pack for event sourcing.** A complete, sync-first runtime for building event-sourced systems in Rust.
+Sync-first event sourcing for Rust: append-only log, causal metadata, policy gates, projections, subscriptions, and typestate-friendly workflows without an async runtime.
 
-No async. No tokio. No product concepts. Just the engine.
+## Start In 5 Minutes
 
-## What is this?
+```bash
+cargo xtask setup
+cargo run --example quickstart
+```
 
-batpak gives you an append-only event log with hash chain integrity, a DAG-based causation tracker, compile-time state machines, and a policy gate system — all behind a synchronous API. You bring the domain; batpak brings the infrastructure.
+If you just want the crate:
+
+```bash
+cargo add batpak
+```
 
 ```rust
 use batpak::prelude::*;
 
-let store = Store::open(StoreConfig::new("./batpak-data"))?;
+let config = StoreConfig::new("./batpak-data")
+    .with_sync_every_n_events(100)
+    .with_sync_mode(SyncMode::SyncData);
+let store = Store::open(config)?;
+
 let coord = Coordinate::new("player:alice", "room:dungeon")?;
 let kind = EventKind::custom(0xF, 1);
-
 let receipt = store.append(&coord, kind, &serde_json::json!({"x": 10, "y": 20}))?;
+println!("stored {} at {}", receipt.event_id, receipt.sequence);
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-## Project Layout
+## Pick Your Lane
 
-```
-batpak/          Rust crate — the library itself
-  src/           Source code (reading order: coordinate → event → guard → pipeline → store)
-  tests/         Integration, property-based, chaos, and UI tests
-  benches/       Criterion benchmarks (write throughput, cold start, projections, etc.)
-  examples/      Runnable examples demonstrating core patterns
-SPEC.md          Technical specification
-SPEC_REGISTRY.md Detailed build registry
-CONTRIBUTING.md  How to build, test, and contribute
-```
+- User lane: `cargo build`, `cargo test`, `cargo run --example quickstart`
+- Maintainer lane: `cargo xtask doctor`, `cargo xtask ci`
+- Perf lane: `cargo xtask bench --surface neutral|redb|lmdb [--save|--compare]`
 
-## Quick Links
+## What You Get
 
-| Document | What it covers |
-|----------|---------------|
-| [batpak/README.md](batpak/README.md) | Features, architecture, quick start, design invariants |
-| [batpak/ARCHITECTURE.md](batpak/ARCHITECTURE.md) | Deep narrative walkthrough of the module graph |
-| [batpak/TUNING.md](batpak/TUNING.md) | StoreConfig reference, tradeoff matrix, deployment examples |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Build, test, lint, pre-submit checklist |
-| [SPEC.md](SPEC.md) | Full technical specification |
+- Append-only segment store with CRC32 integrity
+- Optional Blake3 hash chains
+- Causal metadata and region queries
+- Gate / receipt workflow for policy enforcement
+- Event-sourced projections with optional `redb` or `lmdb` caches
+- Push subscriptions, pull cursors, typestate helpers
+- Query/read operations yield `StoredEvent<serde_json::Value>` at the storage boundary
 
-## Integrity Contract
+## Docs
 
-- Canonical environment: `.devcontainer/`
-- Machine-readable traceability: `traceability/`
-- Decision records: `batpak/docs/adr/`
-- Executable integrity tooling: `batpak/tools/integrity/`
+- [Guide](guide/src/SUMMARY.md)
+- [Architecture reference](docs/reference/ARCHITECTURE.md)
+- [Tuning reference](docs/reference/TUNING.md)
+- [Contributing](CONTRIBUTING.md)
+- [Agent guide](AGENTS.md)
+- [Specification](docs/spec/SPEC.md)
 
-From `batpak/`, the canonical verification path is:
+## Features
+
+- `blake3` (default): hash-chain verification
+- `redb`: redb-backed projection cache
+- `lmdb`: LMDB-backed projection cache
+- `test-support`: explicit test-only runtime hooks
+
+## Canonical Commands
 
 ```bash
-cargo run --manifest-path tools/integrity/Cargo.toml -- doctor --strict
-just ci
+cargo xtask doctor
+cargo xtask ci
+cargo xtask docs
 ```
+
+`just` remains available as shorthand, but `cargo xtask` is the canonical command surface.
 
 ## License
 

@@ -19,5 +19,5 @@
       ]
     }
   },
-  "postCreateCommand": "cargo run --manifest-path batpak/tools/integrity/Cargo.toml -- doctor --strict"
+  "postCreateCommand": "cargo xtask doctor"
 }
