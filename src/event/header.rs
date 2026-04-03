@@ -22,7 +22,6 @@ pub struct EventHeader {
     /// Content hash of the serialized payload. Enables automatic projection cache
     /// invalidation when event schemas evolve. Computed from payload bytes during
     /// writer step 5 (reuses the blake3 computation). [0u8; 32] when blake3 is off.
-    /// [CROSS-POLLINATION:czap/typed-ref.ts — content addressing for auto-invalidation]
     #[serde(default)]
     pub content_hash: [u8; 32],
 }

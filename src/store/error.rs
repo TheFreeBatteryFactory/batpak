@@ -57,7 +57,57 @@ impl std::fmt::Display for StoreError {
     }
 }
 
-impl std::error::Error for StoreError {}
+impl std::error::Error for StoreError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::Coordinate(e) => Some(e),
+            Self::Serialization(_)
+            | Self::CrcMismatch { .. }
+            | Self::CorruptSegment { .. }
+            | Self::NotFound(_)
+            | Self::SequenceMismatch { .. }
+            | Self::DuplicateEvent(_)
+            | Self::WriterCrashed
+            | Self::ShuttingDown
+            | Self::CacheFailed(_) => None,
+        }
+    }
+}
+
+impl StoreError {
+    /// Segment has a bad magic number (not a valid batpak segment).
+    pub(crate) fn corrupt_magic(segment_id: u64) -> Self {
+        Self::CorruptSegment {
+            segment_id,
+            detail: "bad magic".into(),
+        }
+    }
+
+    /// Unexpected EOF during frame read.
+    pub(crate) fn corrupt_eof(segment_id: u64) -> Self {
+        Self::CorruptSegment {
+            segment_id,
+            detail: "unexpected EOF during read".into(),
+        }
+    }
+
+    /// Segment has an unsupported version number.
+    pub(crate) fn corrupt_version(segment_id: u64, version: u16) -> Self {
+        Self::CorruptSegment {
+            segment_id,
+            detail: format!("unsupported segment version: {version}"),
+        }
+    }
+
+    /// Frame deserialization failed.
+    pub(crate) fn corrupt_frame(segment_id: u64, detail: impl Into<String>) -> Self {
+        Self::CorruptSegment {
+            segment_id,
+            detail: detail.into(),
+        }
+    }
+}
 
 impl From<CoordinateError> for StoreError {
     fn from(e: CoordinateError) -> Self {

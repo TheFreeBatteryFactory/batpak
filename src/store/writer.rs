@@ -457,7 +457,6 @@ impl WriterState<'_> {
         // STEP 4: Set event header position with HLC wall clock.
         // Ensure wall_ms is monotonically non-decreasing per entity to prevent
         // BTreeMap reordering on clock regression.
-        // [CROSS-POLLINATION:czap/hlc.ts — HLC for global causal ordering]
         #[allow(clippy::cast_sign_loss)] // timestamp_us is always positive (from SystemTime)
         let raw_ms = (event.header.timestamp_us / 1000) as u64;
         let last_ms = latest.as_ref().map(|entry| entry.wall_ms).unwrap_or(0);
@@ -480,7 +479,6 @@ impl WriterState<'_> {
             event_hash,
         });
         // Set content_hash on header for projection cache auto-invalidation.
-        // [CROSS-POLLINATION:czap/typed-ref.ts — content addressing]
         event.header.content_hash = event_hash;
 
         // STEP 6: Serialize to MessagePack + CRC32 frame.

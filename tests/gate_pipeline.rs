@@ -411,7 +411,7 @@ fn bypass_through_full_pipeline_commits_to_store() {
 }
 
 // ================================================================
-// Pipeline, bypass, committed, denial, gateset tests (migrated from quiet_stragglers)
+// Pipeline, bypass, committed, denial, gateset tests
 // ================================================================
 
 struct StragglersTestBypassReason;

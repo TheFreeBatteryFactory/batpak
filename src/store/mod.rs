@@ -4,6 +4,7 @@ mod contracts;
 pub mod cursor;
 mod error;
 pub mod index;
+mod index_rebuild;
 mod maintenance;
 pub mod projection;
 mod projection_flow;
@@ -107,41 +108,7 @@ impl Store {
 
         // Cold start: scan all segments, rebuild index.
         // [SPEC:IMPLEMENTATION NOTES item 2 — segment naming, alphabetical scan]
-        let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(&config.data_dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == segment::SEGMENT_EXTENSION)
-                    .unwrap_or(false)
-            })
-            .collect();
-        entries.sort_by_key(|e| e.file_name());
-
-        for dir_entry in &entries {
-            let scanned = reader.scan_segment_index(&dir_entry.path())?;
-            for se in scanned {
-                let coord = Coordinate::new(&se.entity, &se.scope)?;
-                let clock = se.header.position.sequence;
-                let entry = IndexEntry {
-                    event_id: se.header.event_id,
-                    correlation_id: se.header.correlation_id,
-                    causation_id: se.header.causation_id,
-                    coord,
-                    kind: se.header.event_kind,
-                    wall_ms: se.header.position.wall_ms,
-                    clock,
-                    hash_chain: se.hash_chain,
-                    disk_pos: DiskPos {
-                        segment_id: se.segment_id,
-                        offset: se.offset,
-                        length: se.length,
-                    },
-                    global_sequence: index.global_sequence(),
-                };
-                index.insert(entry);
-            }
-        }
+        index_rebuild::rebuild_from_segments(&index, &reader, &config.data_dir)?;
 
         let subscribers = Arc::new(SubscriberList::new());
         let writer = WriterHandle::spawn(&config, &index, &subscribers)?;
@@ -170,40 +137,10 @@ impl Store {
             scope = coord.scope(),
             event_kind = kind.type_id()
         );
-        let payload_bytes = rmp_serde::to_vec_named(payload)
-            .map_err(|e| StoreError::Serialization(e.to_string()))?;
-        let payload_len = checked_payload_len(&payload_bytes)?;
         let event_id = crate::id::generate_v7_id();
-        let header = EventHeader::new(
-            event_id,
-            event_id,
-            None, // correlation = self, causation = root
-            self.config.now_us(),
-            crate::coordinate::DagPosition::root(),
-            payload_len,
-            kind,
-        );
-        let event = Event::new(header, payload_bytes);
-
-        let (tx, rx) = flume::bounded(1);
-        self.writer
-            .tx
-            .send(WriterCommand::Append {
-                entity: coord.entity_arc(),
-                scope: coord.scope_arc(),
-                event: Box::new(event),
-                kind,
-                guards: AppendGuards {
-                    correlation_id: event_id,
-                    causation_id: None,
-                    expected_sequence: None,
-                    idempotency_key: None,
-                },
-                respond: tx,
-            })
-            .map_err(|_| StoreError::WriterCrashed)?;
-
-        rx.recv().map_err(|_| StoreError::WriterCrashed)?
+        self.do_append(
+            coord, kind, payload, event_id, event_id, None, None, None, 0,
+        )
     }
 
     /// WRITE: append a reaction (caused by another event).
@@ -223,40 +160,18 @@ impl Store {
             correlation_id = format_args!("{correlation_id:032x}"),
             causation_id = format_args!("{causation_id:032x}")
         );
-        let payload_bytes = rmp_serde::to_vec_named(payload)
-            .map_err(|e| StoreError::Serialization(e.to_string()))?;
-        let payload_len = checked_payload_len(&payload_bytes)?;
         let event_id = crate::id::generate_v7_id();
-        let header = EventHeader::new(
+        self.do_append(
+            coord,
+            kind,
+            payload,
             event_id,
             correlation_id,
             Some(causation_id),
-            self.config.now_us(),
-            crate::coordinate::DagPosition::root(),
-            payload_len,
-            kind,
-        );
-        let event = Event::new(header, payload_bytes);
-
-        let (tx, rx) = flume::bounded(1);
-        self.writer
-            .tx
-            .send(WriterCommand::Append {
-                entity: coord.entity_arc(),
-                scope: coord.scope_arc(),
-                event: Box::new(event),
-                kind,
-                guards: AppendGuards {
-                    correlation_id,
-                    causation_id: Some(causation_id),
-                    expected_sequence: None,
-                    idempotency_key: None,
-                },
-                respond: tx,
-            })
-            .map_err(|_| StoreError::WriterCrashed)?;
-
-        rx.recv().map_err(|_| StoreError::WriterCrashed)?
+            None,
+            None,
+            0,
+        )
     }
 
     /// READ: get a single event by ID.
@@ -382,15 +297,42 @@ impl Store {
             has_cas = opts.expected_sequence.is_some(),
             has_idempotency = opts.idempotency_key.is_some()
         );
-        let payload_bytes = rmp_serde::to_vec_named(payload)
-            .map_err(|e| StoreError::Serialization(e.to_string()))?;
-        let payload_len = checked_payload_len(&payload_bytes)?;
         let event_id = opts
             .idempotency_key
             .unwrap_or_else(crate::id::generate_v7_id);
         let correlation_id = opts.correlation_id.unwrap_or(event_id);
-        let causation_id = opts.causation_id;
-        let header = EventHeader::new(
+        self.do_append(
+            coord,
+            kind,
+            payload,
+            event_id,
+            correlation_id,
+            opts.causation_id,
+            opts.expected_sequence,
+            opts.idempotency_key,
+            opts.flags,
+        )
+    }
+
+    /// Internal append path shared by all public write methods.
+    /// Serializes payload, constructs header+event, sends to writer, awaits receipt.
+    #[allow(clippy::too_many_arguments)] // internal helper consolidating 3 public methods
+    fn do_append(
+        &self,
+        coord: &Coordinate,
+        kind: EventKind,
+        payload: &impl Serialize,
+        event_id: u128,
+        correlation_id: u128,
+        causation_id: Option<u128>,
+        expected_sequence: Option<u32>,
+        idempotency_key: Option<u128>,
+        flags: u8,
+    ) -> Result<AppendReceipt, StoreError> {
+        let payload_bytes = rmp_serde::to_vec_named(payload)
+            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let payload_len = checked_payload_len(&payload_bytes)?;
+        let mut header = EventHeader::new(
             event_id,
             correlation_id,
             causation_id,
@@ -398,8 +340,10 @@ impl Store {
             crate::coordinate::DagPosition::root(),
             payload_len,
             kind,
-        )
-        .with_flags(opts.flags);
+        );
+        if flags != 0 {
+            header = header.with_flags(flags);
+        }
         let event = Event::new(header, payload_bytes);
 
         let (tx, rx) = flume::bounded(1);
@@ -413,8 +357,8 @@ impl Store {
                 guards: AppendGuards {
                     correlation_id,
                     causation_id,
-                    expected_sequence: opts.expected_sequence,
-                    idempotency_key: opts.idempotency_key,
+                    expected_sequence,
+                    idempotency_key,
                 },
                 respond: tx,
             })

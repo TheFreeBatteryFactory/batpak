@@ -46,7 +46,6 @@ impl<Ctx> GateSet<Ctx> {
 
     /// Evaluate ALL gates (no fail-fast). For observability — collect all denials.
     /// Gates that panic are caught and surfaced as `Denial` with code `GATE_DEFECT`.
-    /// [CROSS-POLLINATION:czap/packages/core/src/gate.ts — evaluateAll defect handling]
     pub fn evaluate_all(&self, ctx: &Ctx) -> Vec<Denial> {
         self.gates
             .iter()

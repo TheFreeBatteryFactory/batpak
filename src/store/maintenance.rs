@@ -1,6 +1,5 @@
 use crate::coordinate::Coordinate;
 use crate::event::{EventKind, StoredEvent};
-use crate::store::index::{DiskPos, IndexEntry};
 use crate::store::reader;
 use crate::store::segment::{self, Active, FramePayload};
 use crate::store::{
@@ -48,47 +47,34 @@ pub(crate) fn compact(
     tracing::debug!(target: "batpak::flow", flow = "compact");
     sync(store)?;
 
-    let active_segment_id = std::fs::read_dir(&store.config.data_dir)
-        .map_err(StoreError::Io)?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path
-                .extension()
-                .map(|ext| ext == segment::SEGMENT_EXTENSION)
-                .unwrap_or(false)
-            {
-                path.file_stem()?.to_str()?.parse::<u64>().ok()
-            } else {
-                None
-            }
-        })
-        .max()
-        .unwrap_or(0);
+    // Single read_dir: collect all segment IDs and paths, then partition.
+    let mut all_segments: Vec<(u64, std::path::PathBuf)> =
+        std::fs::read_dir(&store.config.data_dir)
+            .map_err(StoreError::Io)?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                let ext_ok = path
+                    .extension()
+                    .map(|ext| ext == segment::SEGMENT_EXTENSION)
+                    .unwrap_or(false);
+                if !ext_ok {
+                    return None;
+                }
+                let seg_id = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .and_then(|stem| stem.parse::<u64>().ok())?;
+                Some((seg_id, path))
+            })
+            .collect();
+    all_segments.sort_by_key(|(id, _)| *id);
 
-    let mut sealed: Vec<(u64, std::path::PathBuf)> = std::fs::read_dir(&store.config.data_dir)
-        .map_err(StoreError::Io)?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            let ext_ok = path
-                .extension()
-                .map(|ext| ext == segment::SEGMENT_EXTENSION)
-                .unwrap_or(false);
-            if !ext_ok {
-                return None;
-            }
-            let seg_id = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .and_then(|stem| stem.parse::<u64>().ok())?;
-            if seg_id >= active_segment_id {
-                return None;
-            }
-            Some((seg_id, path))
-        })
+    let active_segment_id = all_segments.last().map(|(id, _)| *id).unwrap_or(0);
+    let mut sealed: Vec<(u64, std::path::PathBuf)> = all_segments
+        .into_iter()
+        .filter(|(id, _)| *id < active_segment_id)
         .collect();
-    sealed.sort_by_key(|(id, _)| *id);
 
     if sealed.len() < config.min_segments {
         return Ok(segment::CompactionResult {
@@ -194,44 +180,11 @@ pub(crate) fn compact(
 
     sync(store)?;
     store.index.clear();
-    let mut remaining: Vec<std::fs::DirEntry> = std::fs::read_dir(&store.config.data_dir)
-        .map_err(StoreError::Io)?
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .map(|ext| ext == segment::SEGMENT_EXTENSION)
-                .unwrap_or(false)
-        })
-        .collect();
-    remaining.sort_by_key(|entry| entry.file_name());
-
-    for dir_entry in &remaining {
-        let scanned = store.reader.scan_segment_index(&dir_entry.path())?;
-        for scanned_entry in scanned {
-            let coord = Coordinate::new(&scanned_entry.entity, &scanned_entry.scope)?;
-            let clock = scanned_entry.header.position.sequence;
-            let entry = IndexEntry {
-                event_id: scanned_entry.header.event_id,
-                correlation_id: scanned_entry.header.correlation_id,
-                causation_id: scanned_entry.header.causation_id,
-                coord,
-                kind: scanned_entry.header.event_kind,
-                wall_ms: scanned_entry.header.position.wall_ms,
-                clock,
-                hash_chain: scanned_entry.hash_chain,
-                disk_pos: DiskPos {
-                    segment_id: scanned_entry.segment_id,
-                    offset: scanned_entry.offset,
-                    length: scanned_entry.length,
-                },
-                global_sequence: store.index.global_sequence(),
-            };
-            store.index.insert(entry);
-        }
-    }
-
+    crate::store::index_rebuild::rebuild_from_segments(
+        &store.index,
+        &store.reader,
+        &store.config.data_dir,
+    )?;
     sync(store)?;
 
     Ok(segment::CompactionResult {

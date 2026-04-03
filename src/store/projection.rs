@@ -31,7 +31,6 @@ pub trait ProjectionCache: Send + Sync + 'static {
 
     /// Hint that this key is likely to be requested soon. Implementations may
     /// pre-warm internal caches or pre-compute values. Default: no-op.
-    /// [CROSS-POLLINATION:czap/speculative.ts — pre-compute before threshold crossing]
     fn prefetch(&self, _key: &[u8], _predicted_meta: CacheMeta) -> Result<(), StoreError> {
         Ok(()) // default: no-op (NoCache, lazy impls)
     }
@@ -41,6 +40,47 @@ pub trait ProjectionCache: Send + Sync + 'static {
 pub struct CacheMeta {
     pub watermark: u64,
     pub cached_at_us: i64,
+}
+
+/// Byte layout: value bytes followed by 16 bytes of metadata (watermark u64 LE + cached_at_us i64 LE).
+const CACHE_META_SIZE: usize = 16;
+
+impl CacheMeta {
+    /// Encode value + metadata into a single byte buffer for cache storage.
+    pub(crate) fn encode_with_value(&self, value: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(value.len() + CACHE_META_SIZE);
+        buf.extend_from_slice(value);
+        buf.extend_from_slice(&self.watermark.to_le_bytes());
+        buf.extend_from_slice(&self.cached_at_us.to_le_bytes());
+        buf
+    }
+
+    /// Decode value + metadata from a cache-stored byte buffer.
+    pub(crate) fn decode_from_bytes(bytes: &[u8]) -> Result<(Vec<u8>, Self), StoreError> {
+        if bytes.len() < CACHE_META_SIZE {
+            return Err(StoreError::CacheFailed(
+                "corrupt cache metadata: too short".into(),
+            ));
+        }
+        let (value, meta_bytes) = bytes.split_at(bytes.len() - CACHE_META_SIZE);
+        let watermark = u64::from_le_bytes(
+            meta_bytes[..8]
+                .try_into()
+                .map_err(|_| StoreError::CacheFailed("corrupt cache metadata".into()))?,
+        );
+        let cached_at_us = i64::from_le_bytes(
+            meta_bytes[8..16]
+                .try_into()
+                .map_err(|_| StoreError::CacheFailed("corrupt cache metadata".into()))?,
+        );
+        Ok((
+            value.to_vec(),
+            Self {
+                watermark,
+                cached_at_us,
+            },
+        ))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -111,28 +151,8 @@ impl ProjectionCache for RedbCache {
         match table.get(key) {
             Ok(Some(guard)) => {
                 let bytes = guard.value().to_vec();
-                // Last 16 bytes = CacheMeta (watermark u64 LE + cached_at_us i64 LE)
-                if bytes.len() < 16 {
-                    return Ok(None);
-                }
-                let (value, meta_bytes) = bytes.split_at(bytes.len() - 16);
-                let watermark = u64::from_le_bytes(
-                    meta_bytes[..8]
-                        .try_into()
-                        .map_err(|_| StoreError::CacheFailed("corrupt cache metadata".into()))?,
-                );
-                let cached_at_us = i64::from_le_bytes(
-                    meta_bytes[8..16]
-                        .try_into()
-                        .map_err(|_| StoreError::CacheFailed("corrupt cache metadata".into()))?,
-                );
-                Ok(Some((
-                    value.to_vec(),
-                    CacheMeta {
-                        watermark,
-                        cached_at_us,
-                    },
-                )))
+                let (value, meta) = CacheMeta::decode_from_bytes(&bytes)?;
+                Ok(Some((value, meta)))
             }
             Ok(None) => Ok(None),
             Err(e) => Err(StoreError::CacheFailed(e.to_string())),
@@ -140,12 +160,7 @@ impl ProjectionCache for RedbCache {
     }
 
     fn put(&self, key: &[u8], value: &[u8], meta: CacheMeta) -> Result<(), StoreError> {
-        // Append CacheMeta as last 16 bytes of value
-        let mut buf = Vec::with_capacity(value.len() + 16);
-        buf.extend_from_slice(value);
-        buf.extend_from_slice(&meta.watermark.to_le_bytes());
-        buf.extend_from_slice(&meta.cached_at_us.to_le_bytes());
-
+        let buf = meta.encode_with_value(value);
         let txn = self
             .db
             .begin_write()
@@ -264,36 +279,16 @@ impl ProjectionCache for LmdbCache {
             .get(&txn, key)
             .map_err(|e| StoreError::CacheFailed(e.to_string()))?
         {
-            Some(bytes) if bytes.len() >= 16 => {
-                let (value, meta_bytes) = bytes.split_at(bytes.len() - 16);
-                let watermark = u64::from_le_bytes(
-                    meta_bytes[..8]
-                        .try_into()
-                        .map_err(|_| StoreError::CacheFailed("corrupt cache metadata".into()))?,
-                );
-                let cached_at_us = i64::from_le_bytes(
-                    meta_bytes[8..16]
-                        .try_into()
-                        .map_err(|_| StoreError::CacheFailed("corrupt cache metadata".into()))?,
-                );
-                Ok(Some((
-                    value.to_vec(),
-                    CacheMeta {
-                        watermark,
-                        cached_at_us,
-                    },
-                )))
+            Some(bytes) if bytes.len() >= CACHE_META_SIZE => {
+                let (value, meta) = CacheMeta::decode_from_bytes(bytes)?;
+                Ok(Some((value, meta)))
             }
             _ => Ok(None),
         }
     }
 
     fn put(&self, key: &[u8], value: &[u8], meta: CacheMeta) -> Result<(), StoreError> {
-        let mut buf = Vec::with_capacity(value.len() + 16);
-        buf.extend_from_slice(value);
-        buf.extend_from_slice(&meta.watermark.to_le_bytes());
-        buf.extend_from_slice(&meta.cached_at_us.to_le_bytes());
-
+        let buf = meta.encode_with_value(value);
         let mut txn = self
             .env
             .write_txn()
@@ -367,6 +362,14 @@ fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[cfg(feature = "lmdb")]
+/// Open an LMDB environment at `path` with the given `map_size`.
+///
+/// # Safety contract
+///
+/// LMDB requires that only one environment is open per directory within a process.
+/// `LmdbCache` upholds this by owning the `heed::Env` and requiring callers to
+/// provide a unique path per cache instance. Opening two `LmdbCache` instances
+/// against the same directory is undefined behavior at the LMDB level.
 fn open_lmdb_env(path: &std::path::Path, map_size: usize) -> Result<heed::Env, StoreError> {
     // SAFETY: LmdbCache owns the environment and opens exactly one LMDB environment
     // per on-disk cache path within the current process. Callers do not share the

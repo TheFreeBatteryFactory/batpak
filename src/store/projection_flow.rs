@@ -35,22 +35,31 @@ where
         }
     }
 
-    if let Ok(Some((bytes, meta))) = store.cache.get(cache_key) {
-        let is_fresh = match freshness {
-            Freshness::Consistent => meta.watermark == watermark,
-            Freshness::BestEffort { max_stale_ms } => {
-                let age_us = store
-                    .config
-                    .now_us()
-                    .saturating_sub(meta.cached_at_us)
-                    .max(0);
-                age_us < (*max_stale_ms as i64) * 1000
+    match store.cache.get(cache_key) {
+        Ok(Some((bytes, meta))) => {
+            let is_fresh = match freshness {
+                Freshness::Consistent => meta.watermark == watermark,
+                Freshness::BestEffort { max_stale_ms } => {
+                    let age_us = store
+                        .config
+                        .now_us()
+                        .saturating_sub(meta.cached_at_us)
+                        .max(0);
+                    age_us < (*max_stale_ms as i64) * 1000
+                }
+            };
+            if is_fresh {
+                match serde_json::from_slice::<T>(&bytes) {
+                    Ok(value) => return Ok(Some(value)),
+                    Err(e) => {
+                        tracing::warn!("cache deserialize failed (falling back to replay): {e}");
+                    }
+                }
             }
-        };
-        if is_fresh {
-            if let Ok(value) = serde_json::from_slice::<T>(&bytes) {
-                return Ok(Some(value));
-            }
+        }
+        Ok(None) => { /* cache miss — expected, fall through to replay */ }
+        Err(e) => {
+            tracing::warn!("cache get failed (falling back to replay): {e}");
         }
     }
 

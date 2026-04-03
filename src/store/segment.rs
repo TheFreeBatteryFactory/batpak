@@ -2,7 +2,7 @@ use crate::event::Event;
 use crate::store::StoreError;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom, Write};
-// NOTE: No `use crate::wire::*` needed. serde(with) resolves via string path.
+// serde(with) resolves via string path — no explicit wire import needed.
 
 /// Segment file format: magic(4) + header_len(4 BE) + header(msgpack) + frames
 /// Frame: \[len:u32 BE\]\[crc32:u32 BE\]\[msgpack\]
@@ -144,13 +144,7 @@ impl Segment<Active> {
     /// Create new active segment.
     pub fn create(dir: &std::path::Path, segment_id: u64) -> Result<Self, StoreError> {
         let path = dir.join(segment_filename(segment_id));
-        // Use OpenOptions (NOT File::create_new — requires Rust 1.77, MSRV is 1.75)
-        // [SPEC:IMPLEMENTATION NOTES item 7 — MSRV workarounds]
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(StoreError::Io)?;
+        let mut file = std::fs::File::create_new(&path).map_err(StoreError::Io)?;
 
         let header = SegmentHeader {
             version: 1,
@@ -200,10 +194,7 @@ impl Segment<Active> {
         let mut magic = [0u8; 4];
         source.read_exact(&mut magic).map_err(StoreError::Io)?;
         if &magic != SEGMENT_MAGIC {
-            return Err(StoreError::CorruptSegment {
-                segment_id: 0,
-                detail: "bad magic".into(),
-            });
+            return Err(StoreError::corrupt_magic(0));
         }
 
         let mut header_len_buf = [0u8; 4];

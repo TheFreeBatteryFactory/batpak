@@ -31,7 +31,7 @@ pub(crate) struct StoreIndex {
 /// ClockKey: BTreeMap key. Ord: wall_ms-first, then clock, then uuid tiebreak.
 /// wall_ms enables global causal ordering across entities (HLC layer 1).
 /// [SPEC:IMPLEMENTATION NOTES item 1]
-/// [CROSS-POLLINATION:czap/hlc.ts — HLC 3-tier comparison]
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClockKey {
     /// HLC wall clock milliseconds — global ordering across entities.

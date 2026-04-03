@@ -48,7 +48,6 @@ impl Subscription {
     }
 
     /// Create a composable ops wrapper for chainable filter/map/take.
-    /// [CROSS-POLLINATION:czap/wire.ts — fluent stream composition]
     pub fn ops(self) -> SubscriptionOps {
         SubscriptionOps {
             sub: self,
@@ -62,7 +61,6 @@ impl Subscription {
 
 /// SubscriptionOps: composable stream wrapper over Subscription.
 /// Chains filter/take operations. No tokio, no async — just closures in recv loop.
-/// [CROSS-POLLINATION:czap/wire.ts — Wire<T,E> fluent operators]
 type NotifFilter = Box<dyn Fn(&Notification) -> bool + Send>;
 type NotifMapper = Box<dyn Fn(&Notification) -> Option<Notification> + Send>;
 
