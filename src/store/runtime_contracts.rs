@@ -61,7 +61,7 @@ fn checked_payload_len_returns_exact_serialized_length() {
         checked_payload_len(&[1, 2, 3, 4]).expect("payload len"),
         4,
         "PROPERTY: checked_payload_len must preserve the exact payload byte length.\n\
-         Investigate: src/store/mod.rs checked_payload_len.\n\
+         Investigate: src/store/contracts.rs checked_payload_len.\n\
          Common causes: helper replaced with a constant, off-by-one, or truncated length conversion."
     );
 }
@@ -79,7 +79,7 @@ fn now_us_moves_forward_over_real_time() {
     assert!(
         second > first,
         "PROPERTY: now_us must advance as wall-clock time moves forward.\n\
-         Investigate: src/store/mod.rs now_us.\n\
+         Investigate: src/store/config.rs now_us.\n\
          Common causes: helper replaced with a constant or non-monotonic sentinel."
     );
 }

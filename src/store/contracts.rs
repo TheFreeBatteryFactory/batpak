@@ -13,7 +13,7 @@ pub struct AppendReceipt {
 }
 
 /// AppendOptions: CAS, idempotency, custom correlation/causation.
-/// [SPEC:src/store/mod.rs — AppendOptions]
+/// [SPEC:src/store/contracts.rs — AppendOptions]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AppendOptions {
     /// Expected entity sequence for compare-and-swap; `None` skips the CAS check.

@@ -1,3 +1,4 @@
+// Intentional impossible-feature guard: exponential backoff belongs in the product supervisor, not the library.
 // exponential-backoff is not a declared feature — suppress cfg warning for this guard
 #[allow(unexpected_cfgs)]
 #[cfg(feature = "exponential-backoff")]
@@ -125,7 +126,7 @@ impl SubscriberList {
 
 impl WriterHandle {
     /// Spawn the background writer thread.
-    /// [SPEC:src/store/writer.rs — "batpak-writer" thread]
+    /// [SPEC:src/store/writer.rs — "batpak-writer-{hash}" thread]
     pub(crate) fn spawn(
         config: &Arc<StoreConfig>,
         index: &Arc<StoreIndex>,

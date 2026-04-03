@@ -255,8 +255,6 @@ impl StoreIndex {
 
         // Entity prefix filter: not needed here. When scope is the primary selector
         // and entity_prefix is Some, it's applied during initial candidate selection.
-        // (Dead logic removed — the old guard `scope.is_some() && entity_prefix.is_none()`
-        // made the inner `if let Some(prefix) = entity_prefix` unreachable.)
 
         // Fact filter (if not already applied)
         if region.entity_prefix.is_some() || region.scope.is_some() {

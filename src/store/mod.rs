@@ -57,6 +57,7 @@ use writer::{AppendGuards, SubscriberList, WriterCommand, WriterHandle};
 /// Store: the runtime. Sync API. Send + Sync.
 /// [SPEC:src/store/mod.rs]
 /// Invariant 2: ALL METHODS ARE SYNC. No .await anywhere.
+// Intentional impossible-feature guard: Store API is sync by design (Invariant 2).
 // async-store is not a declared feature — suppress cfg warning for this guard
 #[allow(unexpected_cfgs)]
 #[cfg(feature = "async-store")]
@@ -240,7 +241,7 @@ impl Store {
     }
 
     /// PROJECT: reconstruct typed state from events, with cache support.
-    /// [SPEC:src/store/mod.rs — Projection Flow]
+    /// [SPEC:src/store/projection_flow.rs — Projection Flow]
     ///
     /// # Errors
     /// Returns `StoreError::Serialization` if deserializing events or the cached state fails.
