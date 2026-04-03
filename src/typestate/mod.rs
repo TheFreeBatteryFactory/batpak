@@ -1,3 +1,4 @@
+/// Typestate transition helper: `Transition<From, To, P>` enforces valid state progressions at compile time.
 pub mod transition;
 
 pub use transition::Transition;

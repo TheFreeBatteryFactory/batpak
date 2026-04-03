@@ -15,12 +15,16 @@ pub struct DagPosition {
     pub wall_ms: u64,
     /// HLC counter for same-millisecond tiebreaking. Incremented when wall_ms hasn't advanced.
     pub counter: u16,
+    /// DAG depth level; always 0 in v1, reserved for future branching.
     pub depth: u32,
+    /// Parallel branch index; always 0 in v1, reserved for future fan-out.
     pub lane: u32,
+    /// Per-entity monotonic event counter within this lane and depth.
     pub sequence: u32,
 }
 
 impl DagPosition {
+    /// Creates a new position with the given depth, lane, and sequence; wall clock fields zeroed.
     pub const fn new(depth: u32, lane: u32, sequence: u32) -> Self {
         Self {
             wall_ms: 0,
@@ -48,6 +52,7 @@ impl DagPosition {
         }
     }
 
+    /// Returns the genesis position: depth 0, lane 0, sequence 0.
     pub const fn root() -> Self {
         Self {
             wall_ms: 0,
@@ -91,6 +96,7 @@ impl DagPosition {
         }
     }
 
+    /// Returns `true` if this is the root position (depth 0, lane 0, sequence 0).
     pub const fn is_root(&self) -> bool {
         self.depth == 0 && self.lane == 0 && self.sequence == 0
     }

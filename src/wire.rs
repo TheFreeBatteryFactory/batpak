@@ -18,12 +18,20 @@ pub mod u128_bytes {
     ///   CompensationAction::Notify.target_id, Outcome::Pending.resume_token
     use super::*;
 
+    /// Serialize a `u128` as 16 big-endian bytes into the given serializer.
+    ///
+    /// # Errors
+    /// Returns `S::Error` if the underlying serializer fails to write the byte array.
     pub fn serialize<S: Serializer>(val: &u128, ser: S) -> Result<S::Ok, S::Error> {
         // Convert to 16-byte big-endian array, serialize as bytes.
         // [DEP:serde::Serializer::serialize_bytes]
         ser.serialize_bytes(&val.to_be_bytes())
     }
 
+    /// Deserialize a `u128` from 16 big-endian bytes produced by the paired `serialize`.
+    ///
+    /// # Errors
+    /// Returns `D::Error` if the input is not exactly 16 bytes or the deserializer fails.
     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<u128, D::Error> {
         // Accept bytes, convert from big-endian to u128.
         // Use a Visitor that handles both byte arrays and sequences.
@@ -56,11 +64,16 @@ pub mod u128_bytes {
     }
 }
 
+/// Serde helpers for `Option<u128>` serialization as optional 16-byte big-endian arrays.
 pub mod option_u128_bytes {
     /// Usage: #[serde(with = "crate::wire::option_u128_bytes")]
     /// Annotated on: EventHeader.causation_id, Notification.causation_id
     use super::*;
 
+    /// Serialize an `Option<u128>` as `None` or 16 big-endian bytes.
+    ///
+    /// # Errors
+    /// Returns `S::Error` if the underlying serializer fails.
     pub fn serialize<S: Serializer>(val: &Option<u128>, ser: S) -> Result<S::Ok, S::Error> {
         match val {
             Some(v) => ser.serialize_bytes(&v.to_be_bytes()),
@@ -68,6 +81,10 @@ pub mod option_u128_bytes {
         }
     }
 
+    /// Deserialize an `Option<u128>` from `None` or 16 big-endian bytes.
+    ///
+    /// # Errors
+    /// Returns `D::Error` if the input is present but not exactly 16 bytes, or the deserializer fails.
     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Option<u128>, D::Error> {
         // Visitor that handles None (nil) and Some(bytes).
         struct OptU128Visitor;
@@ -93,12 +110,17 @@ pub mod option_u128_bytes {
     }
 }
 
+/// Serde helpers for `Vec<u128>` serialization as sequences of 16-byte big-endian arrays.
 pub mod vec_u128_bytes {
     /// Usage: #[serde(with = "crate::wire::vec_u128_bytes")]
     /// Annotated on: CompensationAction::Rollback.event_ids,
     ///   CompensationAction::Release.resource_ids
     use super::*;
 
+    /// Serialize a `Vec<u128>` as a sequence of 16-byte big-endian arrays.
+    ///
+    /// # Errors
+    /// Returns `S::Error` if the underlying serializer fails to write the sequence.
     pub fn serialize<S: Serializer>(val: &[u128], ser: S) -> Result<S::Ok, S::Error> {
         // Serialize as a sequence of [u8; 16] fixed-size arrays (NOT bytes).
         // Using arrays ensures serialize and deserialize use the same msgpack
@@ -111,6 +133,10 @@ pub mod vec_u128_bytes {
         seq.end()
     }
 
+    /// Deserialize a `Vec<u128>` from a sequence of 16-byte big-endian arrays.
+    ///
+    /// # Errors
+    /// Returns `D::Error` if any element is not a valid 16-byte array or the deserializer fails.
     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<u128>, D::Error> {
         // Deserialize a sequence of [u8; 16] arrays back to Vec<u128>.
         struct VecU128Visitor;

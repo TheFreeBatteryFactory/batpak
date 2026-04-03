@@ -5,27 +5,45 @@ use crate::coordinate::CoordinateError;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum StoreError {
+    /// A filesystem or OS-level I/O failure.
     Io(std::io::Error),
+    /// An invalid or malformed coordinate (entity/scope).
     Coordinate(CoordinateError),
-    Serialization(String),
+    /// MessagePack serialization or deserialization failed.
+    Serialization(Box<dyn std::error::Error + Send + Sync>),
+    /// CRC32 checksum did not match the frame data.
     CrcMismatch {
+        /// Segment file where the mismatch occurred.
         segment_id: u64,
+        /// Byte offset of the corrupt frame within the segment.
         offset: u64,
     },
+    /// Segment file has unrecoverable structural corruption.
     CorruptSegment {
+        /// Segment file that is corrupt.
         segment_id: u64,
+        /// Human-readable description of the corruption.
         detail: String,
     },
+    /// No event with the given ID exists in the index.
     NotFound(u128),
+    /// CAS check failed: the entity's current sequence did not match the expected value.
     SequenceMismatch {
+        /// Entity whose sequence was checked.
         entity: String,
+        /// Sequence value provided by the caller.
         expected: u32,
+        /// Actual current sequence of the entity.
         actual: u32,
     },
+    /// An append was rejected because its idempotency key already exists.
     DuplicateEvent(u128),
+    /// The writer thread has crashed and is no longer processing commands.
     WriterCrashed,
+    /// The store is shutting down and cannot accept new commands.
     ShuttingDown,
-    CacheFailed(String),
+    /// A projection cache operation failed.
+    CacheFailed(Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl std::fmt::Display for StoreError {
@@ -33,7 +51,7 @@ impl std::fmt::Display for StoreError {
         match self {
             Self::Io(e) => write!(f, "IO error: {e}"),
             Self::Coordinate(e) => write!(f, "coordinate error: {e}"),
-            Self::Serialization(s) => write!(f, "serialization error: {s}"),
+            Self::Serialization(e) => write!(f, "serialization error: {e}"),
             Self::CrcMismatch { segment_id, offset } => {
                 write!(f, "CRC mismatch in segment {segment_id} at offset {offset}")
             }
@@ -52,7 +70,7 @@ impl std::fmt::Display for StoreError {
             Self::DuplicateEvent(key) => write!(f, "duplicate idempotency key {key:032x}"),
             Self::WriterCrashed => write!(f, "writer thread crashed"),
             Self::ShuttingDown => write!(f, "store is shutting down"),
-            Self::CacheFailed(s) => write!(f, "cache error: {s}"),
+            Self::CacheFailed(e) => write!(f, "cache error: {e}"),
         }
     }
 }
@@ -62,15 +80,15 @@ impl std::error::Error for StoreError {
         match self {
             Self::Io(e) => Some(e),
             Self::Coordinate(e) => Some(e),
-            Self::Serialization(_)
-            | Self::CrcMismatch { .. }
+            Self::Serialization(e) => Some(e.as_ref()),
+            Self::CacheFailed(e) => Some(e.as_ref()),
+            Self::CrcMismatch { .. }
             | Self::CorruptSegment { .. }
             | Self::NotFound(_)
             | Self::SequenceMismatch { .. }
             | Self::DuplicateEvent(_)
             | Self::WriterCrashed
-            | Self::ShuttingDown
-            | Self::CacheFailed(_) => None,
+            | Self::ShuttingDown => None,
         }
     }
 }
@@ -98,6 +116,16 @@ impl StoreError {
             segment_id,
             detail: format!("unsupported segment version: {version}"),
         }
+    }
+
+    /// Cache operation failed with a message (no underlying typed error).
+    pub(crate) fn cache_msg(msg: &str) -> Self {
+        Self::CacheFailed(msg.into())
+    }
+
+    /// Serialization failed with a message (no underlying typed error).
+    pub(crate) fn ser_msg(msg: &str) -> Self {
+        Self::Serialization(msg.into())
     }
 
     /// Frame deserialization failed.

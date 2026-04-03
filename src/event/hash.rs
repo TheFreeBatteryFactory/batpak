@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 /// [SPEC:src/event/hash.rs — NO TRAIT. NO ENUM.]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HashChain {
+    /// Blake3 hash of the immediately preceding event; all-zeros signals genesis.
     pub prev_hash: [u8; 32],
+    /// Blake3 hash of this event's serialized content bytes.
     pub event_hash: [u8; 32],
 }
 

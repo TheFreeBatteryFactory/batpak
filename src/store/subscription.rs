@@ -64,6 +64,7 @@ impl Subscription {
 type NotifFilter = Box<dyn Fn(&Notification) -> bool + Send>;
 type NotifMapper = Box<dyn Fn(&Notification) -> Option<Notification> + Send>;
 
+/// Composable wrapper around a `Subscription` supporting chainable filter, map, and take operations.
 pub struct SubscriptionOps {
     sub: Subscription,
     filters: Vec<NotifFilter>,

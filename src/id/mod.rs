@@ -8,10 +8,15 @@ use std::str::FromStr;
 pub trait EntityIdType:
     Copy + Clone + Eq + Hash + fmt::Debug + fmt::Display + FromStr + Send + Sync + 'static
 {
+    /// The canonical string name of this entity type (e.g. `"event"`).
     const ENTITY_NAME: &'static str;
+    /// Construct an instance from a raw `u128` identifier.
     fn new(id: u128) -> Self;
+    /// Return the underlying `u128` value.
     fn as_u128(&self) -> u128;
+    /// Generate a new UUIDv7-based instance using the current time.
     fn now_v7() -> Self;
+    /// Return the nil (zero) instance.
     fn nil() -> Self;
 }
 
@@ -28,6 +33,7 @@ pub fn generate_v7_id() -> u128 {
 #[macro_export]
 macro_rules! define_entity_id {
     ($name:ident, $entity:literal) => {
+        #[doc = concat!("Typed entity ID for `", $entity, "` entities. Wraps a `u128` UUIDv7.")]
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         pub struct $name(u128);
 

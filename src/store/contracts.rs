@@ -4,8 +4,11 @@ use crate::store::{DiskPos, StoreError};
 /// AppendReceipt: proof an event was persisted.
 #[derive(Clone, Debug)]
 pub struct AppendReceipt {
+    /// Unique ID of the persisted event.
     pub event_id: u128,
+    /// Global sequence number assigned at commit time.
     pub sequence: u64,
+    /// Location of the event frame on disk.
     pub disk_pos: DiskPos,
 }
 
@@ -13,9 +16,13 @@ pub struct AppendReceipt {
 /// [SPEC:src/store/mod.rs — AppendOptions]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AppendOptions {
+    /// Expected entity sequence for compare-and-swap; `None` skips the CAS check.
     pub expected_sequence: Option<u32>,
+    /// Idempotency key; duplicate appends with the same key return the original receipt.
     pub idempotency_key: Option<u128>,
+    /// Custom correlation ID; defaults to the generated event ID if `None`.
     pub correlation_id: Option<u128>,
+    /// ID of the event that caused this append; `None` for root-cause events.
     pub causation_id: Option<u128>,
     /// EventHeader flags (FLAG_REQUIRES_ACK, FLAG_TRANSACTIONAL, FLAG_REPLAY).
     /// Default: 0 (no flags). [SPEC:src/event/header.rs — Flag bit constants]
@@ -97,10 +104,6 @@ impl Default for CompactionConfig {
 /// when serialized payloads exceed 4GB (unlikely but possible with
 /// pathological inputs or corrupted serialization).
 pub(crate) fn checked_payload_len(payload_bytes: &[u8]) -> Result<u32, StoreError> {
-    u32::try_from(payload_bytes.len()).map_err(|_| {
-        StoreError::Serialization(format!(
-            "payload size {} exceeds u32::MAX (4GB limit)",
-            payload_bytes.len()
-        ))
-    })
+    u32::try_from(payload_bytes.len())
+        .map_err(|_| StoreError::ser_msg("payload size exceeds u32::MAX (4GB limit)"))
 }

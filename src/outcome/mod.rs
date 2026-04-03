@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 // NOTE: No `use crate::wire::*` needed. serde(with = "crate::wire::...") resolves via string path.
 
+/// Combinators for merging multiple outcomes (join_all, join_any, zip).
 pub mod combine;
+/// Structured error types used in `Outcome::Err`.
 pub mod error;
+/// Wait condition and compensation action types for `Outcome::Pending` and errors.
 pub mod wait;
 
 pub use combine::{join_all, join_any, zip};
@@ -17,22 +20,35 @@ pub use wait::{CompensationAction, WaitCondition};
 #[serde(tag = "type", content = "data")]
 #[non_exhaustive]
 pub enum Outcome<T> {
+    /// The operation succeeded and produced a value.
     Ok(T),
+    /// The operation failed with a structured error.
     Err(OutcomeError),
+    /// The operation should be retried after a delay.
     Retry {
+        /// Milliseconds to wait before retrying.
         after_ms: u64,
+        /// Current attempt number (1-based).
         attempt: u32,
+        /// Maximum number of attempts before giving up.
         max_attempts: u32,
+        /// Human-readable reason for the retry.
         reason: String,
     },
+    /// The operation is waiting on an external condition to resume.
     Pending {
+        /// The condition that must be satisfied before resuming.
         condition: WaitCondition,
+        /// Opaque token used to correlate the resume event with this pending outcome.
         #[serde(with = "crate::wire::u128_bytes")]
         resume_token: u128,
     },
+    /// The operation was explicitly cancelled.
     Cancelled {
+        /// Human-readable reason for the cancellation.
         reason: String,
     },
+    /// A collection of outcomes to be processed together.
     Batch(Vec<Outcome<T>>),
 }
 
@@ -41,17 +57,21 @@ pub enum Outcome<T> {
 #[allow(clippy::wildcard_enum_match_arm)]
 impl<T> Outcome<T> {
     // --- Construction ---
+    /// Creates a successful outcome wrapping the given value.
     pub fn ok(val: T) -> Self {
         Self::Ok(val)
     }
+    /// Creates a failed outcome wrapping the given error.
     pub fn err(e: OutcomeError) -> Self {
         Self::Err(e)
     }
+    /// Creates a cancelled outcome with the given reason.
     pub fn cancelled(reason: impl Into<String>) -> Self {
         Self::Cancelled {
             reason: reason.into(),
         }
     }
+    /// Creates a retry outcome with delay, attempt counters, and a reason.
     pub fn retry(
         after_ms: u64,
         attempt: u32,
@@ -65,6 +85,7 @@ impl<T> Outcome<T> {
             reason: reason.into(),
         }
     }
+    /// Creates a pending outcome that waits on the given condition and resume token.
     pub fn pending(condition: WaitCondition, resume_token: u128) -> Self {
         Self::Pending {
             condition,
@@ -73,24 +94,31 @@ impl<T> Outcome<T> {
     }
 
     // --- Predicates ---
+    /// Returns true if this outcome is `Ok`.
     pub fn is_ok(&self) -> bool {
         matches!(self, Self::Ok(_))
     }
+    /// Returns true if this outcome is `Err`.
     pub fn is_err(&self) -> bool {
         matches!(self, Self::Err(_))
     }
+    /// Returns true if this outcome is `Retry`.
     pub fn is_retry(&self) -> bool {
         matches!(self, Self::Retry { .. })
     }
+    /// Returns true if this outcome is `Pending`.
     pub fn is_pending(&self) -> bool {
         matches!(self, Self::Pending { .. })
     }
+    /// Returns true if this outcome is `Cancelled`.
     pub fn is_cancelled(&self) -> bool {
         matches!(self, Self::Cancelled { .. })
     }
+    /// Returns true if this outcome is `Batch`.
     pub fn is_batch(&self) -> bool {
         matches!(self, Self::Batch(_))
     }
+    /// Returns true if this outcome is terminal (`Ok`, `Err`, or `Cancelled`).
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Ok(_) | Self::Err(_) | Self::Cancelled { .. })
     }
@@ -169,6 +197,7 @@ impl<T> Outcome<T> {
         }
     }
 
+    /// Transforms the `Err` value using `f`, leaving all other variants unchanged.
     pub fn map_err<F: FnOnce(OutcomeError) -> OutcomeError + Clone>(self, f: F) -> Self {
         match self {
             Self::Err(e) => Self::Err(f(e)),
@@ -179,6 +208,7 @@ impl<T> Outcome<T> {
         }
     }
 
+    /// Applies `f` to recover from an `Err`, leaving all other variants unchanged.
     pub fn or_else<F: FnOnce(OutcomeError) -> Outcome<T> + Clone>(self, f: F) -> Outcome<T> {
         match self {
             Self::Err(e) => f(e),
@@ -189,6 +219,7 @@ impl<T> Outcome<T> {
         }
     }
 
+    /// Calls `f` with a reference to the `Ok` value for side effects, then returns self unchanged.
     pub fn inspect<F: FnOnce(&T) + Clone>(self, f: F) -> Self {
         match self {
             Self::Ok(v) => {
@@ -202,6 +233,7 @@ impl<T> Outcome<T> {
         }
     }
 
+    /// Calls `f` with a reference to the `Err` value for side effects, then returns self unchanged.
     pub fn inspect_err<F: FnOnce(&OutcomeError) + Clone>(self, f: F) -> Self {
         match self {
             Self::Err(e) => {
@@ -218,6 +250,7 @@ impl<T> Outcome<T> {
         }
     }
 
+    /// Applies `f` only when this is `Ok` and `pred` returns true; otherwise returns self unchanged.
     pub fn and_then_if<F: Fn(&T) -> bool, G: FnOnce(T) -> Outcome<T> + Clone>(
         self,
         pred: F,
@@ -250,6 +283,10 @@ impl<T> Outcome<T> {
         }
     }
 
+    /// Converts this outcome into a `Result`, mapping non-terminal variants to `Err`.
+    ///
+    /// # Errors
+    /// Returns `OutcomeError` if this outcome is `Err`, `Cancelled`, or any non-terminal variant.
     pub fn into_result(self) -> Result<T, OutcomeError> {
         match self {
             Self::Ok(v) => Ok(v),
@@ -269,6 +306,7 @@ impl<T> Outcome<T> {
         }
     }
 
+    /// Returns the `Ok` value or `default` if this outcome is not `Ok`.
     pub fn unwrap_or(self, default: T) -> T {
         match self {
             Self::Ok(v) => v,
@@ -276,6 +314,7 @@ impl<T> Outcome<T> {
         }
     }
 
+    /// Returns the `Ok` value or computes a default from `f` if this outcome is not `Ok`.
     pub fn unwrap_or_else<F: FnOnce() -> T>(self, f: F) -> T {
         match self {
             Self::Ok(v) => v,
@@ -290,6 +329,7 @@ impl<T> Outcome<T> {
 /// Composes with and_then (the monad bind, proptest-proven).
 #[allow(clippy::wildcard_enum_match_arm)]
 impl<T> Outcome<Outcome<T>> {
+    /// Unwraps one layer of nesting, equivalent to `and_then(|inner| inner)`.
     pub fn flatten(self) -> Outcome<T> {
         self.and_then(|inner| inner)
     }

@@ -5,8 +5,11 @@ use crate::event::{Event, EventKind};
 /// P is generic — NO serde_json dependency in the trait.
 /// Store uses EventSourced<serde_json::Value>. [SPEC:src/event/sourcing.rs]
 pub trait EventSourced<P>: Sized {
+    /// Reconstructs state by folding over a slice of events; returns `None` if the slice is empty or invalid.
     fn from_events(events: &[Event<P>]) -> Option<Self>;
+    /// Advances state by incorporating a single event.
     fn apply_event(&mut self, event: &Event<P>);
+    /// Returns the event kinds this type cares about, used to filter store queries.
     fn relevant_event_kinds() -> &'static [EventKind];
 }
 
@@ -37,5 +40,6 @@ pub trait EventSourced<P>: Sized {
 /// For convenience, use [`Store::react_loop`](crate::store::Store::react_loop) which
 /// spawns a thread running this pattern automatically.
 pub trait Reactive<P> {
+    /// Inspects an incoming event and returns zero or more derived events to append.
     fn react(&self, event: &Event<P>) -> Vec<(Coordinate, EventKind, P)>;
 }

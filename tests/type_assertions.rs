@@ -42,3 +42,63 @@ fn receipt_is_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<batpak::guard::Receipt<()>>();
 }
+
+#[test]
+fn store_error_source_chain_io() {
+    use std::error::Error;
+    let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+    let store_err = batpak::store::StoreError::Io(io_err);
+    let source = store_err.source().expect("Io variant should have a source");
+    assert!(source.to_string().contains("gone"));
+}
+
+#[test]
+fn store_error_source_chain_serialization() {
+    use std::error::Error;
+    let inner: Box<dyn std::error::Error + Send + Sync> = "bad msgpack".into();
+    let store_err = batpak::store::StoreError::Serialization(inner);
+    let source = store_err
+        .source()
+        .expect("Serialization variant should have a source");
+    assert!(source.to_string().contains("bad msgpack"));
+}
+
+#[test]
+fn store_error_source_chain_cache_failed() {
+    use std::error::Error;
+    let inner: Box<dyn std::error::Error + Send + Sync> = "redb broke".into();
+    let store_err = batpak::store::StoreError::CacheFailed(inner);
+    let source = store_err
+        .source()
+        .expect("CacheFailed variant should have a source");
+    assert!(source.to_string().contains("redb broke"));
+}
+
+#[test]
+fn store_error_source_none_for_writer_crashed() {
+    use std::error::Error;
+    let store_err = batpak::store::StoreError::WriterCrashed;
+    assert!(store_err.source().is_none());
+}
+
+#[test]
+fn frame_encode_decode_roundtrip() {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Payload {
+        x: u32,
+        y: String,
+    }
+
+    let original = Payload {
+        x: 999,
+        y: "roundtrip".into(),
+    };
+    let frame = batpak::store::segment::frame_encode(&original).expect("encode should succeed");
+    let (msgpack, consumed) =
+        batpak::store::segment::frame_decode(&frame).expect("decode should succeed");
+    assert_eq!(consumed, frame.len());
+    let decoded: Payload = rmp_serde::from_slice(msgpack).expect("deserialize should succeed");
+    assert_eq!(decoded, original);
+}

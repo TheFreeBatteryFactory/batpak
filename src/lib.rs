@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 #![allow(unexpected_cfgs)]
 // cast_possible_truncation and cast_sign_loss are enforced via [lints.clippy] in Cargo.toml.
 // Each intentional cast has an inline #[allow] with a justification comment.
@@ -42,18 +43,28 @@
 //! 4. [`pipeline`]: Propose and commit
 //! 5. [`store`]: Persist and query
 
+/// Entity and scope addressing for events.
 pub mod coordinate;
+/// Event types, headers, and sourcing traits.
 pub mod event;
+/// Policy gate evaluation before event commitment.
 pub mod guard;
+/// UUID v7 identifier generation.
 pub mod id;
+/// Result-like type for pipeline operations.
 pub mod outcome;
+/// Propose-evaluate-commit workflow.
 pub mod pipeline;
+/// Common re-exports for convenient use.
 pub mod prelude;
+/// Persistent event storage and querying.
 pub mod store;
+/// Compile-time state machine transitions.
 pub mod typestate;
 /// Module declarations in DEPENDENCY ORDER:
 /// wire → coordinate → outcome → event → guard → pipeline → store → typestate → id → prelude
 /// [SPEC:src/lib.rs — Module declarations in DEPENDENCY ORDER]
+/// Serde serialization helpers.
 pub mod wire; // serde helpers — no deps, must come first
 
 /// compile_error guards for impossible configurations:

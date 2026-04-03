@@ -63,11 +63,17 @@ pub(crate) struct SubscriberList {
 /// [SPEC:src/store/writer.rs — Notification struct]
 #[derive(Clone, Debug)]
 pub struct Notification {
+    /// Unique ID of the event that was appended.
     pub event_id: u128,
+    /// Correlation ID linking this event to a causal chain.
     pub correlation_id: u128,
+    /// ID of the event that caused this one; `None` for root-cause events.
     pub causation_id: Option<u128>,
+    /// Entity and scope coordinates for the event.
     pub coord: Coordinate,
+    /// Event kind (type discriminant).
     pub kind: EventKind,
+    /// Global sequence number assigned to this event at commit time.
     pub sequence: u64,
 }
 
@@ -77,10 +83,14 @@ pub struct Notification {
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub enum RestartPolicy {
+    /// Allow at most one automatic restart after a writer panic.
     #[default]
     Once,
+    /// Allow up to `max_restarts` automatic restarts within a rolling `within_ms` millisecond window.
     Bounded {
+        /// Maximum number of restarts permitted within the time window.
         max_restarts: u32,
+        /// Time window in milliseconds over which `max_restarts` is enforced.
         within_ms: u64,
     },
 }

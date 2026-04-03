@@ -151,7 +151,7 @@ impl Reader {
             }
         };
         let payload: FramePayload<serde_json::Value> =
-            rmp_serde::from_slice(msgpack).map_err(|e| StoreError::Serialization(e.to_string()))?;
+            rmp_serde::from_slice(msgpack).map_err(|e| StoreError::Serialization(Box::new(e)))?;
 
         // Release buffer back to pool after deserialization
         self.release_buffer(buf);
@@ -187,7 +187,7 @@ impl Reader {
         let mut header_buf = vec![0u8; header_len];
         file.read_exact(&mut header_buf).map_err(StoreError::Io)?;
         let header: segment::SegmentHeader = rmp_serde::from_slice(&header_buf)
-            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+            .map_err(|e| StoreError::Serialization(Box::new(e)))?;
 
         // Version check — reject unknown segment versions
         if header.version != 1 {
@@ -293,7 +293,7 @@ impl Reader {
         let mut header_buf = vec![0u8; header_len];
         file.read_exact(&mut header_buf).map_err(StoreError::Io)?;
         let header: segment::SegmentHeader = rmp_serde::from_slice(&header_buf)
-            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+            .map_err(|e| StoreError::Serialization(Box::new(e)))?;
         if header.version != 1 {
             return Err(StoreError::corrupt_version(segment_id, header.version));
         }
