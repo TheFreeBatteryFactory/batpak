@@ -16,16 +16,24 @@ pub enum SyncMode {
 /// No Default — callers must provide data_dir via `StoreConfig::new(path)`.
 /// Manual Clone and Debug impls because `clock` field is `Arc<dyn Fn>`.
 pub struct StoreConfig {
+    /// Directory where segment files (.fbat) are stored.
     pub data_dir: PathBuf,
+    /// Maximum bytes per segment file before rotation.
     pub segment_max_bytes: u64,
+    /// Number of events between periodic fsyncs.
     pub sync_every_n_events: u32,
+    /// Maximum number of open segment file descriptors.
     pub fd_budget: usize,
+    /// Capacity of the flume channel between callers and the writer thread.
     pub writer_channel_capacity: usize,
+    /// Capacity of each subscriber's broadcast channel.
     pub broadcast_capacity: usize,
+    /// Maximum size in bytes of the LMDB cache map.
     pub cache_map_size_bytes: usize,
     /// Writer auto-restart policy on panic. `Once` allows 1 restart, `Bounded`
     /// allows N restarts within a time window. See: writer.rs writer_thread_main().
     pub restart_policy: RestartPolicy,
+    /// Maximum number of queued append commands drained during shutdown.
     pub shutdown_drain_limit: usize,
     /// Optional writer thread stack size. None = OS default (~8MB on Linux).
     pub writer_stack_size: Option<usize>,
@@ -57,56 +65,67 @@ impl StoreConfig {
         }
     }
 
+    /// Set the maximum segment file size in bytes before rotation.
     pub fn with_segment_max_bytes(mut self, segment_max_bytes: u64) -> Self {
         self.segment_max_bytes = segment_max_bytes;
         self
     }
 
+    /// Set how many events are written between periodic fsyncs.
     pub fn with_sync_every_n_events(mut self, sync_every_n_events: u32) -> Self {
         self.sync_every_n_events = sync_every_n_events;
         self
     }
 
+    /// Set the maximum number of concurrently open segment file descriptors.
     pub fn with_fd_budget(mut self, fd_budget: usize) -> Self {
         self.fd_budget = fd_budget;
         self
     }
 
+    /// Set the capacity of the writer command channel.
     pub fn with_writer_channel_capacity(mut self, writer_channel_capacity: usize) -> Self {
         self.writer_channel_capacity = writer_channel_capacity;
         self
     }
 
+    /// Set the per-subscriber broadcast channel capacity.
     pub fn with_broadcast_capacity(mut self, broadcast_capacity: usize) -> Self {
         self.broadcast_capacity = broadcast_capacity;
         self
     }
 
+    /// Set the LMDB cache map size in bytes.
     pub fn with_cache_map_size_bytes(mut self, cache_map_size_bytes: usize) -> Self {
         self.cache_map_size_bytes = cache_map_size_bytes;
         self
     }
 
+    /// Set the writer thread restart policy on panic.
     pub fn with_restart_policy(mut self, restart_policy: RestartPolicy) -> Self {
         self.restart_policy = restart_policy;
         self
     }
 
+    /// Set how many pending appends the writer drains before shutting down.
     pub fn with_shutdown_drain_limit(mut self, shutdown_drain_limit: usize) -> Self {
         self.shutdown_drain_limit = shutdown_drain_limit;
         self
     }
 
+    /// Set an explicit stack size for the writer thread; `None` uses the OS default.
     pub fn with_writer_stack_size(mut self, writer_stack_size: Option<usize>) -> Self {
         self.writer_stack_size = writer_stack_size;
         self
     }
 
+    /// Override the clock with a custom function returning microseconds since epoch (for testing).
     pub fn with_clock(mut self, clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>) -> Self {
         self.clock = clock;
         self
     }
 
+    /// Set the fsync strategy used after writes.
     pub fn with_sync_mode(mut self, sync_mode: SyncMode) -> Self {
         self.sync_mode = sync_mode;
         self

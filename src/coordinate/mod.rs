@@ -1,3 +1,4 @@
+/// Positional types for locating events within a DAG chain.
 pub mod position;
 pub use position::DagPosition;
 
@@ -15,10 +16,13 @@ pub struct Coordinate {
     scope: Arc<str>,  // WHERE — isolation boundary
 }
 
+/// Errors returned when constructing a [`Coordinate`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CoordinateError {
+    /// The entity string was empty.
     EmptyEntity,
+    /// The scope string was empty.
     EmptyScope,
 }
 
@@ -26,21 +30,34 @@ pub enum CoordinateError {
 /// [SPEC:src/coordinate/mod.rs — Region replaces SubscriptionPattern]
 #[derive(Clone, Debug, Default)]
 pub struct Region {
+    /// Optional entity name prefix; matches any entity whose name starts with this string.
     pub entity_prefix: Option<Arc<str>>,
+    /// Optional exact scope to match.
     pub scope: Option<Arc<str>>,
+    /// Optional event-kind filter applied to matched events.
     pub fact: Option<KindFilter>,
+    /// Optional inclusive per-entity clock range; does not apply to live filtering.
     pub clock_range: Option<(u32, u32)>, // per-entity clock, NOT global_sequence [SPEC:IMPLEMENTATION NOTES item 12]
 }
 
+/// Filter on [`EventKind`] used within a [`Region`] query.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum KindFilter {
+    /// Matches only events with this exact kind.
     Exact(EventKind),
+    /// Matches any event whose kind falls within this 4-bit category.
     Category(u8), // matches any EventKind in this 4-bit category
+    /// Matches events of any kind.
     Any,
 }
 
 impl Coordinate {
+    /// Creates a new `Coordinate` from an entity and scope string.
+    ///
+    /// # Errors
+    /// Returns `CoordinateError::EmptyEntity` if the entity string is empty.
+    /// Returns `CoordinateError::EmptyScope` if the scope string is empty.
     pub fn new(entity: impl AsRef<str>, scope: impl AsRef<str>) -> Result<Self, CoordinateError> {
         let entity = entity.as_ref();
         let scope = scope.as_ref();
@@ -56,9 +73,11 @@ impl Coordinate {
         })
     }
 
+    /// Returns the entity string.
     pub fn entity(&self) -> &str {
         &self.entity
     }
+    /// Returns the scope string.
     pub fn scope(&self) -> &str {
         &self.scope
     }
@@ -89,10 +108,12 @@ impl std::error::Error for CoordinateError {}
 
 /// Region builder — method chaining. [SPEC:src/coordinate/mod.rs — Region builder]
 impl Region {
+    /// Returns a region that matches all events.
     pub fn all() -> Self {
         Self::default()
     }
 
+    /// Returns a region scoped to entities whose names start with `prefix`.
     pub fn entity(prefix: impl AsRef<str>) -> Self {
         Self {
             entity_prefix: Some(Arc::from(prefix.as_ref())),
@@ -100,6 +121,7 @@ impl Region {
         }
     }
 
+    /// Returns a region scoped to a specific scope string.
     pub fn scope(scope: impl AsRef<str>) -> Self {
         Self {
             scope: Some(Arc::from(scope.as_ref())),
@@ -107,6 +129,7 @@ impl Region {
         }
     }
 
+    /// Returns a region that exactly matches the given coordinate's entity and scope.
     pub fn coordinate(coord: &Coordinate) -> Self {
         Self {
             entity_prefix: Some(coord.entity_arc()),
@@ -121,16 +144,19 @@ impl Region {
         self
     }
 
+    /// Filters events by the given kind filter.
     pub fn with_fact(mut self, filter: KindFilter) -> Self {
         self.fact = Some(filter);
         self
     }
 
+    /// Filters events to those whose kind matches the given category.
     pub fn with_fact_category(mut self, cat: u8) -> Self {
         self.fact = Some(KindFilter::Category(cat));
         self
     }
 
+    /// Filters events to those within the given per-entity clock range.
     pub fn with_clock_range(mut self, range: (u32, u32)) -> Self {
         self.clock_range = Some(range);
         self

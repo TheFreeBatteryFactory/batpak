@@ -2,20 +2,26 @@ use crate::event::Event;
 use crate::store::StoreError;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom, Write};
-// NOTE: No `use crate::wire::*` needed. serde(with) resolves via string path.
+// serde(with) resolves via string path — no explicit wire import needed.
 
 /// Segment file format: magic(4) + header_len(4 BE) + header(msgpack) + frames
 /// Frame: \[len:u32 BE\]\[crc32:u32 BE\]\[msgpack\]
 /// Files named: {segment_id:06}.fbat. Sequential u64.
 /// [SPEC:src/store/segment.rs]
 pub const SEGMENT_MAGIC: &[u8; 4] = b"FBAT";
+/// File extension used for all segment files (without the leading dot).
 pub const SEGMENT_EXTENSION: &str = "fbat";
 
+/// Segment file header, serialized as MessagePack after the magic bytes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SegmentHeader {
+    /// Segment format version number.
     pub version: u16,
+    /// Reserved flags field; currently always 0.
     pub flags: u16,
+    /// Nanoseconds since Unix epoch when this segment was created.
     pub created_ns: i64,
+    /// Numeric identifier of this segment file.
     pub segment_id: u64,
 }
 
@@ -24,8 +30,11 @@ pub struct SegmentHeader {
 /// are the persistence layer — they don't depend on the Coordinate type.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FramePayload<P> {
+    /// The event data stored in this frame.
     pub event: Event<P>,
+    /// Entity name string (e.g. `"user:42"`).
     pub entity: String,
+    /// Scope name string (e.g. `"profile"`).
     pub scope: String,
 }
 
@@ -36,20 +45,27 @@ pub(crate) struct FramePayloadRef<'a, P> {
     pub scope: &'a str,
 }
 
-/// Typestate for segment lifecycle.
+/// Typestate marker for an active (writable) segment.
 pub struct Active;
+/// Typestate marker for a sealed (read-only) segment.
 pub struct Sealed;
+/// A segment file handle parameterized by its lifecycle state (`Active` or `Sealed`).
 pub struct Segment<State> {
+    /// Parsed header of this segment file.
     pub header: SegmentHeader,
+    /// Filesystem path to the segment file.
     pub path: std::path::PathBuf,
     file: Option<std::fs::File>,
     written_bytes: u64,
     _state: std::marker::PhantomData<State>,
 }
 
+/// Result returned by a compaction run.
 #[derive(Debug)]
 pub struct CompactionResult {
+    /// Number of sealed segment files that were merged and removed.
     pub segments_removed: usize,
+    /// Total bytes freed by removing the merged segment files.
     pub bytes_reclaimed: u64,
 }
 
@@ -57,12 +73,14 @@ pub struct CompactionResult {
 /// \[SPEC:WIRE FORMAT DECISIONS — ALWAYS rmp_serde::to_vec_named()\]
 /// \[DEP:rmp_serde::to_vec_named\] → `Result<Vec<u8>, encode::Error>`
 /// \[DEP:crc32fast::hash\] → u32
+///
+/// # Errors
+/// Returns `StoreError::Serialization` if the data cannot be serialized to MessagePack.
 pub fn frame_encode<T: serde::Serialize>(data: &T) -> Result<Vec<u8>, StoreError> {
     let msgpack =
-        rmp_serde::to_vec_named(data).map_err(|e| StoreError::Serialization(e.to_string()))?;
+        rmp_serde::to_vec_named(data).map_err(|e| StoreError::Serialization(Box::new(e)))?;
     let crc = crc32fast::hash(&msgpack);
-    let len = u32::try_from(msgpack.len())
-        .map_err(|_| StoreError::Serialization("frame exceeds 4GB".into()))?;
+    let len = u32::try_from(msgpack.len()).map_err(|_| StoreError::ser_msg("frame exceeds 4GB"))?;
 
     let mut frame = Vec::with_capacity(8 + msgpack.len());
     frame.extend_from_slice(&len.to_be_bytes());
@@ -76,13 +94,20 @@ pub fn frame_encode<T: serde::Serialize>(data: &T) -> Result<Vec<u8>, StoreError
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum FrameDecodeError {
+    /// The buffer is shorter than the minimum 8-byte frame header.
     TooShort,
+    /// The buffer ends before the full frame payload is available.
     Truncated {
+        /// Total bytes expected for the complete frame (header + payload).
         expected_len: usize,
+        /// Bytes actually available in the buffer.
         available: usize,
     },
+    /// The CRC32 checksum in the frame header did not match the payload.
     CrcMismatch {
+        /// CRC value stored in the frame header.
         expected: u32,
+        /// CRC value computed from the actual payload bytes.
         actual: u32,
     },
 }
@@ -112,6 +137,11 @@ impl std::fmt::Display for FrameDecodeError {
 
 /// frame_decode: read \[len\]\[crc\]\[msgpack\], verify CRC, return msgpack bytes.
 /// Returns (msgpack_bytes, total_frame_size_consumed).
+///
+/// # Errors
+/// Returns `FrameDecodeError::TooShort` if the buffer is under 8 bytes.
+/// Returns `FrameDecodeError::Truncated` if the buffer ends before the full frame payload.
+/// Returns `FrameDecodeError::CrcMismatch` if the checksum does not match the payload.
 pub fn frame_decode(buf: &[u8]) -> Result<(&[u8], usize), FrameDecodeError> {
     if buf.len() < 8 {
         return Err(FrameDecodeError::TooShort);
@@ -142,15 +172,13 @@ pub fn segment_filename(segment_id: u64) -> String {
 
 impl Segment<Active> {
     /// Create new active segment.
+    ///
+    /// # Errors
+    /// Returns `StoreError::Io` if the segment file cannot be created or the header cannot be written.
+    /// Returns `StoreError::Serialization` if the segment header cannot be serialized.
     pub fn create(dir: &std::path::Path, segment_id: u64) -> Result<Self, StoreError> {
         let path = dir.join(segment_filename(segment_id));
-        // Use OpenOptions (NOT File::create_new — requires Rust 1.77, MSRV is 1.75)
-        // [SPEC:IMPLEMENTATION NOTES item 7 — MSRV workarounds]
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(StoreError::Io)?;
+        let mut file = std::fs::File::create_new(&path).map_err(StoreError::Io)?;
 
         let header = SegmentHeader {
             version: 1,
@@ -165,8 +193,8 @@ impl Segment<Active> {
 
         // Write magic + header_len(u32 BE) + header(msgpack)
         file.write_all(SEGMENT_MAGIC).map_err(StoreError::Io)?;
-        let header_bytes = rmp_serde::to_vec_named(&header)
-            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let header_bytes =
+            rmp_serde::to_vec_named(&header).map_err(|e| StoreError::Serialization(Box::new(e)))?;
         #[allow(clippy::cast_possible_truncation)] // msgpack header is always small
         let header_len = (header_bytes.len() as u32).to_be_bytes();
         file.write_all(&header_len).map_err(StoreError::Io)?;
@@ -182,6 +210,9 @@ impl Segment<Active> {
     }
 
     /// Write a frame. Returns offset where frame starts.
+    ///
+    /// # Errors
+    /// Returns `StoreError::Io` if writing to the segment file fails.
     pub fn write_frame(&mut self, frame: &[u8]) -> Result<u64, StoreError> {
         let offset = self.written_bytes;
         if let Some(ref mut f) = self.file {
@@ -192,6 +223,10 @@ impl Segment<Active> {
     }
 
     /// Append all frame bytes from an existing segment file, skipping that file's header.
+    ///
+    /// # Errors
+    /// Returns `StoreError::Io` if the source file cannot be read or frames cannot be written.
+    /// Returns `StoreError::Corrupt` if the source file does not begin with the expected magic bytes.
     pub fn append_frames_from_segment(
         &mut self,
         path: &std::path::Path,
@@ -200,10 +235,7 @@ impl Segment<Active> {
         let mut magic = [0u8; 4];
         source.read_exact(&mut magic).map_err(StoreError::Io)?;
         if &magic != SEGMENT_MAGIC {
-            return Err(StoreError::CorruptSegment {
-                segment_id: 0,
-                detail: "bad magic".into(),
-            });
+            return Err(StoreError::corrupt_magic(0));
         }
 
         let mut header_len_buf = [0u8; 4];
@@ -223,17 +255,25 @@ impl Segment<Active> {
         Ok(offset)
     }
 
+    /// Returns `true` if the segment has reached or exceeded `max_bytes` and should be rotated.
     pub fn needs_rotation(&self, max_bytes: u64) -> bool {
         self.written_bytes >= max_bytes
     }
 
     /// Deprecated: hardcodes SyncAll, ignoring user's SyncMode config.
     /// Use `sync_with_mode(&config.sync_mode)` instead.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Io`] if the filesystem sync fails.
     #[deprecated(note = "Use sync_with_mode(&config.sync_mode) to respect user's SyncMode config")]
     pub fn sync(&mut self) -> Result<(), StoreError> {
         self.sync_with_mode(&crate::store::SyncMode::SyncAll)
     }
 
+    /// Flush the segment file to durable storage using the specified sync mode.
+    ///
+    /// # Errors
+    /// Returns `StoreError::Io` if the OS-level sync call fails.
     pub fn sync_with_mode(&mut self, mode: &crate::store::SyncMode) -> Result<(), StoreError> {
         if let Some(ref f) = self.file {
             match mode {

@@ -26,9 +26,11 @@ impl<T> Receipt<T> {
         }
     }
 
+    /// Returns a reference to the payload that passed all gates.
     pub fn payload(&self) -> &T {
         &self.payload
     }
+    /// Returns the names of all gates that this receipt passed through.
     pub fn gates_passed(&self) -> &[&'static str] {
         &self.gates_passed
     }

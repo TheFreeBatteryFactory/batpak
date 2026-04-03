@@ -170,7 +170,7 @@ tracing::error!(field = value, "message")            // least verbose
   Deserializer trait — we use: deserialize_bytes, deserialize_option, deserialize_seq
   Visitor trait — we implement: visit_bytes, visit_seq, visit_none, visit_some
 
-=== std (Rust 1.75 MSRV) ===
+=== std (Rust 1.92 MSRV) ===
 
 Arc<str>: Clone + Send + Sync + Eq + Hash + Deref<Target = str>
   Arc::from("string_literal") -> Arc<str>
@@ -184,12 +184,12 @@ AtomicU64: Send + Sync
 std::os::unix::fs::FileExt (stable since 1.15):
   fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize>  // pread
   fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize>     // pwrite
-  // Do NOT use File::create_new() — requires 1.77. Use OpenOptions instead.
+  // File::create_new() available since 1.77 (within MSRV 1.92).
 
 std::sync::OnceLock<T> (stable since 1.70):
   fn get_or_init(&self, f: impl FnOnce() -> T) -> &T
-  // Do NOT use LazyLock — requires 1.80.
-  // Do NOT use get_or_try_init — requires 1.82.
+  // LazyLock available since 1.80 (within MSRV 1.92).
+  // get_or_try_init available since 1.82 (within MSRV 1.92).
 ```
 
 ---
@@ -2717,8 +2717,8 @@ impl Segment<Active> {
     /// Create new active segment.
     pub fn create(dir: &std::path::Path, segment_id: u64) -> Result<Self, StoreError> {
         let path = dir.join(segment_filename(segment_id));
-        /// Use OpenOptions (NOT File::create_new — requires Rust 1.77, MSRV is 1.75)
-        /// [SPEC:IMPLEMENTATION NOTES item 7 — MSRV workarounds]
+        /// Create segment file exclusively (fail if exists).
+        /// [SPEC:IMPLEMENTATION NOTES item 7 — MSRV standard library]
         let mut file = std::fs::OpenOptions::new()
             .write(true).create_new(true).open(&path)
             .map_err(StoreError::Io)?;

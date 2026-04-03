@@ -277,7 +277,7 @@ batpak/
 name = "batpak"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 description = "Event-sourced state machines over coordinate spaces"
 
@@ -1511,7 +1511,7 @@ components = ["rustfmt", "clippy", "rust-src"]
 
 ### clippy.toml
 ```toml
-msrv = "1.75"
+msrv = "1.92"
 cognitive-complexity-threshold = 25
 too-many-arguments-threshold = 7
 ```
@@ -1619,7 +1619,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.75.0
+      - uses: dtolnay/rust-toolchain@1.92.0
       - run: cargo check --all-features
 
   semver:
@@ -1676,7 +1676,7 @@ lib-doc:
 
 ### Version Policy
 ```
-MSRV: 1.75. Edition: 2021. Semver: 0.x (breaking changes expected).
+MSRV: 1.92. Edition: 2021. Semver: 0.x (breaking changes expected).
 Use LATEST version of every dep UNLESS it creates duplicates.
 Check: cargo tree --duplicates. If duplicates: pin to older.
 ```
@@ -2045,12 +2045,8 @@ decisions the PRDs specify the WHAT.
    The compiler enforces this. If a field isn't Sync, Store won't compile
    as Sync. No manual unsafe impl needed.
 
-7. MSRV 1.75 workarounds:
-   - File::create_new() requires 1.77. Use OpenOptions::new().write(true)
-     .create_new(true).open(path) instead.
-   - LazyLock requires 1.80. Use OnceLock with get_or_init() instead.
-   - OnceLock::get_or_try_init() requires 1.82. Pre-validate before
-     get_or_init(), or use Once manually.
+7. MSRV 1.92 standard library:
+   - File::create_new(), LazyLock, OnceLock::get_or_try_init() are all available.
    - Unix pread: use std::os::unix::fs::FileExt::read_at() (stable since 1.15).
      For cross-platform: #[cfg(unix)] read_at, #[cfg(not(unix))] seek+read fallback.
 
@@ -2076,4 +2072,14 @@ decisions the PRDs specify the WHAT.
     The try_send() pattern in the writer preserves this: Full channels keep
     the subscriber (they catch up on next send), Disconnected channels prune.
     For guaranteed delivery, products use Cursor (pull-based, index-backed).
+
+11. index_rebuild is shared infrastructure:
+    Both Store::open_with_cache() and maintenance::compact() must rebuild the
+    in-memory index from segment files. This logic lives in a single function
+    (src/store/index_rebuild.rs::rebuild_from_segments) to prevent drift.
+
+12. Region.clock_range is per-entity clock:
+    clock_range filters on IndexEntry.clock (per-entity monotonic counter),
+    NOT global_sequence. This lets callers request "entity events 5 through 10"
+    without knowing the global ordering.
 ```

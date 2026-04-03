@@ -1,20 +1,29 @@
 mod ancestors;
 mod config;
 mod contracts;
+/// Pull-based cursor for guaranteed, ordered event delivery.
 pub mod cursor;
 mod error;
+/// In-memory 2D event index, rebuilt from segments on startup.
 pub mod index;
+mod index_rebuild;
 mod maintenance;
+/// Projection cache traits and built-in backends (NoCache, redb, LMDB).
 pub mod projection;
 mod projection_flow;
+/// Low-level segment file reader for replaying events from disk.
 pub mod reader;
 #[cfg(test)]
 mod runtime_contracts;
+/// On-disk segment format, frame encoding/decoding, and compaction helpers.
 pub mod segment;
+/// Runtime statistics and diagnostic snapshots.
 pub mod stats;
+/// Push-based (lossy) event subscription via broadcast channel.
 pub mod subscription;
 #[cfg(feature = "test-support")]
 mod test_support;
+/// Background writer thread, restart policy, and subscriber fanout.
 pub mod writer;
 
 pub use config::{StoreConfig, SyncMode};
@@ -48,11 +57,13 @@ use writer::{AppendGuards, SubscriberList, WriterCommand, WriterHandle};
 /// Store: the runtime. Sync API. Send + Sync.
 /// [SPEC:src/store/mod.rs]
 /// Invariant 2: ALL METHODS ARE SYNC. No .await anywhere.
+// Intentional impossible-feature guard: Store API is sync by design (Invariant 2).
 // async-store is not a declared feature — suppress cfg warning for this guard
 #[allow(unexpected_cfgs)]
 #[cfg(feature = "async-store")]
 compile_error!("INVARIANT 2: Store API is sync. Use spawn_blocking or flume recv_async.");
 
+/// The main event store handle. Sync API; all methods are blocking. Send + Sync.
 pub struct Store {
     index: Arc<StoreIndex>,
     reader: Arc<Reader>,
@@ -65,17 +76,27 @@ impl Store {
     /// Open a store with default config at `./batpak-data`.
     /// Sugar over `Store::open(StoreConfig::new("./batpak-data"))`.
     /// [SPEC:src/store/mod.rs — Store::open_default]
+    ///
+    /// # Errors
+    /// Returns `StoreError::Io` if the data directory cannot be created or segments cannot be read.
     pub fn open_default() -> Result<Self, StoreError> {
         Self::open(StoreConfig::new("./batpak-data"))
     }
 
     /// Open a store at the given config's data directory. Creates the directory if absent.
     /// Uses `NoCache` for projection (no external cache backend).
+    ///
+    /// # Errors
+    /// Returns `StoreError::Io` if the data directory cannot be created or segments cannot be read.
     pub fn open(config: StoreConfig) -> Result<Self, StoreError> {
         Self::open_with_cache(config, Box::new(NoCache))
     }
 
     /// Open a store with the built-in redb projection cache.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::CacheFailed`] if the redb database cannot be opened,
+    /// or any error from [`Store::open_with_cache`].
     #[cfg(feature = "redb")]
     pub fn open_with_redb_cache(
         config: StoreConfig,
@@ -85,6 +106,10 @@ impl Store {
     }
 
     /// Open a store with the built-in LMDB projection cache.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::CacheFailed`] if the LMDB environment cannot be opened,
+    /// or any error from [`Store::open_with_cache`].
     #[cfg(feature = "lmdb")]
     pub fn open_with_lmdb_cache(
         config: StoreConfig,
@@ -96,6 +121,9 @@ impl Store {
 
     /// Open a store with a custom projection cache backend.
     /// Use `RedbCache` or `LmdbCache` (feature-gated) for cache-accelerated `project()` calls.
+    ///
+    /// # Errors
+    /// Returns `StoreError::Io` if the data directory cannot be created or segments cannot be read.
     pub fn open_with_cache(
         config: StoreConfig,
         cache: Box<dyn ProjectionCache>,
@@ -107,41 +135,7 @@ impl Store {
 
         // Cold start: scan all segments, rebuild index.
         // [SPEC:IMPLEMENTATION NOTES item 2 — segment naming, alphabetical scan]
-        let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(&config.data_dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == segment::SEGMENT_EXTENSION)
-                    .unwrap_or(false)
-            })
-            .collect();
-        entries.sort_by_key(|e| e.file_name());
-
-        for dir_entry in &entries {
-            let scanned = reader.scan_segment_index(&dir_entry.path())?;
-            for se in scanned {
-                let coord = Coordinate::new(&se.entity, &se.scope)?;
-                let clock = se.header.position.sequence;
-                let entry = IndexEntry {
-                    event_id: se.header.event_id,
-                    correlation_id: se.header.correlation_id,
-                    causation_id: se.header.causation_id,
-                    coord,
-                    kind: se.header.event_kind,
-                    wall_ms: se.header.position.wall_ms,
-                    clock,
-                    hash_chain: se.hash_chain,
-                    disk_pos: DiskPos {
-                        segment_id: se.segment_id,
-                        offset: se.offset,
-                        length: se.length,
-                    },
-                    global_sequence: index.global_sequence(),
-                };
-                index.insert(entry);
-            }
-        }
+        index_rebuild::rebuild_from_segments(&index, &reader, &config.data_dir)?;
 
         let subscribers = Arc::new(SubscriberList::new());
         let writer = WriterHandle::spawn(&config, &index, &subscribers)?;
@@ -157,6 +151,10 @@ impl Store {
 
     /// WRITE: append a new root-cause event.
     /// correlation_id defaults to event_id (self-correlated). causation_id = None.
+    ///
+    /// # Errors
+    /// Returns `StoreError::Serialization` if the payload cannot be serialized.
+    /// Returns `StoreError::WriterCrashed` if the writer thread has exited unexpectedly.
     pub fn append(
         &self,
         coord: &Coordinate,
@@ -170,43 +168,17 @@ impl Store {
             scope = coord.scope(),
             event_kind = kind.type_id()
         );
-        let payload_bytes = rmp_serde::to_vec_named(payload)
-            .map_err(|e| StoreError::Serialization(e.to_string()))?;
-        let payload_len = checked_payload_len(&payload_bytes)?;
         let event_id = crate::id::generate_v7_id();
-        let header = EventHeader::new(
-            event_id,
-            event_id,
-            None, // correlation = self, causation = root
-            self.config.now_us(),
-            crate::coordinate::DagPosition::root(),
-            payload_len,
-            kind,
-        );
-        let event = Event::new(header, payload_bytes);
-
-        let (tx, rx) = flume::bounded(1);
-        self.writer
-            .tx
-            .send(WriterCommand::Append {
-                entity: coord.entity_arc(),
-                scope: coord.scope_arc(),
-                event: Box::new(event),
-                kind,
-                guards: AppendGuards {
-                    correlation_id: event_id,
-                    causation_id: None,
-                    expected_sequence: None,
-                    idempotency_key: None,
-                },
-                respond: tx,
-            })
-            .map_err(|_| StoreError::WriterCrashed)?;
-
-        rx.recv().map_err(|_| StoreError::WriterCrashed)?
+        self.do_append(
+            coord, kind, payload, event_id, event_id, None, None, None, 0,
+        )
     }
 
     /// WRITE: append a reaction (caused by another event).
+    ///
+    /// # Errors
+    /// Returns `StoreError::Serialization` if the payload cannot be serialized.
+    /// Returns `StoreError::WriterCrashed` if the writer thread has exited unexpectedly.
     pub fn append_reaction(
         &self,
         coord: &Coordinate,
@@ -223,43 +195,25 @@ impl Store {
             correlation_id = format_args!("{correlation_id:032x}"),
             causation_id = format_args!("{causation_id:032x}")
         );
-        let payload_bytes = rmp_serde::to_vec_named(payload)
-            .map_err(|e| StoreError::Serialization(e.to_string()))?;
-        let payload_len = checked_payload_len(&payload_bytes)?;
         let event_id = crate::id::generate_v7_id();
-        let header = EventHeader::new(
+        self.do_append(
+            coord,
+            kind,
+            payload,
             event_id,
             correlation_id,
             Some(causation_id),
-            self.config.now_us(),
-            crate::coordinate::DagPosition::root(),
-            payload_len,
-            kind,
-        );
-        let event = Event::new(header, payload_bytes);
-
-        let (tx, rx) = flume::bounded(1);
-        self.writer
-            .tx
-            .send(WriterCommand::Append {
-                entity: coord.entity_arc(),
-                scope: coord.scope_arc(),
-                event: Box::new(event),
-                kind,
-                guards: AppendGuards {
-                    correlation_id,
-                    causation_id: Some(causation_id),
-                    expected_sequence: None,
-                    idempotency_key: None,
-                },
-                respond: tx,
-            })
-            .map_err(|_| StoreError::WriterCrashed)?;
-
-        rx.recv().map_err(|_| StoreError::WriterCrashed)?
+            None,
+            None,
+            0,
+        )
     }
 
     /// READ: get a single event by ID.
+    ///
+    /// # Errors
+    /// Returns `StoreError::NotFound` if no event with that ID exists.
+    /// Returns `StoreError::Io` or `StoreError::Serialization` if reading from disk fails.
     pub fn get(&self, event_id: u128) -> Result<StoredEvent<serde_json::Value>, StoreError> {
         let entry = self
             .index
@@ -269,6 +223,7 @@ impl Store {
     }
 
     /// READ: query by Region.
+    #[must_use]
     pub fn query(&self, region: &Region) -> Vec<IndexEntry> {
         self.index.query(region)
     }
@@ -286,7 +241,11 @@ impl Store {
     }
 
     /// PROJECT: reconstruct typed state from events, with cache support.
-    /// [SPEC:src/store/mod.rs — Projection Flow]
+    /// [SPEC:src/store/projection_flow.rs — Projection Flow]
+    ///
+    /// # Errors
+    /// Returns `StoreError::Serialization` if deserializing events or the cached state fails.
+    /// Returns `StoreError::CacheFailed` if the projection cache backend encounters an error.
     pub fn project<T>(&self, entity: &str, freshness: &Freshness) -> Result<Option<T>, StoreError>
     where
         T: EventSourced<serde_json::Value> + serde::Serialize + serde::de::DeserializeOwned,
@@ -311,12 +270,17 @@ impl Store {
     /// CONVENIENCE: sugar over index.stream() for exact entity match.
     /// Unlike Region::entity() (prefix match), this returns events for
     /// exactly the named entity — "entity:1" does NOT match "entity:10".
+    #[must_use]
     pub fn stream(&self, entity: &str) -> Vec<IndexEntry> {
         self.index.stream(entity)
     }
+    /// READ: query all events in the given scope.
+    #[must_use]
     pub fn by_scope(&self, scope: &str) -> Vec<IndexEntry> {
         self.query(&Region::scope(scope))
     }
+    /// READ: query all events of the given event kind across all entities and scopes.
+    #[must_use]
     pub fn by_fact(&self, kind: EventKind) -> Vec<IndexEntry> {
         self.query(&Region::all().with_fact(KindFilter::Exact(kind)))
     }
@@ -324,6 +288,9 @@ impl Store {
     /// REACT: spawn a background thread running the subscribe→react→append loop.
     /// Returns a JoinHandle. The thread runs until the store is dropped (subscription closes).
     /// \[SPEC:src/event/sourcing.rs — Reactive\<P\> glue pattern\]
+    ///
+    /// # Errors
+    /// Returns `StoreError::Io` if the background thread cannot be spawned.
     pub fn react_loop<R>(
         self: &Arc<Self>,
         region: &Region,
@@ -367,6 +334,11 @@ impl Store {
     /// WRITE: append with CAS, idempotency, custom correlation/causation.
     /// CAS and idempotency checks execute inside the writer thread under
     /// the entity lock — no TOCTOU race between check and commit.
+    ///
+    /// # Errors
+    /// Returns `StoreError::Serialization` if the payload cannot be serialized.
+    /// Returns `StoreError::CasConflict` if the expected sequence does not match.
+    /// Returns `StoreError::WriterCrashed` if the writer thread has exited unexpectedly.
     pub fn append_with_options(
         &self,
         coord: &Coordinate,
@@ -382,15 +354,42 @@ impl Store {
             has_cas = opts.expected_sequence.is_some(),
             has_idempotency = opts.idempotency_key.is_some()
         );
-        let payload_bytes = rmp_serde::to_vec_named(payload)
-            .map_err(|e| StoreError::Serialization(e.to_string()))?;
-        let payload_len = checked_payload_len(&payload_bytes)?;
         let event_id = opts
             .idempotency_key
             .unwrap_or_else(crate::id::generate_v7_id);
         let correlation_id = opts.correlation_id.unwrap_or(event_id);
-        let causation_id = opts.causation_id;
-        let header = EventHeader::new(
+        self.do_append(
+            coord,
+            kind,
+            payload,
+            event_id,
+            correlation_id,
+            opts.causation_id,
+            opts.expected_sequence,
+            opts.idempotency_key,
+            opts.flags,
+        )
+    }
+
+    /// Internal append path shared by all public write methods.
+    /// Serializes payload, constructs header+event, sends to writer, awaits receipt.
+    #[allow(clippy::too_many_arguments)] // internal helper consolidating 3 public methods
+    fn do_append(
+        &self,
+        coord: &Coordinate,
+        kind: EventKind,
+        payload: &impl Serialize,
+        event_id: u128,
+        correlation_id: u128,
+        causation_id: Option<u128>,
+        expected_sequence: Option<u32>,
+        idempotency_key: Option<u128>,
+        flags: u8,
+    ) -> Result<AppendReceipt, StoreError> {
+        let payload_bytes =
+            rmp_serde::to_vec_named(payload).map_err(|e| StoreError::Serialization(Box::new(e)))?;
+        let payload_len = checked_payload_len(&payload_bytes)?;
+        let mut header = EventHeader::new(
             event_id,
             correlation_id,
             causation_id,
@@ -398,8 +397,10 @@ impl Store {
             crate::coordinate::DagPosition::root(),
             payload_len,
             kind,
-        )
-        .with_flags(opts.flags);
+        );
+        if flags != 0 {
+            header = header.with_flags(flags);
+        }
         let event = Event::new(header, payload_bytes);
 
         let (tx, rx) = flume::bounded(1);
@@ -413,8 +414,8 @@ impl Store {
                 guards: AppendGuards {
                     correlation_id,
                     causation_id,
-                    expected_sequence: opts.expected_sequence,
-                    idempotency_key: opts.idempotency_key,
+                    expected_sequence,
+                    idempotency_key,
                 },
                 respond: tx,
             })
@@ -424,6 +425,10 @@ impl Store {
     }
 
     /// WRITE: apply a typestate transition — extracts kind+payload, delegates to append.
+    ///
+    /// # Errors
+    /// Returns `StoreError::Serialization` if the payload cannot be serialized.
+    /// Returns `StoreError::WriterCrashed` if the writer thread has exited unexpectedly.
     pub fn apply_transition<From, To, P: Serialize>(
         &self,
         coord: &Coordinate,
@@ -435,11 +440,17 @@ impl Store {
     }
 
     /// LIFECYCLE
+    ///
+    /// # Errors
+    /// Returns `StoreError::Io` if flushing the active segment to disk fails.
     pub fn sync(&self) -> Result<(), StoreError> {
         maintenance::sync(self)
     }
 
     /// Snapshot the current index to a destination directory.
+    ///
+    /// # Errors
+    /// Returns `StoreError::Io` if creating the destination directory or copying segment files fails.
     pub fn snapshot(&self, dest: &std::path::Path) -> Result<(), StoreError> {
         maintenance::snapshot(self, dest)
     }
@@ -453,6 +464,9 @@ impl Store {
     /// segment which is not compacted), but the index rebuild syncs the writer
     /// before and after to minimize the window for stale index state.
     /// For maximum safety, avoid high-throughput appends during compaction.
+    ///
+    /// # Errors
+    /// Returns `StoreError::Io` if reading, writing, or removing segment files fails.
     pub fn compact(
         &self,
         config: &CompactionConfig,
@@ -460,6 +474,10 @@ impl Store {
         maintenance::compact(self, config)
     }
 
+    /// LIFECYCLE: flush pending writes and shut down the writer thread cleanly.
+    ///
+    /// # Errors
+    /// Returns `StoreError::WriterCrashed` if the writer thread has already exited unexpectedly.
     pub fn close(self) -> Result<(), StoreError> {
         maintenance::close(self)
     }
@@ -469,6 +487,7 @@ impl Store {
         maintenance::stats(self)
     }
 
+    /// Return detailed diagnostic information about the store's internal state.
     pub fn diagnostics(&self) -> StoreDiagnostics {
         maintenance::diagnostics(self)
     }

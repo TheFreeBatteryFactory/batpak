@@ -31,36 +31,50 @@ pub(crate) struct StoreIndex {
 /// ClockKey: BTreeMap key. Ord: wall_ms-first, then clock, then uuid tiebreak.
 /// wall_ms enables global causal ordering across entities (HLC layer 1).
 /// [SPEC:IMPLEMENTATION NOTES item 1]
-/// [CROSS-POLLINATION:czap/hlc.ts — HLC 3-tier comparison]
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClockKey {
     /// HLC wall clock milliseconds — global ordering across entities.
     pub wall_ms: u64,
+    /// Per-entity monotonic sequence number used as the HLC logical counter.
     pub clock: u32,
+    /// Event UUID tiebreaker for deterministic ordering within the same clock tick.
     pub uuid: u128,
 }
 
 /// IndexEntry: everything needed for index queries without disk reads.
 #[derive(Clone, Debug)]
 pub struct IndexEntry {
+    /// Unique ID of the event.
     pub event_id: u128,
+    /// Correlation ID linking related events in a causal chain.
     pub correlation_id: u128,
+    /// ID of the event that caused this one; `None` for root-cause events.
     pub causation_id: Option<u128>,
+    /// Entity and scope coordinates for this event.
     pub coord: Coordinate,
+    /// Event kind (type discriminant).
     pub kind: EventKind,
     /// HLC wall clock milliseconds — for global causal ordering.
     pub wall_ms: u64,
+    /// Per-entity monotonic sequence number.
     pub clock: u32,
+    /// Blake3 hash chain linking this event to its predecessor.
     pub hash_chain: HashChain,
+    /// Location of the event frame on disk.
     pub disk_pos: DiskPos,
+    /// Globally monotonic sequence number assigned at commit time.
     pub global_sequence: u64,
 }
 
 /// DiskPos: where to find this event on disk.
 #[derive(Clone, Debug)]
 pub struct DiskPos {
+    /// Numeric identifier of the segment file containing this event.
     pub segment_id: u64,
+    /// Byte offset of the frame within the segment file.
     pub offset: u64,
+    /// Total byte length of the encoded frame.
     pub length: u32,
 }
 
@@ -80,14 +94,17 @@ impl PartialOrd for ClockKey {
 }
 
 impl IndexEntry {
+    /// Returns `true` if this event is part of a causal chain (its correlation ID differs from its event ID).
     pub fn is_correlated(&self) -> bool {
         self.event_id != self.correlation_id
     }
 
+    /// Returns `true` if this event was directly caused by the given event ID.
     pub fn is_caused_by(&self, event_id: u128) -> bool {
         self.causation_id == Some(event_id)
     }
 
+    /// Returns `true` if this event has no causation ID (it is a root-cause event).
     pub fn is_root_cause(&self) -> bool {
         self.causation_id.is_none()
     }
@@ -238,8 +255,6 @@ impl StoreIndex {
 
         // Entity prefix filter: not needed here. When scope is the primary selector
         // and entity_prefix is Some, it's applied during initial candidate selection.
-        // (Dead logic removed — the old guard `scope.is_some() && entity_prefix.is_none()`
-        // made the inner `if let Some(prefix) = entity_prefix` unreachable.)
 
         // Fact filter (if not already applied)
         if region.entity_prefix.is_some() || region.scope.is_some() {

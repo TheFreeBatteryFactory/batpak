@@ -12,6 +12,7 @@ pub struct Transition<From, To, P> {
 }
 
 impl<From, To, P> Transition<From, To, P> {
+    /// Creates a new transition with the given event kind and payload.
     pub fn new(kind: EventKind, payload: P) -> Self {
         Self {
             kind,
@@ -21,12 +22,15 @@ impl<From, To, P> Transition<From, To, P> {
         }
     }
 
+    /// Returns the event kind for this transition.
     pub fn kind(&self) -> EventKind {
         self.kind
     }
+    /// Returns a reference to the transition payload.
     pub fn payload(&self) -> &P {
         &self.payload
     }
+    /// Consumes the transition and returns the payload.
     pub fn into_payload(self) -> P {
         self.payload
     }

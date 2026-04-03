@@ -1,3 +1,4 @@
+// Intentional impossible-feature guard: exponential backoff belongs in the product supervisor, not the library.
 // exponential-backoff is not a declared feature — suppress cfg warning for this guard
 #[allow(unexpected_cfgs)]
 #[cfg(feature = "exponential-backoff")]
@@ -63,11 +64,17 @@ pub(crate) struct SubscriberList {
 /// [SPEC:src/store/writer.rs — Notification struct]
 #[derive(Clone, Debug)]
 pub struct Notification {
+    /// Unique ID of the event that was appended.
     pub event_id: u128,
+    /// Correlation ID linking this event to a causal chain.
     pub correlation_id: u128,
+    /// ID of the event that caused this one; `None` for root-cause events.
     pub causation_id: Option<u128>,
+    /// Entity and scope coordinates for the event.
     pub coord: Coordinate,
+    /// Event kind (type discriminant).
     pub kind: EventKind,
+    /// Global sequence number assigned to this event at commit time.
     pub sequence: u64,
 }
 
@@ -77,10 +84,14 @@ pub struct Notification {
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub enum RestartPolicy {
+    /// Allow at most one automatic restart after a writer panic.
     #[default]
     Once,
+    /// Allow up to `max_restarts` automatic restarts within a rolling `within_ms` millisecond window.
     Bounded {
+        /// Maximum number of restarts permitted within the time window.
         max_restarts: u32,
+        /// Time window in milliseconds over which `max_restarts` is enforced.
         within_ms: u64,
     },
 }
@@ -115,7 +126,7 @@ impl SubscriberList {
 
 impl WriterHandle {
     /// Spawn the background writer thread.
-    /// [SPEC:src/store/writer.rs — "batpak-writer" thread]
+    /// [SPEC:src/store/writer.rs — "batpak-writer-{hash}" thread]
     pub(crate) fn spawn(
         config: &Arc<StoreConfig>,
         index: &Arc<StoreIndex>,
@@ -457,7 +468,6 @@ impl WriterState<'_> {
         // STEP 4: Set event header position with HLC wall clock.
         // Ensure wall_ms is monotonically non-decreasing per entity to prevent
         // BTreeMap reordering on clock regression.
-        // [CROSS-POLLINATION:czap/hlc.ts — HLC for global causal ordering]
         #[allow(clippy::cast_sign_loss)] // timestamp_us is always positive (from SystemTime)
         let raw_ms = (event.header.timestamp_us / 1000) as u64;
         let last_ms = latest.as_ref().map(|entry| entry.wall_ms).unwrap_or(0);
@@ -480,7 +490,6 @@ impl WriterState<'_> {
             event_hash,
         });
         // Set content_hash on header for projection cache auto-invalidation.
-        // [CROSS-POLLINATION:czap/typed-ref.ts — content addressing]
         event.header.content_hash = event_hash;
 
         // STEP 6: Serialize to MessagePack + CRC32 frame.

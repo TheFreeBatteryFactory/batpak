@@ -18,7 +18,6 @@ pub(crate) struct Reader {
     /// [DEP:parking_lot::Mutex] — lock() returns guard directly, no poisoning
     fd_cache: Mutex<FdCache>,
     /// Recycled frame buffers to avoid per-read allocations during batch reads.
-    /// [CROSS-POLLINATION:czap/compositor-pool.ts — zero-alloc hot path via ring buffer]
     buffer_pool: Mutex<Vec<Vec<u8>>>,
 }
 
@@ -74,7 +73,6 @@ impl Reader {
     }
 
     /// Acquire a buffer from the pool, or allocate a new one if pool is empty.
-    /// [CROSS-POLLINATION:czap/compositor-pool.ts — acquire/release pattern]
     pub(crate) fn acquire_buffer(&self, min_size: usize) -> Vec<u8> {
         let mut pool = self.buffer_pool.lock();
         if let Some(mut buf) = pool.pop() {
@@ -116,10 +114,7 @@ impl Reader {
                         .read_at(&mut buf[total_read..], offset + total_read as u64)
                         .map_err(StoreError::Io)?;
                     if n == 0 {
-                        return Err(StoreError::CorruptSegment {
-                            segment_id,
-                            detail: "unexpected EOF during read".into(),
-                        });
+                        return Err(StoreError::corrupt_eof(segment_id));
                     }
                     total_read += n;
                 }
@@ -145,10 +140,7 @@ impl Reader {
                 offset: pos.offset,
             },
             segment::FrameDecodeError::TooShort | segment::FrameDecodeError::Truncated { .. } => {
-                StoreError::CorruptSegment {
-                    segment_id: pos.segment_id,
-                    detail: e.to_string(),
-                }
+                StoreError::corrupt_frame(pos.segment_id, e.to_string())
             }
         });
         let (msgpack, _) = match result {
@@ -159,7 +151,7 @@ impl Reader {
             }
         };
         let payload: FramePayload<serde_json::Value> =
-            rmp_serde::from_slice(msgpack).map_err(|e| StoreError::Serialization(e.to_string()))?;
+            rmp_serde::from_slice(msgpack).map_err(|e| StoreError::Serialization(Box::new(e)))?;
 
         // Release buffer back to pool after deserialization
         self.release_buffer(buf);
@@ -178,10 +170,7 @@ impl Reader {
         let mut magic = [0u8; 4];
         file.read_exact(&mut magic).map_err(StoreError::Io)?;
         if &magic != SEGMENT_MAGIC {
-            return Err(StoreError::CorruptSegment {
-                segment_id: 0,
-                detail: "bad magic".into(),
-            });
+            return Err(StoreError::corrupt_magic(0));
         }
 
         // Extract segment_id from filename: "000042.fbat" → 42
@@ -198,14 +187,11 @@ impl Reader {
         let mut header_buf = vec![0u8; header_len];
         file.read_exact(&mut header_buf).map_err(StoreError::Io)?;
         let header: segment::SegmentHeader = rmp_serde::from_slice(&header_buf)
-            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+            .map_err(|e| StoreError::Serialization(Box::new(e)))?;
 
         // Version check — reject unknown segment versions
         if header.version != 1 {
-            return Err(StoreError::CorruptSegment {
-                segment_id,
-                detail: format!("unsupported segment version: {}", header.version),
-            });
+            return Err(StoreError::corrupt_version(segment_id, header.version));
         }
 
         let mut cursor = (8 + header_len) as u64; // past magic + header_len + header
@@ -285,10 +271,7 @@ impl Reader {
         let mut magic = [0u8; 4];
         file.read_exact(&mut magic).map_err(StoreError::Io)?;
         if &magic != SEGMENT_MAGIC {
-            return Err(StoreError::CorruptSegment {
-                segment_id: 0,
-                detail: "bad magic".into(),
-            });
+            return Err(StoreError::corrupt_magic(0));
         }
 
         let segment_id = match path
@@ -310,12 +293,9 @@ impl Reader {
         let mut header_buf = vec![0u8; header_len];
         file.read_exact(&mut header_buf).map_err(StoreError::Io)?;
         let header: segment::SegmentHeader = rmp_serde::from_slice(&header_buf)
-            .map_err(|e| StoreError::Serialization(e.to_string()))?;
+            .map_err(|e| StoreError::Serialization(Box::new(e)))?;
         if header.version != 1 {
-            return Err(StoreError::CorruptSegment {
-                segment_id,
-                detail: format!("unsupported segment version: {}", header.version),
-            });
+            return Err(StoreError::corrupt_version(segment_id, header.version));
         }
 
         let mut cursor = (8 + header_len) as u64;

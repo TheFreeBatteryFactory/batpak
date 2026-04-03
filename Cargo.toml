@@ -73,7 +73,7 @@ clone_on_ref_ptr = "warn"
 needless_pass_by_value = "warn"
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
-missing_errors_doc = "allow"
+missing_errors_doc = "warn"
 
 [lints.rust]
 deprecated = "deny"

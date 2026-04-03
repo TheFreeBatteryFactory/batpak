@@ -1,6 +1,10 @@
+/// Blake3 hash chain for per-entity integrity verification.
 pub mod hash;
+/// Metadata header attached to every event.
 pub mod header;
+/// Discriminant enum identifying the category of an event.
 pub mod kind;
+/// Traits for event-sourced and reactive state reconstruction.
 pub mod sourcing;
 
 pub use hash::HashChain;
@@ -15,8 +19,11 @@ use serde::{Deserialize, Serialize};
 /// [SPEC:src/event/mod.rs]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Event<P> {
+    /// Metadata describing the event's identity, timing, and position.
     pub header: EventHeader,
+    /// Domain-specific data carried by this event.
     pub payload: P,
+    /// Optional hash chain linking this event to its predecessor.
     pub hash_chain: Option<HashChain>,
 }
 
@@ -25,11 +32,14 @@ pub struct Event<P> {
 /// schema-free MessagePack. [SPEC:src/event/mod.rs]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredEvent<P> {
+    /// Stream coordinate (entity + segment) where this event is stored.
     pub coordinate: Coordinate,
+    /// The full event, including header, payload, and optional hash chain.
     pub event: Event<P>,
 }
 
 impl<P> Event<P> {
+    /// Creates a new event from a header and payload, with no hash chain.
     pub fn new(header: EventHeader, payload: P) -> Self {
         Self {
             header,
@@ -38,23 +48,28 @@ impl<P> Event<P> {
         }
     }
 
+    /// Attaches a hash chain to this event, enabling integrity verification.
     pub fn with_hash_chain(mut self, chain: HashChain) -> Self {
         self.hash_chain = Some(chain);
         self
     }
 
+    /// Returns the unique event identifier.
     pub fn event_id(&self) -> u128 {
         self.header.event_id
     }
 
+    /// Returns the kind of this event.
     pub fn event_kind(&self) -> EventKind {
         self.header.event_kind
     }
 
+    /// Returns the DAG position of this event within its stream.
     pub fn position(&self) -> &crate::coordinate::DagPosition {
         &self.header.position
     }
 
+    /// Returns `true` if this is the first event in its hash chain.
     pub fn is_genesis(&self) -> bool {
         self.hash_chain
             .as_ref()
@@ -62,6 +77,7 @@ impl<P> Event<P> {
             .unwrap_or(true)
     }
 
+    /// Transforms the payload with `f`, preserving the header and hash chain.
     pub fn map_payload<U, F: FnOnce(P) -> U>(self, f: F) -> Event<U> {
         Event {
             header: self.header,
