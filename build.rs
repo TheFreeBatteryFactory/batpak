@@ -461,6 +461,14 @@ fn check_pub_items_have_tests() {
             "IndexLayout",
             "config enum tested through unified_red.rs layout tests and bench fixtures",
         ),
+        (
+            "watch_projection",
+            "reactive projection API tested through unified_red watch_projection tests",
+        ),
+        (
+            "ProjectionWatcher",
+            "returned by watch_projection, tested through unified_red watch_projection tests",
+        ),
     ];
     let allowed_names: Vec<&str> = allowlist.iter().map(|(name, _)| *name).collect();
 

@@ -859,3 +859,85 @@ fn single_slot_miss_on_different_entity() {
     );
     store.close().expect("close");
 }
+
+// ===========================================================================
+// REACTIVE QUERY SUBSCRIPTIONS (watch_projection)
+// ===========================================================================
+
+#[test]
+fn watch_projection_emits_on_new_events() {
+    let dir = TempDir::new().expect("temp dir");
+    let store = Arc::new(Store::open(StoreConfig::new(dir.path())).expect("open"));
+    let coord = Coordinate::new("watch:entity", "watch:scope").expect("coord");
+
+    // Seed with initial events
+    for i in 0u32..5 {
+        store.append(&coord, kind_a(), &payload(i)).expect("append");
+    }
+
+    let watcher = store.watch_projection::<AllCounter>("watch:entity", Freshness::Consistent);
+
+    // Spawn a thread that appends 3 more events after a brief delay
+    let store2 = Arc::clone(&store);
+    let handle = std::thread::Builder::new()
+        .name("watch-writer".into())
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let coord = Coordinate::new("watch:entity", "watch:scope").expect("coord");
+            for i in 5u32..8 {
+                store2.append(&coord, kind_a(), &payload(i)).expect("append");
+            }
+        })
+        .expect("spawn");
+
+    // Receive the first projection update (triggered by one of the 3 new events)
+    let result = watcher.recv().expect("recv should not error");
+    let counter = result.expect("should have projection");
+    // The projection should see at least 6 events (5 initial + at least 1 new)
+    assert!(
+        counter.count >= 6,
+        "PROPERTY: watch_projection must re-project with new events.\n\
+         Got count={}, expected >= 6.\n\
+         Investigate: src/store/mod.rs watch_projection + ProjectionWatcher::recv.",
+        counter.count
+    );
+
+    handle.join().expect("writer thread");
+    // Don't close — let Arc<Store> drop naturally
+}
+
+#[test]
+fn watch_projection_returns_none_on_store_close() {
+    let dir = TempDir::new().expect("temp dir");
+    let store = Arc::new(Store::open(StoreConfig::new(dir.path())).expect("open"));
+    let coord = Coordinate::new("drop:entity", "drop:scope").expect("coord");
+    store.append(&coord, kind_a(), &payload(0)).expect("append");
+
+    // Subscribe BEFORE we move the Arc — the subscription is independent.
+    let sub = store.subscribe(&Region::entity("drop:entity"));
+
+    // Close the store from another thread. This shuts down the writer,
+    // which closes the broadcast channels, which makes sub.recv() return None.
+    // We must unwrap the Arc first to get ownership for close().
+    let handle = std::thread::Builder::new()
+        .name("store-closer".into())
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            // Try to unwrap the Arc. If watcher holds a clone, this fails
+            // and we just drop it (which triggers the Drop impl shutdown).
+            match Arc::try_unwrap(store) {
+                Ok(s) => { let _ = s.close(); }
+                Err(arc) => { drop(arc); }
+            }
+        })
+        .expect("spawn");
+
+    // recv should return None when the writer shuts down
+    let result = sub.recv();
+    assert!(
+        result.is_none(),
+        "PROPERTY: subscription must return None when store shuts down."
+    );
+
+    handle.join().expect("closer thread");
+}

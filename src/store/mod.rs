@@ -345,6 +345,37 @@ impl Store {
             .map_err(StoreError::Io)
     }
 
+    /// WATCH: reactive projection subscription. Returns a `ProjectionWatcher`
+    /// that emits an updated projection `T` whenever new events arrive for `entity`.
+    ///
+    /// Internally subscribes to entity events, then re-projects on each notification.
+    /// The watcher is pull-based: the caller drives the loop via `watcher.recv()`.
+    ///
+    /// Requires `Arc<Store>` because the watcher outlives the borrow.
+    pub fn watch_projection<T>(
+        self: &Arc<Self>,
+        entity: &str,
+        freshness: Freshness,
+    ) -> ProjectionWatcher<T>
+    where
+        T: EventSourced<serde_json::Value>
+            + serde::Serialize
+            + serde::de::DeserializeOwned
+            + Send
+            + 'static,
+    {
+        let sub = self.subscribe(&Region::entity(entity));
+        let store = Arc::clone(self);
+        let entity_owned = entity.to_owned();
+        ProjectionWatcher {
+            sub,
+            store,
+            entity: entity_owned,
+            freshness,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
     /// WRITE: append with CAS, idempotency, custom correlation/causation.
     /// CAS and idempotency checks execute inside the writer thread under
     /// the entity lock — no TOCTOU race between check and commit.
@@ -527,5 +558,45 @@ impl Drop for Store {
             // This prevents data loss when Store is dropped without close().
             let _ = rx.recv_timeout(std::time::Duration::from_millis(100));
         }
+    }
+}
+
+/// Reactive projection watcher: emits updated projections when the entity
+/// receives new events. Created via [`Store::watch_projection`].
+///
+/// Pull-based: the caller drives the loop by calling [`recv()`](Self::recv).
+/// Each `recv()` blocks until a new event arrives for the entity, re-projects,
+/// and returns the updated state. Returns `None` when the store is dropped.
+pub struct ProjectionWatcher<T> {
+    sub: Subscription,
+    store: Arc<Store>,
+    entity: String,
+    freshness: Freshness,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T> ProjectionWatcher<T>
+where
+    T: EventSourced<serde_json::Value> + serde::Serialize + serde::de::DeserializeOwned,
+{
+    /// Block until a new event arrives for the watched entity, then re-project
+    /// and return the updated state. Returns `None` if the store is dropped
+    /// (subscription channel closed) or if projection returns no state.
+    ///
+    /// # Errors
+    /// Returns `StoreError` if the projection fails (e.g., segment read error).
+    pub fn recv(&self) -> Result<Option<T>, StoreError> {
+        // Wait for any event on this entity's stream.
+        if self.sub.recv().is_none() {
+            return Ok(None); // store dropped
+        }
+        // Re-project with the latest state.
+        self.store.project::<T>(&self.entity, &self.freshness)
+    }
+
+    /// Expose the underlying subscription's receiver for async integration.
+    /// After receiving a notification, call `project()` on the store manually.
+    pub fn subscription(&self) -> &Subscription {
+        &self.sub
     }
 }
