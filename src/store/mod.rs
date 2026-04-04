@@ -139,7 +139,7 @@ impl Store {
         config.validate()?;
         std::fs::create_dir_all(&config.data_dir)?;
         let config = Arc::new(config);
-        let index = Arc::new(StoreIndex::new());
+        let index = Arc::new(StoreIndex::with_layout(&config.index_layout));
         let reader = Arc::new(Reader::new(config.data_dir.clone(), config.fd_budget));
 
         // Cold start: checkpoint fast path or full segment scan.

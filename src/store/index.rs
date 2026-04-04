@@ -1,7 +1,9 @@
 use crate::coordinate::Coordinate;
 use crate::event::{EventKind, HashChain};
+use crate::store::columnar::ScanIndex;
+use crate::store::config::IndexLayout;
 use dashmap::DashMap;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -10,15 +12,15 @@ use std::sync::Arc;
 /// [DEP:dashmap::DashMap] — see DEPENDENCY SURFACE for deadlock warnings
 pub(crate) struct StoreIndex {
     /// Primary: entity -> ordered events. [DEP:dashmap::DashMap::get_mut] for insert.
-    streams: DashMap<Arc<str>, BTreeMap<ClockKey, IndexEntry>>,
-    /// Scope dimension: scope -> set of entities in that scope.
-    scope_entities: DashMap<Arc<str>, HashSet<Arc<str>>>,
-    /// Fact dimension: event kind -> ordered events of that kind.
-    by_fact: DashMap<EventKind, BTreeMap<ClockKey, IndexEntry>>,
+    streams: DashMap<Arc<str>, BTreeMap<ClockKey, Arc<IndexEntry>>>,
+    /// Scan index: either DashMap-based (AoS) or columnar (SoA/AoSoA).
+    /// Handles by_fact and scope queries. When columnar, the DashMaps inside
+    /// ScanIndex::Maps are replaced by contiguous arrays.
+    scan: ScanIndex,
     /// Point lookup: event_id -> entry. O(1) get by ID.
-    by_id: DashMap<u128, IndexEntry>,
+    by_id: DashMap<u128, Arc<IndexEntry>>,
     /// Chain head: entity -> latest IndexEntry. For prev_hash in writer step 2.
-    latest: DashMap<Arc<str>, IndexEntry>,
+    latest: DashMap<Arc<str>, Arc<IndexEntry>>,
     /// Monotonic counter. Foundation for cursors, checkpoints, exactly-once.
     global_sequence: AtomicU64,
     /// Total event count.
@@ -43,6 +45,7 @@ pub struct ClockKey {
 }
 
 /// IndexEntry: everything needed for index queries without disk reads.
+/// Shared via `Arc` across all index maps — one allocation per event.
 #[derive(Clone, Debug)]
 pub struct IndexEntry {
     /// Unique ID of the event.
@@ -112,10 +115,14 @@ impl IndexEntry {
 
 impl StoreIndex {
     pub(crate) fn new() -> Self {
+        Self::with_layout(&IndexLayout::default())
+    }
+
+    /// Create a StoreIndex with the specified scan index layout.
+    pub(crate) fn with_layout(layout: &IndexLayout) -> Self {
         Self {
             streams: DashMap::new(),
-            scope_entities: DashMap::new(),
-            by_fact: DashMap::new(),
+            scan: ScanIndex::for_layout(layout),
             by_id: DashMap::new(),
             latest: DashMap::new(),
             global_sequence: AtomicU64::new(0),
@@ -129,55 +136,49 @@ impl StoreIndex {
     /// [SPEC:IMPLEMENTATION NOTES item 5]
     pub(crate) fn insert(&self, entry: IndexEntry) {
         let entity = entry.coord.entity_arc();
-        let scope = entry.coord.scope_arc();
         let key = ClockKey {
             wall_ms: entry.wall_ms,
             clock: entry.clock,
             uuid: entry.event_id,
         };
 
+        // Arc: one allocation, shared across all maps.
+        let arc_entry = Arc::new(entry);
+
         // Primary index: entity -> BTreeMap
         // [DEP:dashmap::DashMap::entry] — holds write lock, release fast
         self.streams
             .entry(Arc::clone(&entity))
             .or_default()
-            .insert(key.clone(), entry.clone());
+            .insert(key, Arc::clone(&arc_entry));
 
-        // Scope index
-        self.scope_entities
-            .entry(scope)
-            .or_default()
-            .insert(Arc::clone(&entity));
-
-        // Fact index
-        self.by_fact
-            .entry(entry.kind)
-            .or_default()
-            .insert(key, entry.clone());
+        // Scan index: by_fact + scope (DashMap or columnar depending on layout)
+        self.scan.insert(Arc::clone(&arc_entry));
 
         // Point lookup
-        self.by_id.insert(entry.event_id, entry.clone());
+        self.by_id
+            .insert(arc_entry.event_id, Arc::clone(&arc_entry));
 
         // Chain head
-        self.latest.insert(entity, entry);
+        self.latest.insert(entity, arc_entry);
 
-        // Counters
-        self.global_sequence.fetch_add(1, Ordering::SeqCst);
+        // Counters — Release ordering sufficient for single-writer
+        self.global_sequence.fetch_add(1, Ordering::Release);
         self.len.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn get_by_id(&self, event_id: u128) -> Option<IndexEntry> {
-        self.by_id.get(&event_id).map(|r| r.value().clone())
+        self.by_id.get(&event_id).map(|r| r.value().as_ref().clone())
     }
 
     pub(crate) fn get_latest(&self, entity: &str) -> Option<IndexEntry> {
-        self.latest.get(entity).map(|r| r.value().clone())
+        self.latest.get(entity).map(|r| r.value().as_ref().clone())
     }
 
     pub(crate) fn stream(&self, entity: &str) -> Vec<IndexEntry> {
         self.streams
             .get(entity)
-            .map(|r| r.value().values().cloned().collect())
+            .map(|r| r.value().values().map(|arc| arc.as_ref().clone()).collect())
             .unwrap_or_default()
     }
 
@@ -190,49 +191,59 @@ impl StoreIndex {
 
         let mut candidates: Vec<IndexEntry> = if let Some(ref prefix) = region.entity_prefix {
             // Entity prefix → scan streams map for matching keys
-            // [DEP:dashmap::DashMap::iter] — NOT a consistent snapshot, fine for queries
             self.streams
                 .iter()
                 .filter(|r| r.key().as_ref().starts_with(prefix.as_ref()))
-                .flat_map(|r| r.value().values().cloned().collect::<Vec<_>>())
+                .flat_map(|r| r.value().values().map(|arc| arc.as_ref().clone()).collect::<Vec<_>>())
                 .collect()
         } else if let Some(ref scope) = region.scope {
-            // Scope → look up entities in scope, collect their streams
-            if let Some(entities) = self.scope_entities.get(scope.as_ref()) {
-                entities
-                    .value()
-                    .iter()
-                    .flat_map(|entity| {
-                        self.streams
-                            .get(entity.as_ref())
-                            .map(|r| r.value().values().cloned().collect::<Vec<_>>())
-                            .unwrap_or_default()
-                    })
-                    .collect()
+            // Scope → delegate to scan index
+            let scope_entries = self.scan.query_by_scope(scope.as_ref());
+            if !scope_entries.is_empty() {
+                scope_entries.into_iter().map(|arc| arc.as_ref().clone()).collect()
             } else {
-                Vec::new()
+                // Fallback for Maps mode: look up entities in scope, collect their streams
+                if let Some(entities) = self.scan.scope_entity_set(scope.as_ref()) {
+                    entities
+                        .iter()
+                        .flat_map(|entity| {
+                            self.streams
+                                .get(entity.as_ref())
+                                .map(|r| r.value().values().map(|arc| arc.as_ref().clone()).collect::<Vec<_>>())
+                                .unwrap_or_default()
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                }
             }
         } else if let Some(ref fact) = region.fact {
-            // Fact filter without entity/scope → scan by_fact index
+            // Fact filter → delegate to scan index for Exact kind
             match fact {
-                KindFilter::Exact(k) => self
-                    .by_fact
-                    .get(k)
-                    .map(|r| r.value().values().cloned().collect())
-                    .unwrap_or_default(),
+                KindFilter::Exact(k) => {
+                    let results = self.scan.query_by_kind(*k);
+                    if !results.is_empty() {
+                        results.into_iter().map(|arc| arc.as_ref().clone()).collect()
+                    } else {
+                        // Empty could mean AoS mode with no events of this kind — that's correct
+                        Vec::new()
+                    }
+                }
                 KindFilter::Category(c) => {
                     let cat = *c;
-                    self.by_fact
+                    // Category filter: must scan all kinds. For Maps mode, scan the DashMap.
+                    // For Columnar mode, this is less efficient — iterate all entries.
+                    // TODO: add category_scan to ScanIndex for better columnar support
+                    self.streams
                         .iter()
-                        .filter(|r| r.key().category() == cat)
-                        .flat_map(|r| r.value().values().cloned().collect::<Vec<_>>())
+                        .flat_map(|r| r.value().values().map(|arc| arc.as_ref().clone()).collect::<Vec<_>>())
+                        .filter(|e| e.kind.category() == cat)
                         .collect()
                 }
                 KindFilter::Any => {
-                    // No filter at all — return everything (expensive, use sparingly)
                     self.streams
                         .iter()
-                        .flat_map(|r| r.value().values().cloned().collect::<Vec<_>>())
+                        .flat_map(|r| r.value().values().map(|arc| arc.as_ref().clone()).collect::<Vec<_>>())
                         .collect()
                 }
             }
@@ -240,7 +251,7 @@ impl StoreIndex {
             // Region::all() with no filters — return everything
             self.streams
                 .iter()
-                .flat_map(|r| r.value().values().cloned().collect::<Vec<_>>())
+                .flat_map(|r| r.value().values().map(|arc| arc.as_ref().clone()).collect::<Vec<_>>())
                 .collect()
         };
 
@@ -252,9 +263,6 @@ impl StoreIndex {
                 candidates.retain(|e| e.coord.scope() == scope.as_ref());
             }
         }
-
-        // Entity prefix filter: not needed here. When scope is the primary selector
-        // and entity_prefix is Some, it's applied during initial candidate selection.
 
         // Fact filter (if not already applied)
         if region.entity_prefix.is_some() || region.scope.is_some() {
@@ -283,11 +291,11 @@ impl StoreIndex {
     /// DashMap iteration is not a linearisable snapshot, but that is acceptable
     /// because checkpoints are always written from a quiesced write path.
     pub(crate) fn all_entries(&self) -> Vec<IndexEntry> {
-        self.by_id.iter().map(|r| r.value().clone()).collect()
+        self.by_id.iter().map(|r| r.value().as_ref().clone()).collect()
     }
 
     pub(crate) fn global_sequence(&self) -> u64 {
-        self.global_sequence.load(Ordering::SeqCst)
+        self.global_sequence.load(Ordering::Acquire)
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -297,11 +305,10 @@ impl StoreIndex {
     /// Clear all indexes for a full rebuild (e.g. after compaction).
     pub(crate) fn clear(&self) {
         self.streams.clear();
-        self.scope_entities.clear();
-        self.by_fact.clear();
+        self.scan.clear();
         self.by_id.clear();
         self.latest.clear();
-        self.global_sequence.store(0, Ordering::SeqCst);
+        self.global_sequence.store(0, Ordering::Release);
         self.len.store(0, Ordering::Relaxed);
         // entity_locks intentionally NOT cleared — writer may hold references
     }
