@@ -371,12 +371,16 @@ pub(crate) fn restore_from_checkpoint(
 ) -> Result<(), StoreError> {
     for ce in entries {
         let coord = Coordinate::new(&ce.entity, &ce.scope)?;
+        let entity_id = index.interner.intern(&ce.entity);
+        let scope_id = index.interner.intern(&ce.scope);
 
         let entry = IndexEntry {
             event_id: ce.event_id,
             correlation_id: ce.correlation_id,
             causation_id: ce.causation_id,
             coord,
+            entity_id,
+            scope_id,
             kind: ce.kind,
             wall_ms: ce.wall_ms,
             clock: ce.clock,
@@ -415,11 +419,15 @@ mod tests {
                 "test-scope",
             )
             .expect("valid coordinate");
+            let entity_id = idx.interner.intern(coord.entity());
+            let scope_id = idx.interner.intern(coord.scope());
             let entry = IndexEntry {
                 event_id: (i + 1) as u128,
                 correlation_id: (i + 1) as u128,
                 causation_id: if i == 0 { None } else { Some(i as u128) },
                 coord,
+                entity_id,
+                scope_id,
                 kind: EventKind::custom(0x1, i as u16 & 0x0FFF),
                 wall_ms: 1_700_000_000_000 + i * 1000,
                 clock: u32::try_from(i).expect("i fits u32"),

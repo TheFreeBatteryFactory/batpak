@@ -74,12 +74,16 @@ fn replay_tail_segments(
                 continue;
             }
             let coord = Coordinate::new(&se.entity, &se.scope)?;
+            let entity_id = index.interner.intern(&se.entity);
+            let scope_id = index.interner.intern(&se.scope);
             let clock = se.header.position.sequence;
             let entry = IndexEntry {
                 event_id: se.header.event_id,
                 correlation_id: se.header.correlation_id,
                 causation_id: se.header.causation_id,
                 coord,
+                entity_id,
+                scope_id,
                 kind: se.header.event_kind,
                 wall_ms: se.header.position.wall_ms,
                 clock,
@@ -119,12 +123,16 @@ pub(crate) fn rebuild_from_segments(
         let scanned = reader.scan_segment_index(&dir_entry.path())?;
         for se in scanned {
             let coord = Coordinate::new(&se.entity, &se.scope)?;
+            let entity_id = index.interner.intern(&se.entity);
+            let scope_id = index.interner.intern(&se.scope);
             let clock = se.header.position.sequence;
             let entry = IndexEntry {
                 event_id: se.header.event_id,
                 correlation_id: se.header.correlation_id,
                 causation_id: se.header.causation_id,
                 coord,
+                entity_id,
+                scope_id,
                 kind: se.header.event_kind,
                 wall_ms: se.header.position.wall_ms,
                 clock,

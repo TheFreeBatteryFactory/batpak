@@ -611,6 +611,8 @@ mod tests {
             correlation_id: seq as u128,
             causation_id: None,
             coord,
+            entity_id: crate::store::interner::InternId::sentinel(),
+            scope_id: crate::store::interner::InternId::sentinel(),
             kind,
             wall_ms: seq * 1000,
             clock: seq as u32,

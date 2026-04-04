@@ -599,11 +599,15 @@ impl WriterState<'_> {
         };
         let coord =
             Coordinate::new(entity.as_ref(), scope.as_ref()).map_err(StoreError::Coordinate)?;
+        let entity_id = self.index.interner.intern(entity.as_ref());
+        let scope_id = self.index.interner.intern(scope.as_ref());
         let entry = IndexEntry {
             event_id: event.header.event_id,
             correlation_id,
             causation_id,
             coord: coord.clone(),
+            entity_id,
+            scope_id,
             kind,
             wall_ms: now_ms,
             clock,

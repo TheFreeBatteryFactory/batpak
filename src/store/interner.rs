@@ -56,6 +56,13 @@ impl InternId {
         self.0
     }
 
+    /// Returns the sentinel ID (slot 0, empty string). Used as a placeholder
+    /// when the interner is not available (e.g., in test constructors).
+    #[inline]
+    pub(crate) fn sentinel() -> Self {
+        Self(SENTINEL_ID)
+    }
+
     /// Returns `true` if this is the sentinel ID (slot 0, empty string).
     #[inline]
     pub(crate) fn is_sentinel(self) -> bool {

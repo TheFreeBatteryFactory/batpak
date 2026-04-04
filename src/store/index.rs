@@ -61,6 +61,10 @@ pub struct IndexEntry {
     pub causation_id: Option<u128>,
     /// Entity and scope coordinates for this event.
     pub coord: Coordinate,
+    /// Interned entity string ID for compact checkpoint serialization.
+    pub(crate) entity_id: crate::store::interner::InternId,
+    /// Interned scope string ID for compact checkpoint serialization.
+    pub(crate) scope_id: crate::store::interner::InternId,
     /// Event kind (type discriminant).
     pub kind: EventKind,
     /// HLC wall clock milliseconds — for global causal ordering.
@@ -144,11 +148,10 @@ impl StoreIndex {
     pub(crate) fn insert(&self, entry: IndexEntry) {
         let entity = entry.coord.entity_arc();
 
-        // Intern entity and scope strings for compact checkpoint serialization.
-        // The InternIds aren't stored in IndexEntry yet (phase 2), but the
-        // interner is populated so checkpoint can use it.
-        let _entity_id = self.interner.intern(entry.coord.entity());
-        let _scope_id = self.interner.intern(entry.coord.scope());
+        // Intern entity and scope strings. IDs stored in IndexEntry for
+        // compact checkpoint serialization and future InternId-only index.
+        debug_assert_eq!(entry.entity_id, self.interner.intern(entry.coord.entity()));
+        debug_assert_eq!(entry.scope_id, self.interner.intern(entry.coord.scope()));
 
         let key = ClockKey {
             wall_ms: entry.wall_ms,
