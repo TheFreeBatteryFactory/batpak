@@ -612,9 +612,7 @@ fn error_variant_coverage_all_store_errors_display() {
                 actual: 2,
             },
         ),
-        ("DuplicateEvent", StoreError::DuplicateEvent(456)),
         ("WriterCrashed", StoreError::WriterCrashed),
-        ("ShuttingDown", StoreError::ShuttingDown),
         ("CacheFailed", StoreError::CacheFailed("cache err".into())),
     ];
 

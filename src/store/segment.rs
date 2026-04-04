@@ -274,16 +274,6 @@ impl Segment<Active> {
         self.written_bytes >= max_bytes
     }
 
-    /// Deprecated: hardcodes SyncAll, ignoring user's SyncMode config.
-    /// Use `sync_with_mode(&config.sync_mode)` instead.
-    ///
-    /// # Errors
-    /// Returns [`StoreError::Io`] if the filesystem sync fails.
-    #[deprecated(note = "Use sync_with_mode(&config.sync_mode) to respect user's SyncMode config")]
-    pub fn sync(&mut self) -> Result<(), StoreError> {
-        self.sync_with_mode(&crate::store::SyncMode::SyncAll)
-    }
-
     /// Flush the segment file to durable storage using the specified sync mode.
     ///
     /// # Errors

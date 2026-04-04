@@ -1219,30 +1219,12 @@ fn store_error_display_variants() {
          Run: cargo test --test store_advanced store_error_display_variants"
     );
 
-    let shutting = format!("{}", StoreError::ShuttingDown);
-    assert!(
-        shutting.contains("shut"),
-        "PROPERTY: StoreError::ShuttingDown Display must contain 'shut' (e.g. 'shutting down').\n\
-         Investigate: src/store/mod.rs StoreError Display impl.\n\
-         Common causes: Display arm returns generic or empty string for ShuttingDown variant.\n\
-         Run: cargo test --test store_advanced store_error_display_variants"
-    );
-
     let cache = format!("{}", StoreError::CacheFailed("redis timeout".into()));
     assert!(
         cache.contains("redis timeout"),
         "PROPERTY: StoreError::CacheFailed Display must include the inner error message.\n\
          Investigate: src/store/mod.rs StoreError Display impl.\n\
          Common causes: inner string not interpolated, Display arm discards the inner field.\n\
-         Run: cargo test --test store_advanced store_error_display_variants"
-    );
-
-    let dup = format!("{}", StoreError::DuplicateEvent(0xBEEF));
-    assert!(
-        dup.contains("beef"),
-        "PROPERTY: StoreError::DuplicateEvent Display must include the event key in hex (e.g. 'beef').\n\
-         Investigate: src/store/mod.rs StoreError Display impl.\n\
-         Common causes: Display arm for DuplicateEvent omits the key, uses decimal instead of hex.\n\
          Run: cargo test --test store_advanced store_error_display_variants"
     );
 

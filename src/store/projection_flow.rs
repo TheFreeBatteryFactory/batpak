@@ -108,6 +108,10 @@ where
                     return Ok(Some(cached_state));
                 }
                 // If deser fails, fall through to full replay
+                tracing::warn!(
+                    entity,
+                    "incremental projection deser failed, falling back to full replay"
+                );
             }
 
             if is_fresh {
@@ -130,6 +134,14 @@ where
     let stored_events = store.reader.read_entries_batch(&positions)?;
     let events: Vec<_> = stored_events.into_iter().map(|s| s.event).collect();
     let result = T::from_events(&events);
+
+    if result.is_none() && !events.is_empty() {
+        tracing::debug!(
+            entity,
+            event_count = events.len(),
+            "projection returned None despite non-empty filtered event stream"
+        );
+    }
 
     if let Some(ref value) = result {
         if let Ok(bytes) = serde_json::to_vec(value) {

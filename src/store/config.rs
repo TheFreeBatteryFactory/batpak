@@ -139,6 +139,11 @@ impl StoreConfig {
                 "fd_budget must be > 0".into(),
             ));
         }
+        if self.broadcast_capacity == 0 {
+            return Err(crate::store::StoreError::Configuration(
+                "broadcast_capacity must be > 0 (0 creates rendezvous channels that starve subscribers)".into(),
+            ));
+        }
         Ok(())
     }
 

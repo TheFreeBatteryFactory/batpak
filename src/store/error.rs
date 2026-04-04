@@ -36,12 +36,8 @@ pub enum StoreError {
         /// Actual current sequence of the entity.
         actual: u32,
     },
-    /// An append was rejected because its idempotency key already exists.
-    DuplicateEvent(u128),
     /// The writer thread has crashed and is no longer processing commands.
     WriterCrashed,
-    /// The store is shutting down and cannot accept new commands.
-    ShuttingDown,
     /// A projection cache operation failed.
     CacheFailed(Box<dyn std::error::Error + Send + Sync>),
     /// A StoreConfig field has an invalid value.
@@ -71,9 +67,7 @@ impl std::fmt::Display for StoreError {
                 f,
                 "CAS failed for {entity}: expected seq {expected}, got {actual}"
             ),
-            Self::DuplicateEvent(key) => write!(f, "duplicate idempotency key {key:032x}"),
             Self::WriterCrashed => write!(f, "writer thread crashed"),
-            Self::ShuttingDown => write!(f, "store is shutting down"),
             Self::CacheFailed(e) => write!(f, "cache error: {e}"),
             Self::Configuration(msg) => write!(f, "invalid config: {msg}"),
             Self::IdempotencyRequired => write!(
@@ -95,9 +89,7 @@ impl std::error::Error for StoreError {
             | Self::CorruptSegment { .. }
             | Self::NotFound(_)
             | Self::SequenceMismatch { .. }
-            | Self::DuplicateEvent(_)
             | Self::WriterCrashed
-            | Self::ShuttingDown
             | Self::Configuration(_)
             | Self::IdempotencyRequired => None,
         }

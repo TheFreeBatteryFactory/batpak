@@ -382,7 +382,7 @@ impl Store {
     ///
     /// # Errors
     /// Returns `StoreError::Serialization` if the payload cannot be serialized.
-    /// Returns `StoreError::CasConflict` if the expected sequence does not match.
+    /// Returns `StoreError::SequenceMismatch` if the expected sequence does not match.
     /// Returns `StoreError::WriterCrashed` if the writer thread has exited unexpectedly.
     pub fn append_with_options(
         &self,
