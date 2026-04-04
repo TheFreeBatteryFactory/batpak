@@ -75,3 +75,30 @@
     - ART-DEVCONTAINER
     - ART-DEVCONTAINER-RUNNER
     - ART-CI
+- id: INV-GROUP-COMMIT-IDEMPOTENCY
+  statement: Group commit (batch > 1) structurally requires idempotency keys on every append, enforced at append time via StoreError::IdempotencyRequired.
+  artifacts:
+    - ART-STORE-MOD
+    - ART-STORE-CONTRACTS
+    - ART-GROUP-COMMIT-TESTS
+- id: INV-CHECKPOINT-V2-INTERNED
+  statement: Index checkpoint v2 persists an interner snapshot and uses InternId u32s instead of raw strings, saving ~22 bytes per entry and enabling fast cold-start restore. SIDX footers provide per-segment fast path.
+  artifacts:
+    - ART-STORE-CHECKPOINT
+    - ART-STORE-INTERNER
+    - ART-STORE-SIDX
+- id: INV-MMAP-SEALED-READS
+  statement: Sealed segment reads use zero-copy memory-mapped I/O via memmap2. Active segment uses FD cache with pread (Unix) or seek+read (Windows).
+  artifacts:
+    - ART-STORE-READER
+    - ART-STORE-CONFIG
+- id: INV-COLUMNAR-REPLACES-DASHMAP
+  statement: When IndexLayout is SoA, AoSoA, or SoAoS, the columnar ScanIndex replaces the by_fact and scope_entities DashMaps — no redundant data structures coexist.
+  artifacts:
+    - ART-STORE-COLUMNAR
+    - ART-STORE-CONFIG
+- id: INV-SCHEMA-VERSION-ISOLATION
+  statement: Cached projections are keyed by entity + schema_version. Different versions get separate cache slots, preventing stale cached values from being served to new code.
+  artifacts:
+    - ART-STORE-PROJECTION-FLOW
+    - ART-UNIFIED-TESTS

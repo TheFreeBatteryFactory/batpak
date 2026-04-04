@@ -151,6 +151,34 @@
   kind: adr
   paths:
     - docs/adr/ADR-0004-compaction-concurrency.md
+- id: ART-STORE-INTERNER
+  kind: source
+  paths:
+    - src/store/interner.rs
+- id: ART-STORE-COLUMNAR
+  kind: source
+  paths:
+    - src/store/columnar.rs
+- id: ART-STORE-SIDX
+  kind: source
+  paths:
+    - src/store/sidx.rs
+- id: ART-STORE-CHECKPOINT
+  kind: source
+  paths:
+    - src/store/checkpoint.rs
+- id: ART-STORE-READER
+  kind: source
+  paths:
+    - src/store/reader.rs
+- id: ART-UNIFIED-TESTS
+  kind: tests
+  paths:
+    - tests/unified_red.rs
+- id: ART-GROUP-COMMIT-TESTS
+  kind: tests
+  paths:
+    - tests/group_commit_crash.rs
 - id: ART-DX-DOCS
   kind: docs
   paths:
