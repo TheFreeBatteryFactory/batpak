@@ -12,6 +12,32 @@ pub enum SyncMode {
     SyncData,
 }
 
+/// Memory layout strategy for the secondary query index.
+///
+/// - `AoS`: Default. No secondary index — queries use DashMap (struct-per-entry).
+///   Best for point lookups and write-heavy workloads.
+/// - `SoA`: Parallel sorted arrays per field. Replaces `by_fact` and `scope_entities`
+///   DashMaps. Best for scan queries (`by_fact`, `by_scope`). Up to 10x faster for
+///   analytical workloads.
+/// - `AoSoA8/16/64`: Tiled SoA with cache-line-aligned tiles. Replaces scan DashMaps.
+///   Best for SIMD compute and projection replay. Tile size determines vectorization width:
+///   8 fills AVX (256-bit), 16 fills AVX-512 or Apple M-series cache line, 64 fills
+///   a full x86 cache line of u64s. Const-generic — compiler fully monomorphizes each variant.
+#[derive(Clone, Debug, Default)]
+pub enum IndexLayout {
+    /// Struct-per-entry in DashMap. Current behavior.
+    #[default]
+    AoS,
+    /// Parallel sorted arrays. Replaces by_fact + scope_entities DashMaps.
+    SoA,
+    /// 8-element tiles. Fits AVX register (256-bit).
+    AoSoA8,
+    /// 16-element tiles. Fits AVX-512 or Apple M-series cache line (128 bytes).
+    AoSoA16,
+    /// 64-element tiles. Fits full x86 cache line of u64s.
+    AoSoA64,
+}
+
 /// StoreConfig: all settings for a Store instance.
 /// No Default — callers must provide data_dir via `StoreConfig::new(path)`.
 /// Manual Clone and Debug impls because `clock` field is `Arc<dyn Fn>`.
@@ -42,6 +68,23 @@ pub struct StoreConfig {
     pub clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
     /// Sync mode: SyncAll (data+metadata, default) or SyncData (data only, faster).
     pub sync_mode: SyncMode,
+    /// Maximum Append commands drained per writer loop iteration before issuing
+    /// a single fsync (group commit). Default: 1 (per-event sync, backward-compatible).
+    /// Set higher for throughput. When > 1, all appends MUST include an idempotency
+    /// key — the store returns `StoreError::IdempotencyRequired` otherwise.
+    /// Set to 0 for unbounded drain (drain all pending before syncing).
+    pub group_commit_max_batch: u32,
+    /// Memory layout for the secondary query index. Default: AoS (DashMap only).
+    /// SoA and AoSoA variants replace by_fact + scope_entities DashMaps with
+    /// cache-friendly columnar storage.
+    pub index_layout: IndexLayout,
+    /// Enable incremental projection: when the `EventSourced` impl opts in via
+    /// `supports_incremental_apply() -> true`, load cached state and apply only
+    /// events newer than the cached watermark instead of full replay.
+    pub incremental_projection: bool,
+    /// Write an index checkpoint on close (and after compact) for fast cold start.
+    /// Default: true. Set to false for ephemeral test stores.
+    pub enable_checkpoint: bool,
 }
 
 impl StoreConfig {
@@ -62,7 +105,35 @@ impl StoreConfig {
             writer_stack_size: None,
             clock: None,
             sync_mode: SyncMode::default(),
+            group_commit_max_batch: 1,
+            index_layout: IndexLayout::default(),
+            incremental_projection: false,
+            enable_checkpoint: true,
         }
+    }
+
+    /// Validate config fields. Returns an error for values that would cause
+    /// silent breakage (deadlocks, infinite rotation, etc.).
+    ///
+    /// # Errors
+    /// Returns `StoreError::Configuration` for invalid field values.
+    pub(crate) fn validate(&self) -> Result<(), crate::store::StoreError> {
+        if self.segment_max_bytes == 0 {
+            return Err(crate::store::StoreError::Configuration(
+                "segment_max_bytes must be > 0".into(),
+            ));
+        }
+        if self.writer_channel_capacity == 0 {
+            return Err(crate::store::StoreError::Configuration(
+                "writer_channel_capacity must be > 0 (0 creates a rendezvous channel that deadlocks)".into(),
+            ));
+        }
+        if self.fd_budget == 0 {
+            return Err(crate::store::StoreError::Configuration(
+                "fd_budget must be > 0".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Set the maximum segment file size in bytes before rotation.
@@ -131,6 +202,32 @@ impl StoreConfig {
         self
     }
 
+    /// Set maximum appends batched before a single fsync (group commit).
+    /// Default: 1 (per-event, backward-compatible). When > 1, all appends
+    /// must include an idempotency key for crash safety.
+    pub fn with_group_commit_max_batch(mut self, group_commit_max_batch: u32) -> Self {
+        self.group_commit_max_batch = group_commit_max_batch;
+        self
+    }
+
+    /// Set the memory layout for the secondary query index.
+    pub fn with_index_layout(mut self, index_layout: IndexLayout) -> Self {
+        self.index_layout = index_layout;
+        self
+    }
+
+    /// Enable or disable incremental projection for types that support it.
+    pub fn with_incremental_projection(mut self, incremental_projection: bool) -> Self {
+        self.incremental_projection = incremental_projection;
+        self
+    }
+
+    /// Enable or disable index checkpoint on close.
+    pub fn with_enable_checkpoint(mut self, enable_checkpoint: bool) -> Self {
+        self.enable_checkpoint = enable_checkpoint;
+        self
+    }
+
     /// Get current timestamp in microseconds, using the injectable clock if set.
     pub(crate) fn now_us(&self) -> i64 {
         match &self.clock {
@@ -155,6 +252,10 @@ impl Clone for StoreConfig {
             writer_stack_size: self.writer_stack_size,
             clock: self.clock.clone(),
             sync_mode: self.sync_mode.clone(),
+            group_commit_max_batch: self.group_commit_max_batch,
+            index_layout: self.index_layout.clone(),
+            incremental_projection: self.incremental_projection,
+            enable_checkpoint: self.enable_checkpoint,
         }
     }
 }
@@ -174,6 +275,10 @@ impl std::fmt::Debug for StoreConfig {
             .field("writer_stack_size", &self.writer_stack_size)
             .field("clock", &self.clock.as_ref().map(|_| "<fn>"))
             .field("sync_mode", &self.sync_mode)
+            .field("group_commit_max_batch", &self.group_commit_max_batch)
+            .field("index_layout", &self.index_layout)
+            .field("incremental_projection", &self.incremental_projection)
+            .field("enable_checkpoint", &self.enable_checkpoint)
             .finish()
     }
 }

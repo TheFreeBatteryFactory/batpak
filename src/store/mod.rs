@@ -1,5 +1,11 @@
 mod ancestors;
+/// Index checkpoint: fast cold-start by persisting the in-memory index to disk.
+pub(crate) mod checkpoint;
+/// Columnar (SoA / AoSoA) secondary query index.
+pub(crate) mod columnar;
 mod config;
+/// String interning for compact index keys.
+pub(crate) mod interner;
 mod contracts;
 /// Pull-based cursor for guaranteed, ordered event delivery.
 pub mod cursor;
@@ -17,6 +23,8 @@ pub mod reader;
 mod runtime_contracts;
 /// On-disk segment format, frame encoding/decoding, and compaction helpers.
 pub mod segment;
+/// SIDX segment footer for fast cold-start index rebuild.
+pub(crate) mod sidx;
 /// Runtime statistics and diagnostic snapshots.
 pub mod stats;
 /// Push-based (lossy) event subscription via broadcast channel.
@@ -26,7 +34,7 @@ mod test_support;
 /// Background writer thread, restart policy, and subscriber fanout.
 pub mod writer;
 
-pub use config::{StoreConfig, SyncMode};
+pub use config::{IndexLayout, StoreConfig, SyncMode};
 pub use contracts::{
     AppendOptions, AppendReceipt, CompactionConfig, CompactionStrategy, RetentionPredicate,
 };
@@ -128,6 +136,7 @@ impl Store {
         config: StoreConfig,
         cache: Box<dyn ProjectionCache>,
     ) -> Result<Self, StoreError> {
+        config.validate()?;
         std::fs::create_dir_all(&config.data_dir)?;
         let config = Arc::new(config);
         let index = Arc::new(StoreIndex::new());
@@ -386,6 +395,10 @@ impl Store {
         idempotency_key: Option<u128>,
         flags: u8,
     ) -> Result<AppendReceipt, StoreError> {
+        // Group commit safety: batch > 1 requires idempotency keys for crash recovery.
+        if self.config.group_commit_max_batch > 1 && idempotency_key.is_none() {
+            return Err(StoreError::IdempotencyRequired);
+        }
         let payload_bytes =
             rmp_serde::to_vec_named(payload).map_err(|e| StoreError::Serialization(Box::new(e)))?;
         let payload_len = checked_payload_len(&payload_bytes)?;

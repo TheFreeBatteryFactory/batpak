@@ -23,6 +23,21 @@ where
         return Ok(None);
     }
 
+    // Filter by relevant_event_kinds() — hard filter at the index level.
+    // Empty slice = no filter = replay all events.
+    let relevant_kinds = T::relevant_event_kinds();
+    let entries: Vec<_> = if relevant_kinds.is_empty() {
+        entries
+    } else {
+        entries
+            .into_iter()
+            .filter(|e| relevant_kinds.contains(&e.kind))
+            .collect()
+    };
+    if entries.is_empty() {
+        return Ok(None);
+    }
+
     let watermark = entries.last().map(|e| e.global_sequence).unwrap_or(0);
     let cache_key = entity.as_bytes();
     let predicted_meta = projection::CacheMeta {

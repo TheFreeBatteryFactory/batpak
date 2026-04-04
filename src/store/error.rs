@@ -44,6 +44,10 @@ pub enum StoreError {
     ShuttingDown,
     /// A projection cache operation failed.
     CacheFailed(Box<dyn std::error::Error + Send + Sync>),
+    /// A StoreConfig field has an invalid value.
+    Configuration(String),
+    /// Group commit (batch > 1) requires an idempotency key on every append.
+    IdempotencyRequired,
 }
 
 impl std::fmt::Display for StoreError {
@@ -71,6 +75,11 @@ impl std::fmt::Display for StoreError {
             Self::WriterCrashed => write!(f, "writer thread crashed"),
             Self::ShuttingDown => write!(f, "store is shutting down"),
             Self::CacheFailed(e) => write!(f, "cache error: {e}"),
+            Self::Configuration(msg) => write!(f, "invalid config: {msg}"),
+            Self::IdempotencyRequired => write!(
+                f,
+                "group commit (batch > 1) requires an idempotency key on every append"
+            ),
         }
     }
 }
@@ -88,7 +97,9 @@ impl std::error::Error for StoreError {
             | Self::SequenceMismatch { .. }
             | Self::DuplicateEvent(_)
             | Self::WriterCrashed
-            | Self::ShuttingDown => None,
+            | Self::ShuttingDown
+            | Self::Configuration(_)
+            | Self::IdempotencyRequired => None,
         }
     }
 }

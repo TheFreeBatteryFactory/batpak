@@ -324,11 +324,69 @@ fn writer_loop(
                 guards,
                 respond,
             } => {
+                // Process first command in batch.
                 let result = state.handle_append(&entity, &scope, *event, kind, &guards);
-                // Respond to caller. Ignore send error (caller may have dropped).
                 let _ = respond.send(result);
-
                 events_since_sync += 1;
+
+                // Group commit: drain additional pending Append commands before syncing.
+                // group_commit_max_batch == 1 means no draining (backward compat).
+                // group_commit_max_batch == 0 means unbounded drain.
+                let extra_budget = if config.group_commit_max_batch <= 1 {
+                    0u32
+                } else if config.group_commit_max_batch == 0 {
+                    u32::MAX
+                } else {
+                    config.group_commit_max_batch.saturating_sub(1)
+                };
+                let mut drained = 0u32;
+                while drained < extra_budget {
+                    match rx.try_recv() {
+                        Ok(WriterCommand::Append {
+                            entity: e2,
+                            scope: s2,
+                            event: ev2,
+                            kind: k2,
+                            guards: g2,
+                            respond: r2,
+                        }) => {
+                            let res2 =
+                                state.handle_append(&e2, &s2, *ev2, k2, &g2);
+                            let _ = r2.send(res2);
+                            events_since_sync += 1;
+                            drained += 1;
+                        }
+                        Ok(WriterCommand::Sync { respond: r }) => {
+                            // Sync mid-batch: honor immediately, stop draining.
+                            let sr =
+                                state.active_segment.sync_with_mode(&config.sync_mode);
+                            let _ = r.send(sr);
+                            events_since_sync = 0;
+                            break;
+                        }
+                        Ok(WriterCommand::Shutdown { respond: r }) => {
+                            // Shutdown mid-batch: sync current batch, then exit.
+                            if events_since_sync > 0 {
+                                if let Err(e) =
+                                    state.active_segment.sync_with_mode(&config.sync_mode)
+                                {
+                                    tracing::error!("group commit pre-shutdown sync: {e}");
+                                }
+                            }
+                            let _ = r.send(Ok(()));
+                            return;
+                        }
+                        #[cfg(feature = "test-support")]
+                        Ok(WriterCommand::PanicForTest { respond: r }) => {
+                            let _ = r.send(Ok(()));
+                            #[allow(clippy::panic)] // intentional: exercises catch_unwind
+                            panic!("PanicForTest mid-batch");
+                        }
+                        Err(_) => break, // channel empty — batch complete
+                    }
+                }
+
+                // Single fsync for the entire batch.
                 if events_since_sync >= config.sync_every_n_events {
                     if let Err(e) = state.active_segment.sync_with_mode(&config.sync_mode) {
                         tracing::error!("periodic sync failed: {e}");
@@ -539,7 +597,7 @@ impl WriterState<'_> {
             wall_ms: now_ms,
             clock,
             hash_chain: event.hash_chain.clone().unwrap_or_default(),
-            disk_pos: disk_pos.clone(),
+            disk_pos,
             global_sequence: global_seq,
         };
         self.index.insert(entry);

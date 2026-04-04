@@ -378,6 +378,10 @@ fn store_config_all_fields_overridable() {
         writer_stack_size: Some(4 * 1024 * 1024), // 4MB (non-default)
         clock: Some(clock_fn),                    // custom clock
         sync_mode: SyncMode::SyncData,            // non-default
+        group_commit_max_batch: 1,                // default (not testing group commit here)
+        index_layout: IndexLayout::default(),     // default
+        incremental_projection: false,            // default
+        enable_checkpoint: false,                 // disabled for this test
     };
 
     let store = Store::open(config).expect(
@@ -426,6 +430,10 @@ fn store_config_debug_lists_all_integrity_relevant_fields() {
         writer_stack_size: Some(31 * 1024),
         clock: Some(clock_fn),
         sync_mode: SyncMode::SyncData,
+        group_commit_max_batch: 1,
+        index_layout: IndexLayout::default(),
+        incremental_projection: false,
+        enable_checkpoint: true,
     };
 
     let debug = format!("{config:?}");

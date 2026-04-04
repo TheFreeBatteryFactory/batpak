@@ -10,7 +10,28 @@ pub trait EventSourced<P>: Sized {
     /// Advances state by incorporating a single event.
     fn apply_event(&mut self, event: &Event<P>);
     /// Returns the event kinds this type cares about, used to filter store queries.
+    /// The store uses this as a hard filter: only matching events are loaded from disk
+    /// and passed to `from_events()`. Empty slice means "no filter — replay all events."
     fn relevant_event_kinds() -> &'static [EventKind];
+
+    /// Schema version for projection cache isolation. Increment this when the
+    /// serialized shape of this type changes in a breaking way. Default: 0.
+    /// Different versions get separate cache keys — old cached projections
+    /// are not served to new code.
+    fn schema_version() -> u64 {
+        0
+    }
+
+    /// Returns `true` if this type supports incremental application: loading a
+    /// cached state at a watermark and calling `apply_event()` only for events
+    /// newer than that watermark, instead of replaying from scratch.
+    ///
+    /// Opt-in — `false` by default. Only set to `true` if `from_events()` is a
+    /// pure fold over `apply_event()` (i.e., the incremental result is identical
+    /// to the full-replay result for any suffix of events).
+    fn supports_incremental_apply() -> bool {
+        false
+    }
 }
 
 /// `Reactive<P>`: forward-looking counterpart. See event → maybe emit derived events.

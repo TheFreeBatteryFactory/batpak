@@ -11,5 +11,5 @@ pub use crate::store::writer::Notification;
 pub use crate::store::writer::RestartPolicy;
 pub use crate::store::{
     AppendOptions, AppendReceipt, CompactionConfig, CompactionStrategy, Cursor, DiskPos, Freshness,
-    IndexEntry, NoCache, Store, StoreConfig, StoreError, SyncMode,
+    IndexEntry, IndexLayout, NoCache, Store, StoreConfig, StoreError, SyncMode,
 };

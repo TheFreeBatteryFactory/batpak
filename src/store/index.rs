@@ -68,7 +68,7 @@ pub struct IndexEntry {
 }
 
 /// DiskPos: where to find this event on disk.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct DiskPos {
     /// Numeric identifier of the segment file containing this event.
     pub segment_id: u64,
@@ -275,6 +275,15 @@ impl StoreIndex {
         // Sort by global_sequence for consistent ordering
         candidates.sort_by_key(|e| e.global_sequence);
         candidates
+    }
+
+    /// Return a snapshot of all entries in the index, collected from `by_id`.
+    ///
+    /// Used by `checkpoint::write_checkpoint` to serialise the full index.
+    /// DashMap iteration is not a linearisable snapshot, but that is acceptable
+    /// because checkpoints are always written from a quiesced write path.
+    pub(crate) fn all_entries(&self) -> Vec<IndexEntry> {
+        self.by_id.iter().map(|r| r.value().clone()).collect()
     }
 
     pub(crate) fn global_sequence(&self) -> u64 {
