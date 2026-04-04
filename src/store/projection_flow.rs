@@ -7,7 +7,7 @@ pub(crate) fn project<T>(
     freshness: &Freshness,
 ) -> Result<Option<T>, StoreError>
 where
-    T: EventSourced<serde_json::Value> + serde::Serialize + serde::de::DeserializeOwned,
+    T: EventSourced<serde_json::Value> + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
     tracing::debug!(
         target: "batpak::flow",
@@ -40,18 +40,22 @@ where
 
     let watermark = entries.last().map(|e| e.global_sequence).unwrap_or(0);
 
-    // Schema-versioned cache key: entity\0v{schema_version}
-    // Different projection types (or schema versions) get separate cache slots.
+    // Cache key: entity + \0 + type_hash + \0 + schema_version
+    // TypeId ensures two different EventSourced types on the same entity
+    // never collide, even if both use schema_version = 0 (the default).
     let schema_v = T::schema_version();
-    let cache_key: Vec<u8> = if schema_v == 0 {
-        entity.as_bytes().to_vec()
-    } else {
-        let mut key = entity.as_bytes().to_vec();
-        key.push(0); // null separator
-        key.extend_from_slice(b"v");
-        key.extend_from_slice(schema_v.to_string().as_bytes());
-        key
+    let type_hash = {
+        use std::any::TypeId;
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        TypeId::of::<T>().hash(&mut h);
+        h.finish()
     };
+    let mut cache_key: Vec<u8> = entity.as_bytes().to_vec();
+    cache_key.push(0);
+    cache_key.extend_from_slice(&type_hash.to_le_bytes());
+    cache_key.push(0);
+    cache_key.extend_from_slice(&schema_v.to_le_bytes());
 
     let predicted_meta = projection::CacheMeta {
         watermark,

@@ -129,15 +129,6 @@ impl Region {
         }
     }
 
-    /// Returns a region that exactly matches the given coordinate's entity and scope.
-    pub fn coordinate(coord: &Coordinate) -> Self {
-        Self {
-            entity_prefix: Some(coord.entity_arc()),
-            scope: Some(coord.scope_arc()),
-            ..Self::default()
-        }
-    }
-
     /// Chainable setters
     pub fn with_scope(mut self, scope: impl AsRef<str>) -> Self {
         self.scope = Some(Arc::from(scope.as_ref()));

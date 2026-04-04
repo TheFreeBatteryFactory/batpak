@@ -262,7 +262,7 @@ impl Store {
     /// Returns `StoreError::CacheFailed` if the projection cache backend encounters an error.
     pub fn project<T>(&self, entity: &str, freshness: &Freshness) -> Result<Option<T>, StoreError>
     where
-        T: EventSourced<serde_json::Value> + serde::Serialize + serde::de::DeserializeOwned,
+        T: EventSourced<serde_json::Value> + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
         projection_flow::project(self, entity, freshness)
     }
@@ -577,7 +577,7 @@ pub struct ProjectionWatcher<T> {
 
 impl<T> ProjectionWatcher<T>
 where
-    T: EventSourced<serde_json::Value> + serde::Serialize + serde::de::DeserializeOwned,
+    T: EventSourced<serde_json::Value> + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
     /// Block until a new event arrives for the watched entity, then re-project
     /// and return the updated state. Returns `None` if the store is dropped
