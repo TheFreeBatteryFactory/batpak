@@ -426,7 +426,7 @@ mod tests {
                 coord,
                 entity_id,
                 scope_id,
-                kind: EventKind::custom(0x1, i as u16 & 0x0FFF),
+                kind: EventKind::custom(0x1, (i & 0x0FFF) as u16),
                 wall_ms: 1_700_000_000_000 + i * 1000,
                 clock: u32::try_from(i).expect("i fits u32"),
                 hash_chain: HashChain::default(),

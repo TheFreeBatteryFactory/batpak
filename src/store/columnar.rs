@@ -708,7 +708,7 @@ mod tests {
             scope_id: crate::store::interner::InternId::sentinel(),
             kind,
             wall_ms: seq * 1000,
-            clock: seq as u32,
+            clock: u32::try_from(seq).expect("test seq fits u32"),
             hash_chain: HashChain::default(),
             disk_pos: DiskPos {
                 segment_id: 0,
@@ -838,6 +838,16 @@ mod tests {
         assert_eq!(idx.query_by_kind(KIND_A).len(), 33);
     }
 
+    #[test]
+    fn aosoa16_with_tile_callback() {
+        let idx = ColumnarIndex::new_aosoa16();
+        for i in 0u64..16 {
+            idx.insert(&make_entry(KIND_A, i, "e1", "s1"));
+        }
+        let len = idx.with_tile16(0, |t| t.len).expect("should be AoSoA16");
+        assert_eq!(len, 16);
+    }
+
     // --- AoSoA64 ---
 
     #[test]
@@ -847,6 +857,16 @@ mod tests {
             idx.insert(&make_entry(KIND_A, i, "e1", "s1"));
         }
         assert_eq!(idx.query_by_kind(KIND_A).len(), 130);
+    }
+
+    #[test]
+    fn aosoa64_with_tile_callback() {
+        let idx = ColumnarIndex::new_aosoa64();
+        for i in 0u64..64 {
+            idx.insert(&make_entry(KIND_A, i, "e1", "s1"));
+        }
+        let len = idx.with_tile64(0, |t| t.len).expect("should be AoSoA64");
+        assert_eq!(len, 64);
     }
 
     // --- ScanIndex ---

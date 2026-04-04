@@ -249,6 +249,14 @@ mod tests {
     }
 
     #[test]
+    fn sentinel_is_sentinel() {
+        assert!(InternId::sentinel().is_sentinel());
+        let interner = StringInterner::new();
+        let real_id = interner.intern("hello");
+        assert!(!real_id.is_sentinel());
+    }
+
+    #[test]
     fn intern_returns_stable_id() {
         let interner = StringInterner::new();
         let id1 = interner.intern("entity:1");
