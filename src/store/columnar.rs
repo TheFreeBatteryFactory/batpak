@@ -263,11 +263,9 @@ impl<const N: usize> AoSoAInner<N> {
 
     /// Execute `f` on the tile at position `idx`.
     ///
-    /// # Panics
-    /// Panics if `idx >= self.tiles.len()`.
-    // Production caller: tile_count() in debug_assert. Tests: aosoa*_with_tile_callback.
-    pub(crate) fn with_tile<R>(&self, idx: usize, f: impl FnOnce(&Tile<N>) -> R) -> R {
-        f(&self.tiles[idx])
+    /// Returns `None` if `idx` is out of range.
+    pub(crate) fn with_tile<R>(&self, idx: usize, f: impl FnOnce(&Tile<N>) -> R) -> Option<R> {
+        self.tiles.get(idx).map(f)
     }
 
     fn clear(&mut self) {
@@ -486,7 +484,7 @@ impl ColumnarIndex {
     /// Returns `None` if `self` is not an `AoSoA8` variant.
     pub(crate) fn with_tile8<R>(&self, idx: usize, f: impl FnOnce(&Tile<8>) -> R) -> Option<R> {
         match &self.inner {
-            ColumnarVariant::AoSoA8(lock) => Some(lock.read().with_tile(idx, f)),
+            ColumnarVariant::AoSoA8(lock) => lock.read().with_tile(idx, f),
             ColumnarVariant::SoA(_)
             | ColumnarVariant::AoSoA16(_)
             | ColumnarVariant::AoSoA64(_)
@@ -495,10 +493,10 @@ impl ColumnarIndex {
     }
 
     /// Invoke `f` with an immutable reference to the `Tile<16>` at `idx`.
-    /// Returns `None` if `self` is not an `AoSoA16` variant.
+    /// Returns `None` if `self` is not an `AoSoA16` variant or idx is out of range.
     pub(crate) fn with_tile16<R>(&self, idx: usize, f: impl FnOnce(&Tile<16>) -> R) -> Option<R> {
         match &self.inner {
-            ColumnarVariant::AoSoA16(lock) => Some(lock.read().with_tile(idx, f)),
+            ColumnarVariant::AoSoA16(lock) => lock.read().with_tile(idx, f),
             ColumnarVariant::SoA(_)
             | ColumnarVariant::AoSoA8(_)
             | ColumnarVariant::AoSoA64(_)
@@ -507,10 +505,10 @@ impl ColumnarIndex {
     }
 
     /// Invoke `f` with an immutable reference to the `Tile<64>` at `idx`.
-    /// Returns `None` if `self` is not an `AoSoA64` variant.
+    /// Returns `None` if `self` is not an `AoSoA64` variant or idx is out of range.
     pub(crate) fn with_tile64<R>(&self, idx: usize, f: impl FnOnce(&Tile<64>) -> R) -> Option<R> {
         match &self.inner {
-            ColumnarVariant::AoSoA64(lock) => Some(lock.read().with_tile(idx, f)),
+            ColumnarVariant::AoSoA64(lock) => lock.read().with_tile(idx, f),
             ColumnarVariant::SoA(_)
             | ColumnarVariant::AoSoA8(_)
             | ColumnarVariant::AoSoA16(_)

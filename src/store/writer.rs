@@ -334,12 +334,13 @@ fn writer_loop(
                 events_since_sync += 1;
 
                 // Group commit: drain additional pending Append commands before syncing.
-                // group_commit_max_batch == 1 means no draining (backward compat).
-                // group_commit_max_batch == 0 means unbounded drain.
-                let extra_budget = if config.group_commit_max_batch <= 1 {
-                    0u32
-                } else if config.group_commit_max_batch == 0 {
+                // group_commit_max_batch == 0 means unbounded drain (drain all pending).
+                // group_commit_max_batch == 1 means no draining (backward compat, per-event).
+                // group_commit_max_batch > 1 means drain up to (batch - 1) more.
+                let extra_budget = if config.group_commit_max_batch == 0 {
                     u32::MAX
+                } else if config.group_commit_max_batch == 1 {
+                    0u32
                 } else {
                     config.group_commit_max_batch.saturating_sub(1)
                 };
@@ -439,6 +440,10 @@ fn writer_loop(
                         }
                         Err(_) => break, // channel empty
                     }
+                }
+                // Write SIDX footer on active segment before shutdown sync.
+                if let Err(e) = state.active_segment.write_sidx_footer(&state.sidx_collector) {
+                    tracing::warn!("shutdown SIDX footer write failed (non-fatal): {e}");
                 }
                 if let Err(e) = state.active_segment.sync_with_mode(&config.sync_mode) {
                     tracing::error!("shutdown sync failed: {e}");
