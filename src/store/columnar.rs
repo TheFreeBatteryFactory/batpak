@@ -61,15 +61,15 @@ use std::sync::Arc;
 /// (no extra alloc, pointer locality preserved) while keeping the code
 /// straightforward.
 #[repr(C, align(64))]
-pub(crate) struct Tile<const N: usize> {
+pub struct Tile<const N: usize> {
     /// Event kinds stored in this tile; all entries have the same kind.
-    pub(crate) kinds: Vec<EventKind>,
+    pub kinds: Vec<EventKind>,
     /// `global_sequence` values parallel to `kinds` and `entries`.
-    pub(crate) sequences: Vec<u64>,
+    pub sequences: Vec<u64>,
     /// Full index entries parallel to `kinds` and `sequences`.
-    pub(crate) entries: Vec<Arc<IndexEntry>>,
+    pub entries: Vec<Arc<IndexEntry>>,
     /// Number of valid elements currently stored in the tile.
-    pub(crate) len: usize,
+    pub len: usize,
 }
 
 impl<const N: usize> Tile<N> {
@@ -265,7 +265,6 @@ impl<const N: usize> AoSoAInner<N> {
     ///
     /// # Panics
     /// Panics if `idx >= self.tiles.len()`.
-    #[cfg(test)]
     pub(crate) fn with_tile<R>(&self, idx: usize, f: impl FnOnce(&Tile<N>) -> R) -> R {
         f(&self.tiles[idx])
     }
@@ -484,7 +483,6 @@ impl ColumnarIndex {
     /// Caller contract violation — not recoverable.
     /// Invoke `f` with an immutable reference to the `Tile<8>` at `idx`.
     /// Returns `None` if `self` is not an `AoSoA8` variant.
-    #[cfg(test)]
     pub(crate) fn with_tile8<R>(&self, idx: usize, f: impl FnOnce(&Tile<8>) -> R) -> Option<R> {
         match &self.inner {
             ColumnarVariant::AoSoA8(lock) => Some(lock.read().with_tile(idx, f)),
@@ -497,7 +495,6 @@ impl ColumnarIndex {
 
     /// Invoke `f` with an immutable reference to the `Tile<16>` at `idx`.
     /// Returns `None` if `self` is not an `AoSoA16` variant.
-    #[cfg(test)]
     pub(crate) fn with_tile16<R>(&self, idx: usize, f: impl FnOnce(&Tile<16>) -> R) -> Option<R> {
         match &self.inner {
             ColumnarVariant::AoSoA16(lock) => Some(lock.read().with_tile(idx, f)),
@@ -510,7 +507,6 @@ impl ColumnarIndex {
 
     /// Invoke `f` with an immutable reference to the `Tile<64>` at `idx`.
     /// Returns `None` if `self` is not an `AoSoA64` variant.
-    #[cfg(test)]
     pub(crate) fn with_tile64<R>(&self, idx: usize, f: impl FnOnce(&Tile<64>) -> R) -> Option<R> {
         match &self.inner {
             ColumnarVariant::AoSoA64(lock) => Some(lock.read().with_tile(idx, f)),
@@ -529,6 +525,28 @@ impl ColumnarIndex {
             ColumnarVariant::AoSoA16(lock) => lock.write().clear(),
             ColumnarVariant::AoSoA64(lock) => lock.write().clear(),
             ColumnarVariant::SoAoS(lock) => lock.write().clear(),
+        }
+    }
+
+    /// Return the number of tiles for AoSoA layouts, or 0 for SoA/SoAoS.
+    /// Uses `with_tile*` to inspect the inner state.
+    pub(crate) fn tile_count(&self) -> usize {
+        match &self.inner {
+            ColumnarVariant::SoA(_) | ColumnarVariant::SoAoS(_) => 0,
+            ColumnarVariant::AoSoA8(lock) => lock.read().tiles.len(),
+            ColumnarVariant::AoSoA16(lock) => lock.read().tiles.len(),
+            ColumnarVariant::AoSoA64(lock) => lock.read().tiles.len(),
+        }
+    }
+
+    /// Return the layout name as a static string for diagnostics.
+    pub(crate) fn layout_name(&self) -> &'static str {
+        match &self.inner {
+            ColumnarVariant::SoA(_) => "SoA",
+            ColumnarVariant::AoSoA8(_) => "AoSoA8",
+            ColumnarVariant::AoSoA16(_) => "AoSoA16",
+            ColumnarVariant::AoSoA64(_) => "AoSoA64",
+            ColumnarVariant::SoAoS(_) => "SoAoS",
         }
     }
 }

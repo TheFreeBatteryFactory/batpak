@@ -17,7 +17,7 @@ pub(crate) struct StoreIndex {
     /// Scan index: either DashMap-based (AoS) or columnar (SoA/AoSoA).
     /// Handles by_fact and scope queries. When columnar, the DashMaps inside
     /// ScanIndex::Maps are replaced by contiguous arrays.
-    scan: ScanIndex,
+    pub(crate) scan: ScanIndex,
     /// Point lookup: event_id -> entry. O(1) get by ID.
     by_id: DashMap<u128, Arc<IndexEntry>>,
     /// Chain head: entity -> latest IndexEntry. For prev_hash in writer step 2.

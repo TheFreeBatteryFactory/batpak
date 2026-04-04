@@ -28,4 +28,8 @@ pub struct StoreDiagnostics {
     pub fd_budget: usize,
     /// Writer thread restart policy used on panic.
     pub restart_policy: RestartPolicy,
+    /// Active index layout name (AoS, SoA, AoSoA8, AoSoA16, AoSoA64, SoAoS).
+    pub index_layout: &'static str,
+    /// Number of tiles in the columnar index (0 for non-tiled layouts).
+    pub tile_count: usize,
 }

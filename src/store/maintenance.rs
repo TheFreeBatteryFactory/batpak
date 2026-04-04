@@ -274,6 +274,13 @@ pub(crate) fn stats(store: &Store) -> StoreStats {
 }
 
 pub(crate) fn diagnostics(store: &Store) -> StoreDiagnostics {
+    // Extract tile stats from columnar index (0 for non-columnar layouts).
+    let (index_layout, tile_count) = match &store.index.scan {
+        crate::store::columnar::ScanIndex::Maps { .. } => ("AoS", 0),
+        crate::store::columnar::ScanIndex::Columnar(ci) => {
+            (ci.layout_name(), ci.tile_count())
+        }
+    };
     StoreDiagnostics {
         event_count: store.index.len(),
         global_sequence: store.index.global_sequence(),
@@ -281,5 +288,7 @@ pub(crate) fn diagnostics(store: &Store) -> StoreDiagnostics {
         segment_max_bytes: store.config.segment_max_bytes,
         fd_budget: store.config.fd_budget,
         restart_policy: store.config.restart_policy.clone(),
+        index_layout,
+        tile_count,
     }
 }
