@@ -146,6 +146,11 @@ impl Store {
         // [SPEC:IMPLEMENTATION NOTES item 2 — segment naming, alphabetical scan]
         index_rebuild::open_index(&index, &reader, &config.data_dir, config.enable_checkpoint)?;
 
+        // Tell the reader which segment is active (for mmap dispatch).
+        // The writer's initial segment ID is the highest existing + 1.
+        let active_seg_id = writer::find_latest_segment_id(&config.data_dir).unwrap_or(0) + 1;
+        reader.set_active_segment(active_seg_id);
+
         let subscribers = Arc::new(SubscriberList::new());
         let writer = WriterHandle::spawn(&config, &index, &subscribers)?;
 

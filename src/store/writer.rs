@@ -654,7 +654,7 @@ impl WriterState<'_> {
 }
 
 /// Find the latest segment ID by scanning data_dir for .fbat files.
-fn find_latest_segment_id(dir: &std::path::Path) -> Option<u64> {
+pub(crate) fn find_latest_segment_id(dir: &std::path::Path) -> Option<u64> {
     std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok())

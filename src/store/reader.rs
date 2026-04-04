@@ -2,23 +2,32 @@ use crate::coordinate::Coordinate;
 use crate::event::{Event, EventHeader, HashChain, StoredEvent};
 use crate::store::segment::{self, FramePayload, SEGMENT_MAGIC};
 use crate::store::{DiskPos, StoreError};
+use dashmap::DashMap;
 use parking_lot::Mutex;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Reader: reads events from segment files. LRU file descriptor cache + buffer pool.
-/// Behind parking_lot::Mutex for Send + Sync. [SPEC:src/store/reader.rs]
+/// Reader: reads events from segment files.
+/// Sealed segments: memory-mapped via `memmap2` for zero-copy reads.
+/// Active segment: LRU FD cache + pread (Unix) / seek+read (Windows).
+/// [SPEC:src/store/reader.rs]
 /// [SPEC:IMPLEMENTATION NOTES item 6 — Store is Send + Sync]
 pub(crate) struct Reader {
     data_dir: PathBuf,
-    /// LRU FD cache: segment_id -> open File handle. Evicts oldest when full.
+    /// FD cache for the active segment only. Sealed segments use mmap.
     /// [DEP:parking_lot::Mutex] — lock() returns guard directly, no poisoning
     fd_cache: Mutex<FdCache>,
-    /// Recycled frame buffers to avoid per-read allocations during batch reads.
+    /// Recycled frame buffers for active segment reads (mmap reads are zero-copy).
     buffer_pool: Mutex<Vec<Vec<u8>>>,
+    /// Memory-mapped sealed segments. DashMap for concurrent reader access.
+    sealed_maps: DashMap<u64, memmap2::Mmap>,
+    /// ID of the current active (writable) segment. Set by the writer on rotation.
+    /// Segments with ID < this are sealed and safe for mmap.
+    active_segment_id: AtomicU64,
 }
 
 struct FdCache {
@@ -69,7 +78,42 @@ impl Reader {
                 budget: fd_budget,
             }),
             buffer_pool: Mutex::new(Vec::new()),
+            sealed_maps: DashMap::new(),
+            active_segment_id: AtomicU64::new(0),
         }
+    }
+
+    /// Set the active segment ID. Called by the writer after spawn and on rotation.
+    /// Segments with ID < this value are considered sealed and safe for mmap.
+    pub(crate) fn set_active_segment(&self, id: u64) {
+        self.active_segment_id.store(id, Ordering::Release);
+    }
+
+    /// Check if a segment is sealed (not the active segment).
+    fn is_sealed(&self, segment_id: u64) -> bool {
+        segment_id < self.active_segment_id.load(Ordering::Acquire)
+    }
+
+    /// Get or create a memory mapping for a sealed segment.
+    fn get_or_map_sealed(&self, segment_id: u64) -> Result<dashmap::mapref::one::Ref<'_, u64, memmap2::Mmap>, StoreError> {
+        if let Some(entry) = self.sealed_maps.get(&segment_id) {
+            return Ok(entry);
+        }
+        // Map the segment file
+        let path = self.data_dir.join(segment::segment_filename(segment_id));
+        let file = File::open(&path).map_err(StoreError::Io)?;
+        // SAFETY: memmap2::Mmap::map is unsafe because the file could be modified externally.
+        // Sealed segments are immutable by design — only compaction deletes them, and
+        // evict_segment drops the mapping before deletion.
+        let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(StoreError::Io)?;
+        self.sealed_maps.insert(segment_id, mmap);
+        // Return the just-inserted entry
+        self.sealed_maps.get(&segment_id).ok_or_else(|| {
+            StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "mmap entry missing after insert",
+            ))
+        })
     }
 
     /// Acquire a buffer from the pool, or allocate a new one if pool is empty.
@@ -93,15 +137,21 @@ impl Reader {
     }
 
     /// Read a single event by disk position. CRC32 verified.
+    /// Sealed segments: zero-copy read via mmap.
+    /// Active segment: pread (Unix) or seek+read (Windows) via FD cache.
     /// [DEP:crc32fast::hash] verifies frame integrity on every read.
     pub(crate) fn read_entry(
         &self,
         pos: &DiskPos,
     ) -> Result<StoredEvent<serde_json::Value>, StoreError> {
+        // Fast path: mmap for sealed segments — zero-copy, no lock, no buffer.
+        if self.is_sealed(pos.segment_id) {
+            return self.read_entry_mmap(pos);
+        }
+
+        // Slow path: active segment via FD cache + buffer pool.
         let mut buf = self.acquire_buffer(pos.length as usize);
 
-        // Use pread (read_at) — doesn't modify file cursor. [SPEC:IMPLEMENTATION NOTES item 7]
-        // Loop to handle short reads (read_at may return fewer bytes than requested).
         #[cfg(unix)]
         {
             use std::os::unix::fs::FileExt;
@@ -123,9 +173,6 @@ impl Reader {
         }
         #[cfg(not(unix))]
         {
-            // Non-unix: seek + read under the FD cache lock to prevent concurrent seeks.
-            // Cloned File handles share the file cursor on Windows, so the lock must be
-            // held for the entire seek+read. [SPEC:IMPLEMENTATION NOTES item 7]
             use std::io::{Seek, SeekFrom};
             let offset = pos.offset;
             self.with_fd(pos.segment_id, |f| {
@@ -404,8 +451,55 @@ impl Reader {
         op(file)
     }
 
-    /// Evict a segment from the FD cache. Called during compaction before deleting segment files.
+    /// Zero-copy read from a sealed segment's memory map.
+    fn read_entry_mmap(
+        &self,
+        pos: &DiskPos,
+    ) -> Result<StoredEvent<serde_json::Value>, StoreError> {
+        let mmap_ref = self.get_or_map_sealed(pos.segment_id)?;
+        let mmap: &memmap2::Mmap = mmap_ref.value();
+        let start = pos.offset as usize;
+        let end = start + pos.length as usize;
+        if end > mmap.len() {
+            return Err(StoreError::corrupt_eof(pos.segment_id));
+        }
+        let frame_buf = &mmap[start..end];
+        let (msgpack, _) = segment::frame_decode(frame_buf).map_err(|e| match e {
+            segment::FrameDecodeError::CrcMismatch { .. } => StoreError::CrcMismatch {
+                segment_id: pos.segment_id,
+                offset: pos.offset,
+            },
+            _ => StoreError::corrupt_frame(pos.segment_id, e.to_string()),
+        })?;
+        let payload: FramePayload<serde_json::Value> =
+            rmp_serde::from_slice(msgpack).map_err(|e| StoreError::Serialization(Box::new(e)))?;
+        let coord =
+            Coordinate::new(&payload.entity, &payload.scope).map_err(StoreError::Coordinate)?;
+        Ok(StoredEvent {
+            coordinate: coord,
+            event: payload.event,
+        })
+    }
+
+    /// Read multiple events by disk position. Uses mmap for sealed segments.
+    pub(crate) fn read_entries_batch(
+        &self,
+        positions: &[&DiskPos],
+    ) -> Result<Vec<StoredEvent<serde_json::Value>>, StoreError> {
+        let mut results = Vec::with_capacity(positions.len());
+        for pos in positions {
+            results.push(self.read_entry(pos)?);
+        }
+        Ok(results)
+    }
+
+    /// Evict a segment from FD cache and mmap cache.
+    /// Called during compaction before deleting segment files.
+    /// On Windows, the mmap MUST be dropped before the file can be deleted.
     pub(crate) fn evict_segment(&self, segment_id: u64) {
+        // Drop mmap first (required on Windows, polite on POSIX).
+        self.sealed_maps.remove(&segment_id);
+        // Then drop the FD cache entry.
         let mut cache = self.fd_cache.lock();
         cache.fds.remove(&segment_id);
         cache.order.retain(|&id| id != segment_id);
