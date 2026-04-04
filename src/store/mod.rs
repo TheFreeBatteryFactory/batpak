@@ -142,9 +142,9 @@ impl Store {
         let index = Arc::new(StoreIndex::new());
         let reader = Arc::new(Reader::new(config.data_dir.clone(), config.fd_budget));
 
-        // Cold start: scan all segments, rebuild index.
+        // Cold start: checkpoint fast path or full segment scan.
         // [SPEC:IMPLEMENTATION NOTES item 2 — segment naming, alphabetical scan]
-        index_rebuild::rebuild_from_segments(&index, &reader, &config.data_dir)?;
+        index_rebuild::open_index(&index, &reader, &config.data_dir, config.enable_checkpoint)?;
 
         let subscribers = Arc::new(SubscriberList::new());
         let writer = WriterHandle::spawn(&config, &index, &subscribers)?;

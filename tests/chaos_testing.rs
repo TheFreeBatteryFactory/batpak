@@ -649,11 +649,11 @@ fn chaos_cursor_completeness_concurrent() {
 #[test]
 fn chaos_truncated_segment_recovers() {
     let dir = TempDir::new().expect("temp dir");
-    let config = StoreConfig {
-        data_dir: dir.path().to_path_buf(),
-        segment_max_bytes: 65536,
-        ..StoreConfig::new("")
-    };
+    // Checkpoint disabled: this test truncates segments to simulate crashes,
+    // which invalidates any checkpoint written before the truncation.
+    let config = StoreConfig::new(dir.path())
+        .with_segment_max_bytes(65536)
+        .with_enable_checkpoint(false);
     let store = Store::open(config).expect("open");
     let coord = Coordinate::new("chaos:truncate", "chaos:scope").expect("valid");
     let kind = EventKind::custom(0xF, 1);
@@ -726,12 +726,12 @@ fn chaos_truncated_segment_recovers() {
         truncated_len
     );
 
-    // Reopen: cold start must tolerate the truncated tail and not panic
-    let config2 = StoreConfig {
-        data_dir: dir.path().to_path_buf(),
-        segment_max_bytes: 65536,
-        ..StoreConfig::new("")
-    };
+    // Reopen: cold start must tolerate the truncated tail and not panic.
+    // Checkpoint disabled: the checkpoint references pre-truncation offsets
+    // that no longer exist, so it would produce corrupt reads.
+    let config2 = StoreConfig::new(dir.path())
+        .with_segment_max_bytes(65536)
+        .with_enable_checkpoint(false);
     let store2 = Store::open(config2).expect("store must reopen after tail truncation");
 
     let recovered_entries = store2.stream("chaos:truncate");

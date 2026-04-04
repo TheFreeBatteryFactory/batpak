@@ -185,7 +185,13 @@ pub(crate) fn compact(
         &store.reader,
         &store.config.data_dir,
     )?;
-    sync(store)?;
+
+    // Write checkpoint after post-compact rebuild so next open is fast.
+    if store.config.enable_checkpoint {
+        if let Err(e) = write_checkpoint_on_close(store) {
+            tracing::warn!("post-compaction checkpoint write failed: {e}");
+        }
+    }
 
     Ok(segment::CompactionResult {
         segments_removed,
@@ -202,8 +208,62 @@ pub(crate) fn close(store: Store) -> Result<(), StoreError> {
         .send(crate::store::writer::WriterCommand::Shutdown { respond: tx })
         .map_err(|_| StoreError::WriterCrashed)?;
     let result = rx.recv().map_err(|_| StoreError::WriterCrashed)?;
+
+    // Write index checkpoint after writer shutdown (all data fsynced).
+    if store.config.enable_checkpoint {
+        if let Err(e) = write_checkpoint_on_close(&store) {
+            tracing::warn!("failed to write checkpoint on close: {e}");
+            // Non-fatal: next open will fall back to full segment scan.
+        }
+    }
+
     drop(store);
     result
+}
+
+/// Determine watermark from the latest segment file and write checkpoint.
+fn write_checkpoint_on_close(store: &Store) -> Result<(), StoreError> {
+    let (seg_id, offset) = find_latest_segment_watermark(&store.config.data_dir)?;
+    crate::store::checkpoint::write_checkpoint(
+        &store.index,
+        &store.config.data_dir,
+        seg_id,
+        offset,
+    )
+}
+
+/// Scan data_dir for the highest-numbered .fbat file and return (segment_id, file_size).
+fn find_latest_segment_watermark(
+    data_dir: &std::path::Path,
+) -> Result<(u64, u64), StoreError> {
+    let mut max: Option<(u64, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(data_dir).map_err(StoreError::Io)? {
+        let entry = entry.map_err(StoreError::Io)?;
+        let path = entry.path();
+        let ext_ok = path
+            .extension()
+            .map(|ext| ext == crate::store::segment::SEGMENT_EXTENSION)
+            .unwrap_or(false);
+        if !ext_ok {
+            continue;
+        }
+        if let Some(id) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            if max.as_ref().map(|(m, _)| id > *m).unwrap_or(true) {
+                max = Some((id, path));
+            }
+        }
+    }
+    match max {
+        Some((id, path)) => {
+            let offset = std::fs::metadata(&path).map_err(StoreError::Io)?.len();
+            Ok((id, offset))
+        }
+        None => Ok((0, 0)),
+    }
 }
 
 pub(crate) fn stats(store: &Store) -> StoreStats {
