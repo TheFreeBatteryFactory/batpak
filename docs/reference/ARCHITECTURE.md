@@ -80,7 +80,7 @@ The **Store** is the runtime. It manages:
 - **Write path**: `append()` serializes to MessagePack, sends to the background writer thread via flume channel, writer appends to the active segment file, computes CRC32 + optional Blake3 hash, indexes the event, broadcasts to subscribers.
 - **Read path**: `get()`, `query()`, `stream()`, `by_scope()`, `by_fact()` — all sync, all go through the in-memory index.
 - **Projection path**: `project::<T>(entity, freshness)` replays events through `EventSourced::from_events()` with optional caching (NoCache, RedbCache, LmdbCache).
-- **Subscription path**: `subscribe(region)` returns a push-based `Subscription` (lossy, bounded flume channel). `cursor(region)` returns a pull-based `Cursor` (guaranteed delivery).
+- **Subscription path**: `subscribe(region)` returns a push-based `Subscription` (lossy, bounded flume channel). `cursor(region)` returns a pull-based `Cursor` (guaranteed delivery). `watch_projection::<T>(entity, freshness)` returns a `ProjectionWatcher` that auto-re-projects on new events.
 - **Lifecycle**: `sync()`, `snapshot()`, `compact()`, `close()`.
 
 ### The Writer Thread

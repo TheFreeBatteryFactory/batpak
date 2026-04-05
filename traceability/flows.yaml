@@ -48,6 +48,12 @@
     - ART-STORE-MAINTENANCE
     - ART-REPLAY-TESTS
     - ART-ADR-COMPACTION
+- id: FLOW-WATCH-PROJECTION
+  summary: Watch-projection subscribes to entity events and re-projects on each notification, returning updated state to the caller.
+  artifacts:
+    - ART-STORE-MOD
+    - ART-STORE-PROJECTION-FLOW
+    - ART-UNIFIED-TESTS
 - id: FLOW-CLOSE
   summary: Close routes shutdown through the writer so outstanding work drains before the store exits.
   artifacts:

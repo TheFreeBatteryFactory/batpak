@@ -1,4 +1,4 @@
-FROM rust:stable-bookworm
+FROM rust:bookworm
 
 ARG DEBIAN_FRONTEND=noninteractive
 

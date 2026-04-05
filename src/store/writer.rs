@@ -376,14 +376,17 @@ fn writer_loop(
                         }
                         Ok(WriterCommand::Shutdown { respond: r }) => {
                             // Shutdown mid-batch: sync current batch, then exit.
-                            if events_since_sync > 0 {
-                                if let Err(e) =
-                                    state.active_segment.sync_with_mode(&config.sync_mode)
-                                {
+                            // Propagate sync errors honestly — lifecycle honesty invariant.
+                            let shutdown_result = if events_since_sync > 0 {
+                                let sr = state.active_segment.sync_with_mode(&config.sync_mode);
+                                if let Err(ref e) = sr {
                                     tracing::error!("group commit pre-shutdown sync: {e}");
                                 }
-                            }
-                            let _ = r.send(Ok(()));
+                                sr
+                            } else {
+                                Ok(())
+                            };
+                            let _ = r.send(shutdown_result);
                             return;
                         }
                         #[cfg(feature = "test-support")]
@@ -450,10 +453,11 @@ fn writer_loop(
                 if let Err(e) = state.active_segment.write_sidx_footer(&state.sidx_collector) {
                     tracing::warn!("shutdown SIDX footer write failed (non-fatal): {e}");
                 }
-                if let Err(e) = state.active_segment.sync_with_mode(&config.sync_mode) {
+                let sync_result = state.active_segment.sync_with_mode(&config.sync_mode);
+                if let Err(ref e) = sync_result {
                     tracing::error!("shutdown sync failed: {e}");
                 }
-                let _ = respond.send(Ok(()));
+                let _ = respond.send(sync_result);
                 return; // exit writer loop
             }
             // test-only: intentional panic to exercise restart_policy
