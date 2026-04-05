@@ -18,7 +18,7 @@
 //! use batpak::prelude::*;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let store = Store::open_default()?;
+//! let store = Store::open(StoreConfig::new("./my-store"))?;
 //! let gates: GateSet<()> = GateSet::new();
 //! let pipeline = Pipeline::new(gates);
 //!

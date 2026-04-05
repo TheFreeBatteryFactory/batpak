@@ -81,16 +81,6 @@ pub struct Store {
 }
 
 impl Store {
-    /// Open a store with default config at `./batpak-data`.
-    /// Sugar over `Store::open(StoreConfig::new("./batpak-data"))`.
-    /// [SPEC:src/store/mod.rs — Store::open_default]
-    ///
-    /// # Errors
-    /// Returns `StoreError::Io` if the data directory cannot be created or segments cannot be read.
-    pub fn open_default() -> Result<Self, StoreError> {
-        Self::open(StoreConfig::new("./batpak-data"))
-    }
-
     /// Open a store at the given config's data directory. Creates the directory if absent.
     /// Uses `NoCache` for projection (no external cache backend).
     ///
