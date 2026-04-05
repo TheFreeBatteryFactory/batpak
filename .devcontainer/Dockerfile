@@ -20,4 +20,7 @@ RUN cargo install --locked cargo-deny@0.19.0 \
     && cargo install --locked cargo-mutants@27.0.0 \
     && cargo install --locked mdbook@0.4.52
 
+# Allow git operations on the mounted workspace (ownership mismatch in CI)
+RUN git config --global --add safe.directory /workspace/batpak
+
 WORKDIR /workspace/batpak
