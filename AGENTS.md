@@ -3,7 +3,13 @@
 ## Repo Map
 
 - `src/`: runtime crate
-- `tests/`: integration, property, compile-fail, and perf-gate tests
+  - `src/store/`: see `mod.rs` for full submodule list. Key internals:
+    - `checkpoint.rs` — index checkpoint (fast cold-start persistence)
+    - `sidx.rs` — SIDX segment footer for cold-start rebuild
+    - `columnar.rs` — SoA/AoSoA/SoAoS secondary query index
+    - `interner.rs` — string interning for compact index keys
+    - `projection_flow.rs` — projection replay + incremental apply + schema versioning
+- `tests/`: integration, property, compile-fail, and perf-gate tests (21 files)
 - `examples/`: runnable usage patterns
 - `benches/`: Criterion surfaces
 - `tools/integrity/`: traceability and structural detectors

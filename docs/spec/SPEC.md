@@ -2,13 +2,16 @@
 
 One document. No overrides. No layers. Every decision is final. A cloud agent with zero prior context builds the entire library from this file.
 
-Status note (2026-03-30, amended 2026-04-02): this spec tracks the post-integrity-hardening repo.
-The canonical Linux environment lives in `.devcontainer/`, CI runs the Linux
-integrity path inside that container, Windows remains a first-class native
-matrix, mutation testing has both smoke and scheduled full-shard lanes, and the
-store surface is now split across focused modules instead of concentrating all
-store types and helpers in `src/store/mod.rs`. Historical references to the old
-`batpak/` subdirectory should be read as repo-root paths.
+Status note (2026-04-04): **This spec is historical.** The live codebase is the
+source of truth. 24 commits since 2026-04-03 added: group commit, checkpoint v2
+with interner, mmap reader (memmap2), SIDX segment footers, 6-variant IndexLayout
+(AoS/SoA/AoSoA8/16/64/SoAoS), columnar ScanIndex, StringInterner, incremental
+projection, schema versioning with TypeId cache keys, watch_projection reactive
+API, config validation, and idempotency enforcement. The FILE TREE, Cargo.toml
+snapshot, StoreConfig, StoreError, IndexEntry, and Store method list below are
+from the pre-Keller-Cut era and do not reflect the current API. Consult
+`src/store/mod.rs`, `docs/reference/ARCHITECTURE.md`, and `docs/reference/TUNING.md`
+for current documentation.
 
 ---
 

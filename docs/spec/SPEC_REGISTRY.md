@@ -1,12 +1,12 @@
 # SPEC_REGISTRY — Portable Context for Parallel Agent Execution
 
-Status note (2026-03-30): this registry now sits beside the live code and the
-machine-readable traceability registry. The store implementation has been split
-across focused modules, the canonical Linux environment is the checked-in
-devcontainer, CI runs Linux in-container plus Windows native, and mutation
-testing now has smoke and scheduled full-shard lanes. Where older file-local
-sections still describe the pre-split store monolith, treat them as API intent
-only and prefer the current file graph in `src/store/`.
+Status note (2026-04-04): **This registry is historical.** 24 commits since
+2026-04-03 added extensive new features (group commit, checkpoint v2, mmap
+reader, 6 index layouts, SIDX footers, incremental projection, schema
+versioning, watch_projection, etc.). The StoreConfig, StoreError, IndexEntry,
+Store method list, and WriterCommand shapes below are from the pre-Keller-Cut
+era. Consult `src/store/mod.rs` for the current API surface and
+`docs/reference/ARCHITECTURE.md` + `docs/reference/TUNING.md` for current docs.
 
 ```
 WHAT THIS IS:
