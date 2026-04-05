@@ -13,4 +13,4 @@ image_tag="${BATPAK_DEVCONTAINER_IMAGE:-batpak-devcontainer}"
   -v "${repo_root}:/workspace/batpak" \
   -w /workspace/batpak \
   "${image_tag}" \
-  bash -lc "$*"
+  bash -c "$*"
