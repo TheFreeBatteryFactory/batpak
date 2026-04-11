@@ -100,10 +100,10 @@ jobs:
     # surface tests that pass-by-accident (mutations that survive without
     # being caught by any test). Also runs on manual workflow_dispatch.
     #
-    # NOTE: this is currently report-only, not a hard gate. cargo-mutants
-    # exits 0 even when mutations survive. The gating story (require
-    # mutation score >= 80%) is a follow-up — see TODO in
-    # tools/xtask/src/main.rs::mutants.
+    # HARD GATE: mutation score must be >= 20% (caught) or the job fails.
+    # cargo-mutants 27.0.0 has no built-in threshold flag; the gate is
+    # implemented by parsing caught.txt / missed.txt in mutants() in
+    # tools/xtask/src/main.rs after each cargo-mutants invocation.
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: [integrity-linux-container, integrity-windows-native]

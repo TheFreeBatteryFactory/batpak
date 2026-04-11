@@ -324,6 +324,67 @@ fn cover(args: CoverArgs) -> Result<()> {
     run(command)
 }
 
+/// Count non-empty lines in a file produced by cargo-mutants in its output
+/// directory (e.g. `caught.txt`, `missed.txt`). Returns 0 if the file does
+/// not exist (cargo-mutants omits empty files).
+fn count_mutants_file(output_dir: &Path, filename: &str) -> Result<usize> {
+    let path = output_dir.join(filename);
+    if !path.exists() {
+        return Ok(0);
+    }
+    let contents = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    Ok(contents.lines().filter(|l| !l.trim().is_empty()).count())
+}
+
+/// Assert that the mutation score in `output_dir` meets the minimum catch
+/// threshold.
+///
+/// cargo-mutants 27.0.0 has no built-in `--minimum-mutation-score` or
+/// `--error-on-survived` flag (confirmed via `cargo mutants --help` and
+/// `--emit-schema config`).  We therefore parse the text files it writes to
+/// its output directory (`caught.txt`, `missed.txt`, `timeout.txt`,
+/// `unviable.txt`) — each line is one mutant — and compute the catch rate
+/// ourselves.
+///
+/// Gate: at least `min_catch_pct`% of *tested* mutants (caught + missed) must
+/// be caught.  Timed-out and unviable mutants are excluded from the
+/// denominator because they don't reflect test quality.
+///
+/// The threshold is set at 20 % — deliberately generous for a first gate so
+/// that "all tests deleted" PRs are blocked while legitimate low-coverage
+/// areas can still pass.  Raise it incrementally as the suite matures.
+fn assert_mutation_score(output_dir: &Path, min_catch_pct: u32) -> Result<()> {
+    let caught = count_mutants_file(output_dir, "caught.txt")?;
+    let missed = count_mutants_file(output_dir, "missed.txt")?;
+    let tested = caught + missed;
+
+    if tested == 0 {
+        // No tested mutants means either no mutations were generated (the
+        // shard was empty) or the baseline run itself failed.  Treat as
+        // pass so we don't false-positive on empty shards.
+        eprintln!(
+            "mutants: no tested mutants found in {}; skipping score gate",
+            output_dir.display()
+        );
+        return Ok(());
+    }
+
+    let score_pct = (caught * 100) / tested;
+    println!(
+        "mutants: {caught} caught / {tested} tested = {score_pct}% (threshold: {min_catch_pct}%)"
+    );
+
+    if score_pct < min_catch_pct as usize {
+        bail!(
+            "mutation score {score_pct}% is below the required {min_catch_pct}% \
+             ({caught} caught, {missed} missed out of {tested} tested mutants). \
+             Add tests that catch the mutations listed in {}.",
+            output_dir.join("missed.txt").display()
+        );
+    }
+    Ok(())
+}
+
 fn mutants(args: MutantsArgs) -> Result<()> {
     let base_all = [
         "mutants",
@@ -352,6 +413,16 @@ fn mutants(args: MutantsArgs) -> Result<()> {
         "cargo",
     ];
 
+    // The output dir is set to "target/mutants.out" in .cargo/mutants.toml.
+    // After each run we parse caught.txt / missed.txt to enforce the gate.
+    // See `assert_mutation_score` for why we do this manually instead of
+    // relying on a built-in flag (none exists in cargo-mutants 27.0.0).
+    let output_dir = Path::new("target/mutants.out");
+    // Minimum percentage of tested mutants that must be caught.
+    // 20 % is the floor: generous enough to tolerate gaps in the current
+    // suite but strict enough to block a PR that deletes all tests.
+    const MIN_CATCH_PCT: u32 = 20;
+
     match args.mode {
         MutantMode::Smoke => {
             cargo(
@@ -360,16 +431,20 @@ fn mutants(args: MutantsArgs) -> Result<()> {
                     .chain(["--shard", "1/12"])
                     .collect::<Vec<_>>(),
             )?;
+            assert_mutation_score(output_dir, MIN_CATCH_PCT)?;
             cargo(
                 base_min
                     .into_iter()
                     .chain(["--shard", "1/12"])
                     .collect::<Vec<_>>(),
-            )
+            )?;
+            assert_mutation_score(output_dir, MIN_CATCH_PCT)
         }
         MutantMode::Full => {
             cargo(base_all)?;
-            cargo(base_min)
+            assert_mutation_score(output_dir, MIN_CATCH_PCT)?;
+            cargo(base_min)?;
+            assert_mutation_score(output_dir, MIN_CATCH_PCT)
         }
     }
 }
