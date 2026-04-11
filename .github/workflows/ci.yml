@@ -178,4 +178,14 @@ jobs:
         with:
           path: target/site
       - id: deploy
+        # `continue-on-error: true` because the deploy step will hard-fail
+        # with `404 Not Found` until GitHub Pages is enabled in repository
+        # Settings → Pages (deployment source: "GitHub Actions"). The build
+        # and upload steps above are the meaningful gates — they catch
+        # rustdoc/mdbook breakage. The deploy itself is the LAST mile and
+        # should not block CI on a one-time admin setup that the codebase
+        # cannot fix from inside Rust source. Once Pages is enabled, this
+        # step succeeds silently and `continue-on-error` becomes a no-op.
+        # See: https://github.com/TheFreeBatteryFactory/batpak/settings/pages
+        continue-on-error: true
         uses: actions/deploy-pages@v4
