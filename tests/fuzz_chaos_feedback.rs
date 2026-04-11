@@ -29,7 +29,9 @@
 use batpak::prelude::*;
 use batpak::store::segment::{frame_decode, frame_encode};
 use batpak::store::{AppendOptions, Store, StoreConfig, SyncConfig};
+use rand::rngs::StdRng;
 use rand::Rng;
+use rand::SeedableRng;
 use std::sync::Arc;
 use std::time::Instant;
 use tempfile::TempDir;
@@ -430,7 +432,7 @@ fn run_chaos_probes() -> (f64, u64, bool, bool, u64, f64, bool) {
 // ============================================================
 
 #[test]
-#[ignore] // Heavy: run with `cargo test --test fuzz_chaos_feedback -- --ignored`
+#[ignore = "long-running fuzz+chaos integration loop (~minutes). Run on demand via `cargo test --test fuzz_chaos_feedback -- --ignored` or via the dedicated chaos CI job. Excluded from `cargo xtask ci` to keep the inner loop under 30 seconds."]
 fn fuzz_chaos_feedback_loop() {
     eprintln!("\n  ========================================");
     eprintln!("  FUZZ + CHAOS FEEDBACK LOOP (Phase 1)");
@@ -519,7 +521,12 @@ fn fuzz_chaos_feedback_loop() {
 fn run_extended_fuzz_chaos() {
     eprintln!("  EXTENDED: High-volume frame_decode fuzz...");
     let n = 50_000;
-    let mut rng = rand::rng();
+    let seed: u64 = std::env::var("FUZZ_CHAOS_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    eprintln!("fuzz_chaos seed: {seed} (override with FUZZ_CHAOS_SEED=<n>)");
+    let mut rng = StdRng::seed_from_u64(seed);
     let start = Instant::now();
     for _ in 0..n {
         let len: usize = rng.random_range(0..4096);

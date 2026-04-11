@@ -1,4 +1,8 @@
-#![allow(clippy::panic, clippy::inconsistent_digit_grouping)] // test assertions use panic; timestamp grouping is intentional
+#![allow(
+    clippy::panic,                       // test assertions use panic
+    clippy::inconsistent_digit_grouping, // timestamp grouping is intentional
+    clippy::print_stderr,                // GOLDEN_UPDATE sentinel prints a loud warning
+)]
 //! Wire format golden tests.
 //! Verifies MessagePack serialization matches known-good byte sequences.
 //! [SPEC:tests/wire_format.rs]
@@ -10,7 +14,12 @@
 //! Anti-almost-correctness: This test would have caught the Arc<str> serialization
 //! failure (Phase 1.1) — golden tests serialize a Coordinate containing Arc<str>.
 //!
-//! Run with GOLDEN_UPDATE=1 cargo test wire_format to regenerate golden files.
+//! To regenerate golden files, set the sentinel env var EXACTLY as shown — any other
+//! value (including "1" or "true") is treated as absent and goldens will NOT be updated:
+//!
+//!   GOLDEN_UPDATE=I_KNOW_WHAT_IM_DOING cargo test wire_format
+//!
+//! Inspect `git diff tests/golden/` carefully before committing regenerated goldens.
 
 use batpak::outcome::wait::{CompensationAction, WaitCondition};
 use batpak::prelude::*;
@@ -23,7 +32,14 @@ fn check_or_update_golden(name: &str, actual_bytes: &[u8]) {
     let path = golden_dir().join(name);
     let actual_hex = hex_encode(actual_bytes);
 
-    if std::env::var("GOLDEN_UPDATE").is_ok() {
+    // Require the exact sentinel to prevent a stray GOLDEN_UPDATE=1 from silently
+    // overwriting golden files. Any value other than "I_KNOW_WHAT_IM_DOING" is ignored.
+    let updating = std::env::var("GOLDEN_UPDATE").as_deref() == Ok("I_KNOW_WHAT_IM_DOING");
+    if updating {
+        eprintln!(
+            "⚠ GOLDEN_UPDATE: regenerating golden files in {}. Inspect the diff before committing.",
+            golden_dir().display()
+        );
         std::fs::write(&path, &actual_hex)
             .unwrap_or_else(|e| panic!("Failed to write golden file {}: {}", path.display(), e));
         return;
@@ -31,7 +47,7 @@ fn check_or_update_golden(name: &str, actual_bytes: &[u8]) {
 
     let expected_hex = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!(
-            "Golden file {} not found: {}. Run GOLDEN_UPDATE=1 cargo test wire_format to create it.",
+            "Golden file {} not found: {}. Run GOLDEN_UPDATE=I_KNOW_WHAT_IM_DOING cargo test wire_format to create it.",
             path.display(), e
         ));
 
@@ -39,7 +55,7 @@ fn check_or_update_golden(name: &str, actual_bytes: &[u8]) {
         actual_hex.trim(),
         expected_hex.trim(),
         "WIRE FORMAT DRIFT: {} bytes differ from golden file {}. \
-         If this is intentional, run GOLDEN_UPDATE=1 cargo test wire_format. \
+         If this is intentional, run GOLDEN_UPDATE=I_KNOW_WHAT_IM_DOING cargo test wire_format. \
          If not, investigate: src/wire.rs and serde derives.",
         name,
         path.display()
@@ -91,7 +107,7 @@ fn event_header_msgpack_golden() {
         "WIRE FORMAT: EventHeader round-trip mismatch.\n\
          Investigate: src/event/header.rs serde derives, src/wire.rs u128_bytes.\n\
          Common causes: u128 serialization changed, field added/removed.\n\
-         Run: GOLDEN_UPDATE=1 cargo test wire_format"
+         Run: GOLDEN_UPDATE=I_KNOW_WHAT_IM_DOING cargo test wire_format"
     );
 
     check_or_update_golden("event_header_v1.hex", &bytes);
@@ -210,14 +226,14 @@ fn committed_msgpack_golden() {
         "WIRE FORMAT: Committed.event_id round-trip mismatch.\n\
          Investigate: src/pipeline/mod.rs #[serde(with = \"crate::wire::u128_bytes\")].\n\
          Common causes: u128_bytes serialize/deserialize changed.\n\
-         Run: GOLDEN_UPDATE=1 cargo test wire_format committed_msgpack_golden"
+         Run: GOLDEN_UPDATE=I_KNOW_WHAT_IM_DOING cargo test wire_format committed_msgpack_golden"
     );
     assert_eq!(
         committed.payload, decoded.payload,
         "WIRE FORMAT: Committed.payload round-trip mismatch.\n\
          Investigate: src/pipeline/mod.rs Committed<T> serde.\n\
          Common causes: generic T serialization broken.\n\
-         Run: GOLDEN_UPDATE=1 cargo test wire_format committed_msgpack_golden"
+         Run: GOLDEN_UPDATE=I_KNOW_WHAT_IM_DOING cargo test wire_format committed_msgpack_golden"
     );
     assert_eq!(
         committed.sequence, decoded.sequence,
@@ -249,7 +265,7 @@ fn wait_condition_msgpack_golden() {
         "WIRE FORMAT: WaitCondition::Event round-trip mismatch.\n\
          Investigate: src/outcome/wait.rs #[serde(with = \"crate::wire::u128_bytes\")].\n\
          Common causes: u128_bytes serde helper changed.\n\
-         Run: GOLDEN_UPDATE=1 cargo test wire_format wait_condition_msgpack_golden"
+         Run: GOLDEN_UPDATE=I_KNOW_WHAT_IM_DOING cargo test wire_format wait_condition_msgpack_golden"
     );
 
     check_or_update_golden("wait_condition_v1.hex", &bytes);
@@ -277,7 +293,7 @@ fn compensation_action_msgpack_golden() {
         "WIRE FORMAT: CompensationAction::Rollback round-trip mismatch.\n\
          Investigate: src/outcome/wait.rs #[serde(with = \"crate::wire::vec_u128_bytes\")].\n\
          Common causes: vec_u128_bytes helper serialize/deserialize changed.\n\
-         Run: GOLDEN_UPDATE=1 cargo test wire_format compensation_action_msgpack_golden"
+         Run: GOLDEN_UPDATE=I_KNOW_WHAT_IM_DOING cargo test wire_format compensation_action_msgpack_golden"
     );
 
     check_or_update_golden("compensation_action_v1.hex", &bytes);

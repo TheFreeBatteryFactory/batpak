@@ -20,7 +20,7 @@
 
 use batpak::prelude::*;
 use batpak::store::segment::frame_decode;
-use batpak::store::{AppendOptions, Store, StoreConfig, SyncConfig};
+use batpak::store::{AppendOptions, Store, StoreConfig, StoreError, SyncConfig};
 use rand::prelude::*;
 use rand::Rng;
 use std::sync::Arc;
@@ -109,19 +109,37 @@ fn chaos_corrupted_segment_bytes() {
         }
         Err(e) => {
             eprintln!("  CHAOS: corrupted segment correctly rejected: {e}");
-            // Verify it's an expected error variant
-            let msg = format!("{e}");
-            assert!(
-                msg.contains("CRC")
-                    || msg.contains("corrupt")
-                    || msg.contains("serialization")
-                    || msg.contains("IO")
-                    || msg.contains("coordinate"),
-                "CHAOS PROPERTY: corrupted segment must produce a structured CRC/corrupt/serialization/IO error, not an unknown variant.\n\
-                 Investigate: src/store/mod.rs Store::open, src/store/segment.rs frame_decode error mapping.\n\
-                 Common causes: new error variant added without updating open() match arm, raw unwrap() escaping as opaque error.\n\
-                 Run: cargo test --test chaos_testing chaos_corrupted_segment_bytes"
+            // Verify it's an expected error variant — match typed variants, not Display strings.
+            // Corruption injected at a random byte offset 40+ can produce:
+            //   - CrcMismatch: CRC32 no longer matches frame data
+            //   - CorruptSegment: frame structure is unreadable (bad magic, EOF, bad version)
+            //   - Serialization: msgpack payload is unparseable after byte flip
+            //   - Io: OS-level read error
+            //   - Coordinate: entity/scope string is corrupt
+            // Expressed as a `matches!` guard rather than `match { wildcard }`
+            // so clippy's `match_wildcard_for_single_variants` lint is happy
+            // AND so adding a new StoreError variant doesn't accidentally
+            // get accepted here without a conscious decision.
+            let acceptable = matches!(
+                &e,
+                StoreError::CrcMismatch { .. }
+                    | StoreError::CorruptSegment { .. }
+                    | StoreError::Serialization(_)
+                    | StoreError::Io(_)
+                    | StoreError::Coordinate(_)
             );
+            if !acceptable {
+                panic!(
+                    "CHAOS PROPERTY: corrupted segment must produce a structured \
+                     CrcMismatch/CorruptSegment/Serialization/Io/Coordinate error, \
+                     but got variant: {e}\n\
+                     Investigate: src/store/mod.rs Store::open, \
+                     src/store/segment.rs frame_decode error mapping.\n\
+                     Common causes: new error variant added without updating open() \
+                     match arm, raw unwrap() escaping as opaque error.\n\
+                     Run: cargo test --test chaos_testing chaos_corrupted_segment_bytes"
+                );
+            }
         }
     }
 }
