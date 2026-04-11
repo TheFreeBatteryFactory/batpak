@@ -1153,8 +1153,10 @@ fn corrupt_frame_in_segment_is_detected() {
         store.close().expect("close");
     }
 
-    // Phase 2: corrupt a segment file by flipping bytes in the middle
-    let segments: Vec<_> = std::fs::read_dir(dir.path())
+    // Phase 2: corrupt a segment file by flipping bytes in the middle.
+    // Sort by file_name so the chosen segment is deterministic across
+    // filesystems (POSIX `readdir` makes no order guarantee).
+    let mut segments: Vec<_> = std::fs::read_dir(dir.path())
         .expect("read dir")
         .filter_map(|e| e.ok())
         .filter(|e| {
@@ -1164,6 +1166,7 @@ fn corrupt_frame_in_segment_is_detected() {
                 .unwrap_or(false)
         })
         .collect();
+    segments.sort_by_key(|e| e.file_name());
     assert!(
         !segments.is_empty(),
         "PROPERTY: after appending events and syncing, at least one .fbat segment file must exist.\n\

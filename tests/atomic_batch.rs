@@ -346,15 +346,21 @@ fn batch_size_limits() {
         .collect();
 
     let result = store.append_batch(items);
-    assert!(result.is_err());
-    let err = result.expect_err("batch should fail due to size limit");
-    assert!(matches!(
-        err,
-        StoreError::BatchFailed {
-            stage: BatchStage::Validation,
-            ..
-        }
-    ));
+    let err = result.expect_err(
+        "PROPERTY: a batch exceeding batch_max_size must fail. \
+         Investigate: src/store/writer.rs validate_batch size check.",
+    );
+    assert!(
+        matches!(
+            err,
+            StoreError::BatchFailed {
+                stage: BatchStage::Validation,
+                ..
+            }
+        ),
+        "PROPERTY: batch size violation must be reported as \
+         BatchFailed{{stage: Validation, ..}}, got {err:?}"
+    );
 }
 
 /// Test: restart recovery discards incomplete batch (crash after BEGIN, before COMMIT).
@@ -399,11 +405,17 @@ fn batch_restart_recovery_discards_incomplete_after_begin() {
         .expect("construct third event in after-begin recovery batch"),
     ];
 
-    // Batch append should fail due to fault injection.
+    // Batch append should fail due to fault injection at the BatchBeginWritten point.
     let result = store.append_batch(items);
+    let err = result.expect_err(
+        "PROPERTY: fault injection at BatchBeginWritten must propagate as a \
+         BatchFailed or FaultInjected error.",
+    );
     assert!(
-        result.is_err(),
-        "fault injector should have returned an error"
+        matches!(err, StoreError::BatchFailed { .. })
+            || matches!(err, StoreError::FaultInjected(_)),
+        "PROPERTY: BatchBeginWritten fault must surface as BatchFailed or \
+         FaultInjected, got {err:?}"
     );
     drop(store);
 
@@ -467,9 +479,15 @@ fn batch_restart_recovery_discards_incomplete_mid_items() {
 
     // Batch append should fail due to fault injection after first item.
     let result = store.append_batch(items);
+    let err = result.expect_err(
+        "PROPERTY: fault injection mid-batch must propagate as a BatchFailed \
+         or FaultInjected error.",
+    );
     assert!(
-        result.is_err(),
-        "fault injector should have returned an error"
+        matches!(err, StoreError::BatchFailed { .. })
+            || matches!(err, StoreError::FaultInjected(_)),
+        "PROPERTY: mid-batch fault must surface as BatchFailed or \
+         FaultInjected, got {err:?}"
     );
     drop(store);
 
@@ -571,7 +589,22 @@ fn batch_fsync_ambiguity_discards_uncommitted() {
 
     // Fault during fsync.
     let result = store.append_batch(items);
-    assert!(result.is_err(), "should fail during fsync");
+    let err = result.expect_err(
+        "PROPERTY: a fault injected during BatchFsync must propagate as an \
+         error. Investigate: src/store/writer.rs handle_append_batch fsync \
+         site fault injection point.",
+    );
+    assert!(
+        matches!(
+            err,
+            StoreError::BatchFailed {
+                stage: BatchStage::Syncing,
+                ..
+            }
+        ) || matches!(err, StoreError::FaultInjected(_)),
+        "PROPERTY: BatchFsync fault must surface as BatchFailed{{stage: \
+         Syncing}} or FaultInjected, got {err:?}"
+    );
     drop(store);
 
     // Recovery: un-fsynced COMMIT should be discarded (fsync ambiguity rule).
@@ -719,76 +752,62 @@ fn batch_recovery_system_remains_coherent() {
 
 /// Test: subscriptions don't see partial batches during crash scenarios.
 /// Verifies notification atomicity - subscribers either see all or none.
+///
+/// **Synchronization rationale:** `store.append()` and `store.append_batch()`
+/// are synchronous — they block until the writer thread acknowledges. The
+/// writer broadcasts notifications BEFORE sending the response (see the
+/// `STEP 10` comment in writer.rs handle_append). So by the time `append()`
+/// returns, any notification for a successful append is already in the
+/// subscriber's flume channel buffer. Failed appends never broadcast.
+/// We can therefore drain the receiver immediately after each operation
+/// without any timing assumption — no spawned threads, no polling, no
+/// `Instant::now()` deadlines, no `thread::sleep`.
 #[cfg(feature = "test-support")]
 #[test]
 fn batch_subscription_atomicity_no_partial_visibility() {
     use batpak::store::CountdownInjector;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     let tmp = tempfile::tempdir().expect("create temp dir for subscription atomicity test");
     let coord = Coordinate::new("sub", "test").expect("valid subscription test coordinate");
 
-    // Subscribe before any operations.
+    // Helper: drain a subscription receiver into a count using try_recv,
+    // returning when the channel is empty. Safe because the writer has
+    // already broadcast (synchronously, before responding to append).
+    fn drain(sub: &batpak::store::Subscription) -> usize {
+        let mut count = 0;
+        while sub.receiver().try_recv().is_ok() {
+            count += 1;
+        }
+        count
+    }
+
+    // Phase 1: subscribe, append a baseline event, drain.
     let mut config = StoreConfig::new(tmp.path());
     let store =
         Store::open(config.clone()).expect("open baseline store for subscription atomicity");
     let sub = store.subscribe(&Region::all());
-
-    // Counter for notifications received.
-    let notification_count = std::sync::Arc::new(AtomicUsize::new(0));
-    let count_clone = std::sync::Arc::<AtomicUsize>::clone(&notification_count);
-
-    // Spawn subscriber task.
-    let _sub_handle = std::thread::Builder::new()
-        .name("atomic-batch-sub-pre-crash".into())
-        .spawn(move || {
-            let start = std::time::Instant::now();
-            while start.elapsed() < std::time::Duration::from_millis(500) {
-                if sub.receiver().try_recv().is_ok() {
-                    count_clone.fetch_add(1, Ordering::SeqCst);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-        })
-        .expect("spawn pre-crash subscription observer thread");
-
-    // Pre-establish one committed event.
     store
         .append(&coord, EventKind::DATA, &serde_json::json!({"pre": 1}))
         .expect("append pre-crash subscription event");
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
-    let pre_crash_count = notification_count.load(Ordering::SeqCst);
-    assert!(
-        pre_crash_count >= 1,
-        "should have received notification for pre-established event"
+    let pre_crash_count = drain(&sub);
+    assert_eq!(
+        pre_crash_count, 1,
+        "PROPERTY: a successful append must produce exactly one subscriber \
+         notification, drainable immediately. Got {pre_crash_count}. \
+         Investigate: src/store/writer.rs handle_append broadcast site, \
+         and ensure append() blocks until AFTER the broadcast."
     );
-
     drop(store);
 
-    // Reopen with fault injector that crashes mid-batch.
+    // Phase 2: reopen with a fault injector that fails the batch mid-flight.
     config.fault_injector = Some(std::sync::Arc::new(CountdownInjector::after_batch_items(1)));
     let store = Store::open(config).expect("open fault-injected store for subscription atomicity");
     let sub = store.subscribe(&Region::all());
 
-    // Counter for post-crash notifications.
-    let post_count = std::sync::Arc::new(AtomicUsize::new(0));
-    let post_clone = std::sync::Arc::<AtomicUsize>::clone(&post_count);
-
-    let post_handle = std::thread::Builder::new()
-        .name("atomic-batch-sub-post-crash".into())
-        .spawn(move || {
-            let start = std::time::Instant::now();
-            while start.elapsed() < std::time::Duration::from_millis(200) {
-                if sub.receiver().try_recv().is_ok() {
-                    post_clone.fetch_add(1, Ordering::SeqCst);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-        })
-        .expect("spawn post-crash subscription observer thread");
-
-    // Attempt batch that will crash.
+    // Phase 3: attempt a batch that will fault. The append_batch call must
+    // return Err. Subscriber must observe ZERO notifications because the
+    // writer broadcasts only after the atomic publish, which never happens
+    // for a faulted batch.
     let items = vec![
         BatchAppendItem::new(
             coord.clone(),
@@ -808,20 +827,23 @@ fn batch_subscription_atomicity_no_partial_visibility() {
         .expect("construct second subscription atomicity batch item"),
     ];
 
-    let _ = store.append_batch(items);
+    let result = store.append_batch(items);
+    let _err = result.expect_err(
+        "PROPERTY: batch with after_batch_items(1) fault must fail. If this \
+         passes, fault injection is silently swallowed.",
+    );
 
-    post_handle
-        .join()
-        .expect("join post-crash subscription observer thread");
+    let notifications_received = drain(&sub);
     drop(store);
 
-    // Subscribers should NOT have received notifications for partial batch.
-    // The first item was written but the crash happened before index publish.
-    // However, notification happens AFTER index publish, so no partial notifications.
-    let notifications_received = post_count.load(Ordering::SeqCst);
     assert_eq!(
         notifications_received, 0,
-        "no notifications for incomplete batch (atomicity)"
+        "PROPERTY: BATCH SUBSCRIPTION ATOMICITY VIOLATION — a faulted batch \
+         must produce ZERO subscriber notifications. Got {notifications_received}. \
+         The writer must broadcast notifications only AFTER the atomic publish, \
+         and the publish must never happen for a faulted batch. \
+         Investigate: src/store/writer.rs handle_append_batch ordering of \
+         publish() and broadcast_batch_notifications()."
     );
 
     // After recovery, verify no partial data is visible.
@@ -1004,9 +1026,15 @@ fn batch_publish_atomicity_no_partial_read_during_insert() {
 
     // The batch should fail because BatchPrePublish injects a fault.
     let result = store.append_batch(items);
+    let err = result.expect_err(
+        "PROPERTY: a batch with a BatchPrePublish fault injection must fail. \
+         If this passes, fault injection is being silently swallowed.",
+    );
     assert!(
-        result.is_err(),
-        "batch must fail when BatchPrePublish fault is injected"
+        matches!(err, StoreError::BatchFailed { .. })
+            || matches!(err, StoreError::FaultInjected(_)),
+        "PROPERTY: BatchPrePublish fault must surface as BatchFailed or \
+         FaultInjected, got {err:?}"
     );
 
     // After the failed batch, query the store. Because publish() was never called,

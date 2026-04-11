@@ -1,9 +1,10 @@
 #![cfg(feature = "test-support")]
+#![allow(clippy::panic)] // tests use panic! to escape the retry-poll loops
 //! Restart policy tests split out of store_advanced.rs.
 //! [SPEC:tests/store_restart_policy.rs]
 
 use batpak::prelude::*;
-use batpak::store::{RestartPolicy, Store, StoreConfig, WriterConfig};
+use batpak::store::{RestartPolicy, Store, StoreConfig, StoreError, WriterConfig};
 use tempfile::TempDir;
 
 #[test]
@@ -55,10 +56,33 @@ fn writer_restart_once_gives_up_after_second_panic() {
 
     store.panic_writer_for_test().expect("send first panic");
     let _ = store.panic_writer_for_test();
-    std::thread::sleep(std::time::Duration::from_millis(100));
 
-    let result = store.append(&coord, kind, &"should_fail");
-    assert!(result.is_err());
+    // Poll for the writer to actually die instead of sleeping a fixed
+    // duration. The writer thread takes some non-deterministic time to
+    // process the panic command and exit; sleeping a fixed amount makes
+    // the test flaky on slow CI runners. Retry append with a deadline.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let final_err = loop {
+        match store.append(&coord, kind, &"should_fail") {
+            Err(e) => break e,
+            Ok(_) if std::time::Instant::now() >= deadline => {
+                panic!(
+                    "PROPERTY: after exhausting RestartPolicy::Once, append \
+                     must fail. Writer thread did not die within 5s of \
+                     receiving the second PanicForTest command. \
+                     Investigate: src/store/writer.rs writer_thread_main \
+                     restart counter."
+                )
+            }
+            Ok(_) => std::thread::yield_now(),
+        }
+    };
+    assert!(
+        matches!(final_err, StoreError::WriterCrashed),
+        "PROPERTY: append after exhausted restart budget must surface as \
+         StoreError::WriterCrashed; got {final_err:?}. \
+         Investigate: src/store/mod.rs do_append flume::send error mapping."
+    );
 }
 
 #[test]
@@ -90,8 +114,26 @@ fn writer_restart_bounded_respects_limit() {
         .append(&coord, kind, &"after_panic_2")
         .expect("append after second restart");
     let _ = store.panic_writer_for_test();
-    std::thread::sleep(std::time::Duration::from_millis(100));
 
-    let result = store.append(&coord, kind, &"should_fail");
-    assert!(result.is_err());
+    // Poll for the writer to die instead of sleeping a fixed duration —
+    // see writer_restart_once_gives_up_after_second_panic for rationale.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let final_err = loop {
+        match store.append(&coord, kind, &"should_fail") {
+            Err(e) => break e,
+            Ok(_) if std::time::Instant::now() >= deadline => {
+                panic!(
+                    "PROPERTY: after exhausting RestartPolicy::Bounded, \
+                     append must fail. Writer thread did not die within 5s. \
+                     Investigate: src/store/writer.rs restart counter."
+                )
+            }
+            Ok(_) => std::thread::yield_now(),
+        }
+    };
+    assert!(
+        matches!(final_err, StoreError::WriterCrashed),
+        "PROPERTY: append after exhausted bounded restart budget must \
+         surface as StoreError::WriterCrashed; got {final_err:?}."
+    );
 }

@@ -583,16 +583,12 @@ mod tests {
         }
     }
 
-    // ── ENTRY_SIZE constant matches actual layout ──────────────────────────────
-
-    #[test]
-    fn entry_size_constant_matches_layout() {
-        // encode_into will debug_assert if the layout is wrong at runtime.
-        let entry = sample_entry(1);
-        let mut buf = vec![0u8; ENTRY_SIZE];
-        entry.encode_into(&mut buf);
-        assert_eq!(buf.len(), ENTRY_SIZE);
-    }
+    // The previous `entry_size_constant_matches_layout` test asserted that
+    // a `Vec<u8>` you just created with length `ENTRY_SIZE` still has length
+    // `ENTRY_SIZE` after `encode_into` writes in-place. That's a tautology —
+    // a `Vec<u8>` cannot change length under an in-place writer. The
+    // compile-time `_ASSERT_ENTRY_SIZE` const at the top of this file already
+    // covers the layout invariant. Test deleted in the Tier 1 drill sweep.
 
     // ── encode / decode round-trip ─────────────────────────────────────────────
 

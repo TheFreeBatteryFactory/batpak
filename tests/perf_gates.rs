@@ -55,6 +55,7 @@ struct ColdStartContext {
 }
 
 #[test]
+#[ignore = "hardware-dependent perf gate — run via `cargo xtask perf-gates` or `cargo nextest run --test perf_gates -- --ignored`. Uses Instant::now() and asserts on wall-clock; flakes on shared CI runners."]
 fn cold_start_1k_events_under_threshold() {
     let dir = TempDir::new().expect("create temp dir");
     let kind = EventKind::custom(0xF, 1);
@@ -282,6 +283,7 @@ impl EventSourced<serde_json::Value> for BenchCounter {
 }
 
 #[test]
+#[ignore = "hardware-dependent perf gate — run via `cargo xtask perf-gates`. Uses Instant::now() for write/query/projection timing; flakes on shared CI runners."]
 fn multi_gate_performance_feedback() {
     let dir = TempDir::new().expect("temp dir");
     let config = StoreConfig {
@@ -410,6 +412,7 @@ struct BatchPerfContext {
 
 /// Self-benchmark for batch append throughput.
 #[test]
+#[ignore = "hardware-dependent perf gate — run via `cargo xtask perf-gates`. Already softened to 2K events/sec floor after FLAKY 3/3 / TRY 3 FAIL on Windows CI."]
 fn batch_throughput_performance_gate() {
     let dir = TempDir::new().expect("temp dir");
     let config = StoreConfig {
@@ -872,6 +875,7 @@ fn correctness_gates_self_validate() {
 /// Append throughput gate: dedicated test using the library's own Gate system.
 /// [SPEC:tests/perf_gates.rs — BN5 append throughput gate]
 #[test]
+#[ignore = "hardware-dependent perf gate — run via `cargo xtask perf-gates`. Asserts events/sec on shared hardware."]
 fn append_throughput_gate() {
     let dir = TempDir::new().expect("temp dir");
     let config = StoreConfig {
@@ -926,6 +930,7 @@ fn append_throughput_gate() {
 /// Projection latency gate: dedicated test using the library's own Gate system.
 /// [SPEC:tests/perf_gates.rs — BN5 projection latency gate]
 #[test]
+#[ignore = "hardware-dependent perf gate — run via `cargo xtask perf-gates`. Asserts projection latency in ms on shared hardware."]
 fn projection_latency_gate() {
     let dir = TempDir::new().expect("temp dir");
     let config = StoreConfig {

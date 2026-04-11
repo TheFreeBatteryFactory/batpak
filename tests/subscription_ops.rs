@@ -10,7 +10,6 @@ use batpak::prelude::*;
 use batpak::store::Notification;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 mod common;
 use common::small_segment_store as test_store;
@@ -30,8 +29,6 @@ fn ops_recv_without_filters() {
     let store_w = Arc::clone(&store);
     let coord_w = coord.clone();
     let producer = thread::spawn(move || {
-        // Small delay to ensure subscriber is ready.
-        thread::sleep(Duration::from_millis(20));
         let payload = serde_json::json!({"hello": "world"});
         store_w.append(&coord_w, kind, &payload).expect("append");
     });
@@ -72,7 +69,6 @@ fn ops_filter_passes_matching() {
     let store_w = Arc::clone(&store);
     let coord_w = coord.clone();
     let producer = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(20));
         let payload = serde_json::json!({"x": 1});
         // Append an event with the matching kind.
         store_w
@@ -114,7 +110,6 @@ fn ops_filter_rejects_non_matching() {
     let store_w = Arc::clone(&store);
     let coord_w = coord.clone();
     let producer = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(20));
         let payload = serde_json::json!({"x": 1});
         // First: append non-matching event — should be rejected by filter.
         store_w
@@ -156,7 +151,6 @@ fn ops_take_limits_count() {
     let store_w = Arc::clone(&store);
     let coord_w = coord.clone();
     let producer = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(20));
         let payload = serde_json::json!({"x": 1});
         for _ in 0..5 {
             store_w.append(&coord_w, kind, &payload).expect("append");
@@ -200,7 +194,6 @@ fn ops_filter_and_take_combined() {
     let store_w = Arc::clone(&store);
     let coord_w = coord.clone();
     let producer = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(20));
         let payload = serde_json::json!({"x": 1});
         // Interleave matching and non-matching events.
         store_w
@@ -286,7 +279,6 @@ fn ops_map_transforms_notification() {
     let store_w = Arc::clone(&store);
     let coord_w = coord.clone();
     let producer = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(20));
         store_w
             .append(&coord_w, kind, &serde_json::json!({"x": 1}))
             .expect("append");
@@ -335,7 +327,6 @@ fn ops_map_returning_none_skips_event() {
     let store_w = Arc::clone(&store);
     let coord_w = coord.clone();
     let producer = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(20));
         // First event: skip_kind — map returns None, should be skipped
         store_w
             .append(&coord_w, skip_kind, &serde_json::json!({"skip": true}))
@@ -386,7 +377,6 @@ fn ops_multiple_filters_all_must_pass() {
     let store_w = Arc::clone(&store);
     let coord_w = coord.clone();
     let producer = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(20));
         // Event 1: kind_c — fails first filter
         store_w
             .append(&coord_w, kind_c, &serde_json::json!({"x": 1}))

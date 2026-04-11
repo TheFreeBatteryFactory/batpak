@@ -316,7 +316,10 @@ fn scan_recovers_events_before_corruption() {
         store.close().expect("close");
     }
 
-    // Find segment files and append garbage to one
+    // Find segment files and append garbage to one. Sort by file_name so the
+    // chosen segment is deterministic across filesystems — POSIX `readdir`
+    // makes no order guarantee, and `remove(0)` on an unsorted Vec used to
+    // pick a different file on ext4 vs tmpfs vs APFS.
     let mut segments: Vec<_> = std::fs::read_dir(dir.path())
         .expect("readdir")
         .filter_map(|e| e.ok())
@@ -327,9 +330,10 @@ fn scan_recovers_events_before_corruption() {
                 .unwrap_or(false)
         })
         .collect();
+    segments.sort_by_key(|e| e.file_name());
     assert!(!segments.is_empty(), "should have segment files");
 
-    // Append garbage to first segment
+    // Append garbage to the (deterministically sorted) first segment.
     let seg_path = segments.remove(0).path();
     let mut f = std::fs::OpenOptions::new()
         .append(true)
