@@ -50,7 +50,18 @@ All notable changes to this project will be documented in this file.
 - **Mutation testing on every PR** (`.github/workflows/ci.yml`): the `mutants`
   smoke job (1/12 shard, ~5 min) was previously `workflow_dispatch`-only and
   never ran in practice. It now runs on every `push` and `pull_request`.
-  Results are report-only for this cycle; threshold gating is a follow-up.
+  Results gate the PR: `cargo-mutants 27.0` exits non-zero on any missed
+  mutant by default, and a manual percentage-threshold backup in
+  `tools/xtask/src/main.rs::assert_mutation_score` requires >= 20% catch
+  rate. Removing tests will fail the PR.
+- **`continue-on-error: true` on `actions/deploy-pages@v4` step**
+  (`.github/workflows/ci.yml`): the deploy step requires GitHub Pages
+  to be enabled in repository Settings → Pages with the "GitHub
+  Actions" deployment source — a one-time admin task the codebase
+  cannot perform. The build and upload steps above remain hard gates,
+  so rustdoc/mdbook breakage still fails CI; only the final
+  deployment is best-effort. Once Pages is enabled, the
+  continue-on-error becomes a no-op.
 - **`loom_model_bounded` helper** (`tests/deterministic_concurrency.rs`,
   `tests/group_commit_crash.rs`): wraps `loom::model(...)` in
   `loom::model::Builder` with `preemption_bound = Some(3)` so loom exploration
@@ -169,6 +180,16 @@ All notable changes to this project will be documented in this file.
   needed without `heed` in the dependency tree).
 
 ### Fixed
+- **6 surviving mutants in `src/wire.rs` (caught and fixed)** — the first
+  run of the mutation gate caught 6 surviving mutants in `u128_bytes`,
+  `option_u128_bytes`, and `vec_u128_bytes` visitor methods (`expecting()`
+  and `OptU128Visitor::visit_bytes()`). The visitors were local structs
+  defined inside their `deserialize` functions, making them unreachable
+  from any test and invisible to mutation testing. Fixed by extracting
+  each visitor to a module-level `pub(super) struct` and adding 8 unit
+  tests in `src/wire.rs::tests` that exercise every visitor method
+  directly with known inputs. Every previously-missed mutation now has
+  a corresponding assertion.
 - **`ReplayCursor::commit` empty-replay off-by-one** (`src/store/index.rs`).
   Every fresh-store cold start goes through `rebuild_from_segments` →
   `cursor.commit(0)`. The old logic unconditionally set the allocator to
