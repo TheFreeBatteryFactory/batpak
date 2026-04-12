@@ -22,7 +22,7 @@ jobs:
     name: Integrity (ubuntu-devcontainer)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Canonical container integrity gates
         run: |
           bash ./scripts/run-in-devcontainer.sh 'cargo xtask ci'
@@ -31,7 +31,7 @@ jobs:
     name: Integrity (windows-native)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt,llvm-tools-preview
@@ -71,7 +71,7 @@ jobs:
           - "--features blake3"
           - "--features dangerous-test-hooks"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Feature-isolation test matrix
         run: bash ./scripts/run-in-devcontainer.sh "cargo test ${{ matrix.features }}"
 
@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [integrity-linux-container, integrity-windows-native]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Coverage threshold check
         run: |
           bash ./scripts/run-in-devcontainer.sh 'cargo xtask cover --ci --threshold 80'
@@ -88,7 +88,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [integrity-linux-container]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Run the beginner quickstart
         run: bash ./scripts/run-in-devcontainer.sh 'cargo run --example quickstart'
 
@@ -96,7 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [integrity-linux-container]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build the starter template
         run: bash ./scripts/run-in-devcontainer.sh 'cargo run --manifest-path templates/minimal-app/Cargo.toml'
 
@@ -114,7 +114,7 @@ jobs:
     if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: [integrity-linux-container, integrity-windows-native]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Mutation smoke (all features, shard 1/12)
         run: bash ./scripts/run-in-devcontainer.sh 'cargo xtask mutants smoke'
 
@@ -146,7 +146,7 @@ jobs:
           - 12/12
     name: Mutation full (${{ matrix.surface.name }} shard ${{ matrix.shard }})
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Full mutation shard
         run: bash ./scripts/run-in-devcontainer.sh '${{ matrix.surface.command }} --shard ${{ matrix.shard }}'
 
@@ -161,7 +161,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Build rustdoc + scrub upload-pages-artifact gotchas
         # Two things in the rustdoc output break `actions/upload-pages-artifact@v3`:
         #   1. `macro.NAME!.html` redirect files — the `!` in the filename
