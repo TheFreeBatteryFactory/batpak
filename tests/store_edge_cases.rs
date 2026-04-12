@@ -269,9 +269,7 @@ fn single_append_payload_at_exact_limit_succeeds() {
             break;
         }
         if bytes.len() > limit as usize {
-            panic!(
-                "overshot: could not construct a payload of exactly {limit} msgpack bytes"
-            );
+            panic!("overshot: could not construct a payload of exactly {limit} msgpack bytes");
         }
         s.push('A');
     }
