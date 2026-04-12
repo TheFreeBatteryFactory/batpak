@@ -120,17 +120,17 @@ fn replay_tail_segments(
                 continue; // Already in checkpoint
             }
 
-            let scanned = reader.scan_segment_index(&dir_entry.path(), Some(&mut batch_state))?;
-            for se in scanned {
+            reader.scan_segment_index_into(&dir_entry.path(), Some(&mut batch_state), |se| {
                 // Skip frames already in the checkpoint
                 if seg_id == watermark.watermark_segment_id
                     && se.offset < watermark.watermark_offset
                 {
-                    continue;
+                    return Ok(());
                 }
                 let entry = entry_from_scan(index, &mut cursor, se)?;
                 cursor.insert(entry);
-            }
+                Ok(())
+            })?;
         }
         Ok(())
     })();
@@ -176,11 +176,11 @@ pub(crate) fn rebuild_from_segments(
 
     let scan_result = (|| -> Result<(), StoreError> {
         for dir_entry in &entries {
-            let scanned = reader.scan_segment_index(&dir_entry.path(), Some(&mut batch_state))?;
-            for se in scanned {
+            reader.scan_segment_index_into(&dir_entry.path(), Some(&mut batch_state), |se| {
                 let entry = entry_from_scan(index, &mut cursor, se)?;
                 cursor.insert(entry);
-            }
+                Ok(())
+            })?;
         }
         Ok(())
     })();

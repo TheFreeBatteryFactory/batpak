@@ -33,7 +33,7 @@
 - name: BatchStage
   justification: batch error reporting enum tested through tests/atomic_batch.rs validation failure tests
 - name: InjectionPoint
-  justification: fault injection enum tested through tests/atomic_batch.rs chaos injection tests (test-support feature)
+  justification: fault injection enum tested through tests/atomic_batch.rs chaos injection tests (dangerous-test-hooks feature)
 - name: FaultInjector
   justification: fault injection trait tested through tests/atomic_batch.rs custom injector implementations
 - name: CountdownInjector

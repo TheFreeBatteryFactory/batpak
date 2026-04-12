@@ -266,9 +266,8 @@ impl FaultInjector for ProbabilisticInjector {
             return None;
         }
 
-        use rand::Rng;
-        let mut rng = rand::rng();
-        if rng.random::<f64>() >= self.probability {
+        let mut rng = fastrand::Rng::new();
+        if rng.f64() >= self.probability {
             return None;
         }
 

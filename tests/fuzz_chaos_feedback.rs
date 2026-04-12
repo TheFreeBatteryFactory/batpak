@@ -29,9 +29,6 @@
 use batpak::prelude::*;
 use batpak::store::segment::{frame_decode, frame_encode};
 use batpak::store::{AppendOptions, Store, StoreConfig, SyncConfig};
-use rand::rngs::StdRng;
-use rand::Rng;
-use rand::SeedableRng;
 use std::sync::Arc;
 use std::time::Instant;
 use tempfile::TempDir;
@@ -381,7 +378,7 @@ fn run_chaos_probes() -> (f64, u64, bool, bool, u64, f64, bool) {
     // --- Subscription delivery ---
     let sub_coord = Coordinate::new("probe:sub", "probe:scope").expect("valid");
     let region = Region::entity("probe:sub");
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
     let sub_n = 50;
     for i in 0..sub_n {
         store
@@ -404,7 +401,7 @@ fn run_chaos_probes() -> (f64, u64, bool, bool, u64, f64, bool) {
             .expect("append");
     }
     let cur_region = Region::entity("probe:cursor");
-    let mut cursor = store.cursor(&cur_region);
+    let mut cursor = store.cursor_guaranteed(&cur_region);
     let mut cursor_count = 0;
     while cursor.poll().is_some() {
         cursor_count += 1;
@@ -414,7 +411,7 @@ fn run_chaos_probes() -> (f64, u64, bool, bool, u64, f64, bool) {
     match Arc::try_unwrap(store) {
         Ok(s) => s.close().expect("close"),
         Err(_) => panic!("Arc still has multiple owners"),
-    }
+    };
 
     (
         write_throughput,
@@ -526,11 +523,11 @@ fn run_extended_fuzz_chaos() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     eprintln!("fuzz_chaos seed: {seed} (override with FUZZ_CHAOS_SEED=<n>)");
-    let mut rng = StdRng::seed_from_u64(seed);
+    let mut rng = fastrand::Rng::with_seed(seed);
     let start = Instant::now();
     for _ in 0..n {
-        let len: usize = rng.random_range(0..4096);
-        let data: Vec<u8> = (0..len).map(|_| rng.random()).collect();
+        let len = rng.usize(0..4096);
+        let data: Vec<u8> = (0..len).map(|_| rng.u8(..)).collect();
         // catch_unwind would be ideal but proptest handles this;
         // we just verify no panics by continuing
         let _ = frame_decode(&data);
@@ -611,7 +608,7 @@ fn run_extended_fuzz_chaos() {
     match Arc::try_unwrap(store) {
         Ok(s) => s.close().expect("close"),
         Err(_) => panic!("Arc still has multiple owners"),
-    }
+    };
     let config2 = StoreConfig {
         data_dir: dir.path().to_path_buf(),
         ..StoreConfig::new("")

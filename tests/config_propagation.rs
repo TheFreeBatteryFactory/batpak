@@ -393,6 +393,7 @@ fn store_config_all_fields_overridable() {
         segment_max_bytes: 1024 * 1024, // 1MB (non-default)
         fd_budget: 8,                   // non-default
         broadcast_capacity: 256,        // non-default
+        single_append_max_bytes: 32 * 1024,
         sync: SyncConfig {
             mode: SyncMode::SyncData, // non-default
             every_n_events: 5,        // non-default
@@ -417,7 +418,7 @@ fn store_config_all_fields_overridable() {
             enable_checkpoint: false,       // disabled for this test
         },
         clock: Some(clock_fn), // custom clock
-        #[cfg(feature = "test-support")]
+        #[cfg(feature = "dangerous-test-hooks")]
         fault_injector: None,
     };
 
@@ -456,6 +457,7 @@ fn store_config_debug_lists_all_integrity_relevant_fields() {
         segment_max_bytes: 11_111,
         fd_budget: 13,
         broadcast_capacity: 19,
+        single_append_max_bytes: 23,
         sync: SyncConfig {
             mode: SyncMode::SyncData,
             every_n_events: 7,
@@ -480,7 +482,7 @@ fn store_config_debug_lists_all_integrity_relevant_fields() {
             enable_checkpoint: true,
         },
         clock: Some(clock_fn),
-        #[cfg(feature = "test-support")]
+        #[cfg(feature = "dangerous-test-hooks")]
         fault_injector: None,
     };
 
@@ -492,6 +494,7 @@ fn store_config_debug_lists_all_integrity_relevant_fields() {
         "segment_max_bytes: 11111",
         "fd_budget: 13",
         "broadcast_capacity: 19",
+        "single_append_max_bytes: 23",
         "SyncConfig",
         "mode: SyncData",
         "every_n_events: 7",

@@ -949,7 +949,7 @@ fn watch_projection_emits_on_new_events() {
         store.append(&coord, kind_a(), &payload(i)).expect("append");
     }
 
-    let watcher = store.watch_projection::<AllCounter>("watch:entity", Freshness::Consistent);
+    let mut watcher = store.watch_projection::<AllCounter>("watch:entity", Freshness::Consistent);
 
     // Spawn a thread that appends 3 more events after a brief delay
     let store2 = Arc::clone(&store);
@@ -982,6 +982,37 @@ fn watch_projection_emits_on_new_events() {
 }
 
 #[test]
+fn watch_projection_catches_up_after_lossy_notifications() {
+    let dir = TempDir::new().expect("temp dir");
+    let config = StoreConfig::new(dir.path()).with_broadcast_capacity(1);
+    let store = Arc::new(Store::open(config).expect("open"));
+    let coord = Coordinate::new("watch:lossy", "watch:scope").expect("coord");
+
+    for i in 0u32..3 {
+        store
+            .append(&coord, kind_a(), &payload(i))
+            .expect("seed append");
+    }
+
+    let mut watcher = store.watch_projection::<AllCounter>("watch:lossy", Freshness::Consistent);
+
+    for i in 3u32..10 {
+        store
+            .append(&coord, kind_a(), &payload(i))
+            .expect("append burst");
+    }
+
+    let result = watcher.recv().expect("recv should not error");
+    let counter = result.expect("projection should exist");
+    assert_eq!(
+        counter.count, 10,
+        "PROPERTY: watch_projection must catch up by watermark even when the lossy subscription \
+         collapses multiple notifications into one.\n\
+         Investigate: src/store/mod.rs ProjectionWatcher::recv + StoreIndex::stream_since."
+    );
+}
+
+#[test]
 fn watch_projection_returns_none_on_store_close() {
     let dir = TempDir::new().expect("temp dir");
     let store = Arc::new(Store::open(StoreConfig::new(dir.path())).expect("open"));
@@ -989,7 +1020,7 @@ fn watch_projection_returns_none_on_store_close() {
     store.append(&coord, kind_a(), &payload(0)).expect("append");
 
     // Subscribe BEFORE we move the Arc — the subscription is independent.
-    let sub = store.subscribe(&Region::entity("drop:entity"));
+    let sub = store.subscribe_lossy(&Region::entity("drop:entity"));
 
     // Close the store from another thread. This shuts down the writer,
     // which closes the broadcast channels, which makes sub.recv() return None.

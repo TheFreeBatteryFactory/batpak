@@ -69,7 +69,7 @@
     - ART-STORE-READER
     - ART-BATCH-TESTS
 - id: FLOW-FAULT-INJECT
-  summary: Fault injection hooks at writer critical points allow chaos testing of crash/error scenarios under the test-support feature gate.
+  summary: Fault injection hooks at writer critical points allow chaos testing of crash/error scenarios under the dangerous-test-hooks feature gate.
   artifacts:
     - ART-STORE-FAULT
     - ART-BATCH-TESTS

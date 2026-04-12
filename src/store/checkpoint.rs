@@ -23,9 +23,9 @@ use crate::event::{EventKind, HashChain};
 use crate::store::index::{DiskPos, IndexEntry, StoreIndex};
 use crate::store::StoreError;
 use serde::{Deserialize, Serialize};
-use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::path::Path;
+use tempfile::NamedTempFile;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -39,9 +39,6 @@ pub(crate) const CHECKPOINT_VERSION: u16 = 2;
 
 /// Final checkpoint filename inside the data directory.
 pub(crate) const CHECKPOINT_FILENAME: &str = "index.ckpt";
-
-/// Temporary filename used during an atomic write-then-rename.
-pub(crate) const CHECKPOINT_TMP: &str = "index.ckpt.tmp";
 
 // ── Wire types ───────────────────────────────────────────────────────────────
 
@@ -99,7 +96,7 @@ pub(crate) struct WatermarkInfo {
 
 /// Serialise the entire in-memory index to `<data_dir>/index.ckpt`.
 ///
-/// The write is atomic: data is first written to `<data_dir>/index.ckpt.tmp`,
+/// The write is atomic: data is first written to a same-directory temporary file,
 /// fsynced, then renamed over the final path.  A partial write caused by a
 /// crash therefore never corrupts the previous good checkpoint.
 ///
@@ -167,30 +164,30 @@ pub(crate) fn write_checkpoint(
     // ── 4. Compute CRC of the body ────────────────────────────────────────────
     let crc: u32 = crc32fast::hash(&body);
 
-    // ── 5. Write to .tmp with fsync ───────────────────────────────────────────
-    let tmp_path = data_dir.join(CHECKPOINT_TMP);
+    // ── 5. Write to a same-directory tempfile with fsync ─────────────────────
+    let final_path = data_dir.join(CHECKPOINT_FILENAME);
+    reject_symlink_leaf(&final_path)?;
     {
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp_path)?;
-        let mut w = BufWriter::new(&file);
+        let tmp = NamedTempFile::new_in(data_dir)?;
+        {
+            let file = tmp.as_file();
+            let mut w = BufWriter::new(file);
 
-        // Header: MAGIC (6) + version (2 LE) + crc (4 LE)
-        w.write_all(CHECKPOINT_MAGIC)?;
-        w.write_all(&CHECKPOINT_VERSION.to_le_bytes())?;
-        w.write_all(&crc.to_le_bytes())?;
-        w.write_all(&body)?;
-        w.flush()?;
+            // Header: MAGIC (6) + version (2 LE) + crc (4 LE)
+            w.write_all(CHECKPOINT_MAGIC)?;
+            w.write_all(&CHECKPOINT_VERSION.to_le_bytes())?;
+            w.write_all(&crc.to_le_bytes())?;
+            w.write_all(&body)?;
+            w.flush()?;
+        }
 
         // fsync before rename so the data reaches stable storage.
-        file.sync_all()?;
-    }
+        tmp.as_file().sync_all()?;
 
-    // ── 6. Atomic rename to final name ────────────────────────────────────────
-    let final_path = data_dir.join(CHECKPOINT_FILENAME);
-    std::fs::rename(&tmp_path, &final_path)?;
+        // ── 6. Atomic rename to final name ────────────────────────────────────
+        tmp.persist(&final_path)
+            .map_err(|e| StoreError::Io(e.error))?;
+    }
 
     tracing::debug!(
         target: "batpak::checkpoint",
@@ -202,6 +199,19 @@ pub(crate) fn write_checkpoint(
     );
 
     Ok(())
+}
+
+fn reject_symlink_leaf(path: &Path) -> Result<(), StoreError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(StoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to write checkpoint through symlink {}",
+                path.display()
+            ),
+        ))),
+        Ok(_) | Err(_) => Ok(()),
+    }
 }
 
 // ── try_load_checkpoint ───────────────────────────────────────────────────────

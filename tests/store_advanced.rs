@@ -420,7 +420,7 @@ fn subscription_receives_matching_events() {
     let kind = EventKind::custom(0xF, 1);
 
     let region = Region::entity("entity:sub");
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
 
     // Write from another thread so recv doesn't deadlock
     let store_w = Arc::clone(&store);
@@ -465,7 +465,7 @@ fn subscription_filters_by_region() {
 
     // Subscribe only to entity:a
     let region = Region::entity("entity:a");
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
 
     let store_w = Arc::clone(&store);
     let writer = std::thread::Builder::new()
@@ -520,7 +520,7 @@ fn cursor_polls_events_in_order() {
     }
 
     let region = Region::entity("entity:cur");
-    let mut cursor = store.cursor(&region);
+    let mut cursor = store.cursor_guaranteed(&region);
 
     let mut polled = Vec::new();
     while let Some(entry) = cursor.poll() {
@@ -563,7 +563,7 @@ fn cursor_poll_batch_respects_max() {
     }
 
     let region = Region::entity("entity:batch");
-    let mut cursor = store.cursor(&region);
+    let mut cursor = store.cursor_guaranteed(&region);
 
     let batch1 = cursor.poll_batch(3);
     assert_eq!(
@@ -1507,7 +1507,7 @@ fn subscription_ops_map_transforms_notifications() {
     let kind = EventKind::custom(0xF, 1);
     let region = Region::entity("entity:map");
 
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
 
     let store_w = Arc::clone(&store);
     let coord_w = coord.clone();
@@ -1568,7 +1568,7 @@ fn subscription_ops_filter_chains_correctly() {
     let coord = Coordinate::new("entity:filt", "scope:test").expect("valid coord");
     let region = Region::entity("entity:filt");
 
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
 
     // Chain two filters and take(2) to prevent blocking forever:
     // first accepts kind1 only, second is always-true (AND semantics)
@@ -1632,7 +1632,7 @@ fn subscription_ops_take_limits_count() {
     let kind = EventKind::custom(0xF, 1);
     let region = Region::entity("entity:take");
 
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
 
     let store_w = Arc::clone(&store);
     let coord_w = coord.clone();
@@ -1682,7 +1682,7 @@ fn subscription_ops_take_limits_count() {
 fn cursor_on_empty_store_returns_empty() {
     let (store, _dir) = test_store();
     let region = Region::entity("entity:nothing");
-    let mut cursor = store.cursor(&region);
+    let mut cursor = store.cursor_guaranteed(&region);
 
     assert!(
         cursor.poll().is_none(),
@@ -1711,7 +1711,7 @@ fn cursor_sees_events_appended_after_creation() {
     let region = Region::entity("entity:late");
 
     // Create cursor BEFORE any events
-    let mut cursor = store.cursor(&region);
+    let mut cursor = store.cursor_guaranteed(&region);
     assert!(cursor.poll().is_none(), "cursor should be empty initially");
 
     // Append events AFTER cursor creation
@@ -1767,7 +1767,7 @@ fn cursor_guaranteed_delivery_under_load() {
     }
 
     // Cursor should see ALL events (guaranteed delivery)
-    let mut cursor = store.cursor(&region);
+    let mut cursor = store.cursor_guaranteed(&region);
     let mut total = 0;
     loop {
         let batch = cursor.poll_batch(50);
@@ -1978,7 +1978,7 @@ fn react_loop_spawns_and_processes() {
 fn cursor_empty_stream_returns_none() {
     let (store, _dir) = test_store();
     let region = Region::entity("nonexistent:entity");
-    let mut cursor = store.cursor(&region);
+    let mut cursor = store.cursor_guaranteed(&region);
     assert!(
         cursor.poll().is_none(),
         "PROPERTY: Cursor on empty stream must return None, not fake data.\n\
@@ -1992,7 +1992,7 @@ fn cursor_empty_stream_returns_none() {
 fn cursor_poll_batch_empty_stream_returns_empty_vec() {
     let (store, _dir) = test_store();
     let region = Region::entity("nonexistent:entity");
-    let mut cursor = store.cursor(&region);
+    let mut cursor = store.cursor_guaranteed(&region);
     let batch = cursor.poll_batch(10);
     assert!(
         batch.is_empty(),
@@ -2012,7 +2012,7 @@ fn cursor_repoll_after_eof_sees_new_events() {
     store.append(&coord, kind, &"e1").expect("append");
     store.append(&coord, kind, &"e2").expect("append");
 
-    let mut cursor = store.cursor(&region);
+    let mut cursor = store.cursor_guaranteed(&region);
     assert!(cursor.poll().is_some(), "first poll");
     assert!(cursor.poll().is_some(), "second poll");
     assert!(cursor.poll().is_none(), "should be exhausted");
@@ -2045,7 +2045,7 @@ fn cursor_position_persists_no_duplicates() {
             .expect("append");
     }
 
-    let mut cursor = store.cursor(&region);
+    let mut cursor = store.cursor_guaranteed(&region);
 
     // Poll 3
     let first_three: Vec<_> = (0..3).filter_map(|_| cursor.poll()).collect();
@@ -2089,7 +2089,7 @@ fn cursor_poll_batch_respects_max_boundary() {
             .expect("append");
     }
 
-    let mut cursor = store.cursor(&region);
+    let mut cursor = store.cursor_guaranteed(&region);
 
     // Request batch of 3 — should return exactly 3
     let batch = cursor.poll_batch(3);
@@ -2282,7 +2282,7 @@ fn reactive_subscribe_react_append_pattern() {
 
     // Subscribe before writing
     let region = Region::all();
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
 
     // Write the root event from another thread
     let store_w = Arc::clone(&store);

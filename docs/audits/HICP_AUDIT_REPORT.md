@@ -521,3 +521,222 @@ Notes: The repo-level surfaces explain the system well, but they lag the impleme
 
 ## Aggregate Score
 82/100
+
+## 2026-04-11 Red Team Addendum — Full-Send Hardening Pass
+
+This addendum is append-only. Earlier findings remain part of the audit record even
+when they no longer reproduce in the current tree. Findings closed in this pass are
+called out as `Superseded in current tree`; they are preserved here because the audit
+history matters as much as the current state.
+
+### Preserved Prior Findings
+
+- Prior finding: H1 broken hash chain for multi-item same-entity batches.
+  Severity: HIGH.
+  Surface: `src/store/writer.rs` atomic batch path.
+  Why easy to miss: the drift lived across two folds over the same batch state.
+  Relation to prior findings: original marquee v0.3.0 defect.
+  Current status: `Superseded in current tree`.
+  Closure in this pass: the per-item material needed downstream stays fused in
+  `BatchItemComputed`, and the same-key batch scratch maps were further collapsed
+  into one stateful path instead of parallel runtime facts.
+
+- Prior finding: H2 committed batch lost on cold start without SIDX.
+  Severity: HIGH.
+  Surface: `src/store/reader.rs` slow-path recovery.
+  Why easy to miss: the false premise was plausible; durable commit and footer
+  publication were treated as the same thing.
+  Relation to prior findings: original marquee v0.3.0 defect.
+  Current status: `Superseded in current tree`.
+  Closure in this pass: slow-path rebuild now streams scan results directly into
+  replay insertion while preserving COMMIT-marker durability semantics and
+  cross-segment batch recovery state.
+
+- Prior finding: M1 wall clock regression could reorder batch-visible state.
+  Severity: MEDIUM.
+  Surface: batch write path.
+  Why easy to miss: wall-clock and index-ordering invariants were maintained in
+  separate places.
+  Relation to prior findings: same drift-prone batch family as H1/H2.
+  Current status: `Superseded in current tree`.
+  Closure in this pass: per-item `wall_ms` remains precomputed once and reused
+  verbatim through write and stage phases.
+
+- Prior finding: M2 `NativeCache::sync()` looked meaningful while being a no-op.
+  Severity: MEDIUM.
+  Surface: projection cache semantics and docs.
+  Why easy to miss: the API shape looked durability-bearing even though the backend
+  never promised that property.
+  Relation to prior findings: delivery/freshness semantics that looked safer than they were.
+  Current status: bounded, documented, and now paired with stricter naming elsewhere.
+
+### Dangerous Defaults And Misleading Examples
+
+#### Finding A1 — Ambiguous delivery names looked stronger than they were
+- Severity: MEDIUM
+- Surface: `Store::subscribe()` / `Store::cursor()` public API
+- Why easy to miss: the old names hid the safety distinction behind docs instead of the type surface
+- Exploit / failure story: wrappers pick the push API assuming replay semantics, drop notifications under pressure, and silently miss events
+- Preconditions: caller embeds batpak in a service and treats bounded broadcast as guaranteed delivery
+- Impact: silent data loss at the wrapper boundary
+- Evidence in current tree: renamed to `subscribe_lossy()` and `cursor_guaranteed()` in `src/store/mod.rs`, docs, examples, tests, benches, and spec
+- Relation to prior findings: same honesty gap as the old freshness naming
+- Closure in this pass: closed
+
+#### Finding A2 — Freshness enum overstated safety
+- Severity: MEDIUM
+- Surface: projection cache freshness contract
+- Why easy to miss: `BestEffort` sounds benevolent, not stale
+- Exploit / failure story: product code picks it in correctness-sensitive paths and accidentally serves stale state
+- Preconditions: caller uses cached projections without understanding bounded staleness
+- Impact: stale reads dressed up as a neutral default
+- Evidence in current tree: `Freshness::MaybeStale { max_stale_ms }` in code, docs, tests, and spec
+- Relation to prior findings: sibling of A1
+- Closure in this pass: closed
+
+### Lifecycle And Durability Traps
+
+#### Finding L1 — Drop looked too much like clean shutdown
+- Severity: HIGH
+- Surface: store lifecycle
+- Why easy to miss: the old API relied on users noticing shutdown caveats in prose
+- Exploit / failure story: service wrappers rely on destructor timing, lose the last burst of writes, and discover it only under restart or deploy pressure
+- Preconditions: caller drops `Store` without explicit `close(self)`
+- Impact: bounded but real write loss window and misleading operational behavior
+- Evidence in current tree: explicit `close(self)` remains the clean contract, `Drop` now warns loudly, specs/docs/examples emphasize the distinction, and close returns a terminal `Closed` token
+- Relation to prior findings: same “looks safer than it is” family as delivery naming
+- Closure in this pass: bounded and made operationally loud
+
+### Delivery / Freshness Semantics That Looked Safer Than They Were
+
+#### Finding D1 — `watch_projection` replayed from genesis on every notification
+- Severity: HIGH
+- Surface: `ProjectionWatcher`
+- Why easy to miss: the code was functionally correct on small entities and the subscription path hid the amplification shape
+- Exploit / failure story: a hot entity with a long history plus a burst of notifications turns one append stream into repeated whole-history scans
+- Preconditions: large entity histories, frequent updates, watcher consumers
+- Impact: CPU amplification and latency collapse
+- Evidence in current tree: watcher-local cached projection state plus index watermark tailing in `src/store/mod.rs`, and internal `StoreIndex::stream_since()` in `src/store/index.rs`
+- Relation to prior findings: canonical banana-split target from the red-team pass
+- Closure in this pass: closed
+
+#### Finding D2 — Lossy subscriptions could have hidden watcher convergence gaps
+- Severity: MEDIUM
+- Surface: watcher update path
+- Why easy to miss: “I got a notification” can be mistaken for “I saw every event”
+- Exploit / failure story: bounded broadcast drops intermediate notifications and watcher state silently lags if it only applies one event per recv
+- Preconditions: backpressure or bursty append traffic
+- Impact: stale or incorrect watcher state
+- Evidence in current tree: watcher refresh is watermark-based rather than single-notification-based, and `watch_projection_catches_up_after_lossy_notifications` was added to `tests/unified_red.rs`
+- Relation to prior findings: direct follow-on from D1
+- Closure in this pass: closed
+
+### Hostile Filesystem / Path-Trust / Temp-File Footguns
+
+#### Finding F1 — Predictable checkpoint temp path allowed symlink clobber setup
+- Severity: HIGH
+- Surface: checkpoint persistence
+- Why easy to miss: the vulnerable pattern looked like routine atomic-write plumbing
+- Exploit / failure story: attacker pre-places a symlink at the fixed temp leaf, waits for checkpoint write, and redirects or clobbers an unintended file
+- Preconditions: attacker can create entries in `data_dir`
+- Impact: file clobber / checkpoint corruption
+- Evidence in current tree: `src/store/checkpoint.rs` now uses `NamedTempFile::new_in(data_dir)` and rejects symlink leaf targets; coverage added in `tests/store_edge_cases.rs`
+- Relation to prior findings: foundational hostile-filesystem issue from the audit lanes
+- Closure in this pass: closed
+
+#### Finding F2 — Native-cache persistence had the same predictable temp-file shape
+- Severity: MEDIUM
+- Surface: `NativeCache::put`
+- Why easy to miss: cache code often gets excused as “non-durable anyway”
+- Exploit / failure story: attacker redirects cache writes or uses a malicious cache leaf to create integrity surprises on a shared mount
+- Preconditions: attacker controls or can pre-seed cache root paths
+- Impact: cache corruption, path traversal surprise, operational confusion
+- Evidence in current tree: `src/store/projection.rs` uses same-directory `NamedTempFile`, rejects symlink leafs, and has an explicit symlink-rejection test
+- Relation to prior findings: sibling of F1
+- Closure in this pass: closed
+
+### Amplification / Resource Abuse / Operator-Mistake Traps
+
+#### Finding R1 — Single append size was effectively bounded only by `u32::MAX`
+- Severity: HIGH
+- Surface: append boundary
+- Why easy to miss: batch append had a real operational limit, making single-append asymmetry less obvious
+- Exploit / failure story: caller sends a giant single payload, forcing serialization and memory pressure far beyond the intended operational envelope
+- Preconditions: untrusted caller payloads or missing wrapper-side limits
+- Impact: memory pressure, latency spikes, crash risk
+- Evidence in current tree: `StoreConfig::single_append_max_bytes`, validation in `src/store/mod.rs`, and regression coverage in `tests/store_edge_cases.rs`
+- Relation to prior findings: classic “basic thing easy to overlook” item from the follow-up audit pass
+- Closure in this pass: closed
+
+#### Finding R2 — Unbounded coordinate component size fed interner abuse
+- Severity: MEDIUM
+- Surface: `Coordinate::new`
+- Why easy to miss: emptiness checks existed, so the constructor looked “validated enough”
+- Exploit / failure story: attacker generates huge entity/scope components, multiplying memory pressure and index churn
+- Preconditions: caller controls entity/scope strings
+- Impact: memory amplification and degraded index locality
+- Evidence in current tree: fixed component-length checks in `src/coordinate/mod.rs` and regression coverage in `tests/store_edge_cases.rs`
+- Relation to prior findings: same resource-abuse family as R1
+- Closure in this pass: closed
+
+#### Finding R3 — `react_loop` paid an extra disk read per committed event
+- Severity: MEDIUM
+- Surface: reactor pipeline
+- Why easy to miss: the old logic was functionally correct and the redundant read lived behind a lightweight notification abstraction
+- Exploit / failure story: high-volume reactor workloads turn every reaction into extra disk I/O, amplifying the cost of already-committed events
+- Preconditions: callers use `react_loop` on active workloads
+- Impact: unnecessary I/O and a larger blast radius under load
+- Evidence in current tree: private `CommittedEventEnvelope` in `src/store/writer.rs` and `react_loop` consuming that envelope directly in `src/store/mod.rs`
+- Relation to prior findings: banana-split fusion by carrying the richer accumulator once
+- Closure in this pass: closed
+
+### Tooling / Supply Chain / Verification Blind Spots
+
+#### Finding T1 — advisories were visible but not release-blocking
+- Severity: HIGH
+- Surface: `cargo xtask deny` / release flow / CI parity
+- Why easy to miss: a warn-only gate still prints scary output, which looks better than it is
+- Exploit / failure story: maintainers believe dependency advisories are enforced while CI keeps shipping through them
+- Preconditions: advisory-db hit or deny parser issue
+- Impact: vulnerable dependency drift can reach release candidates
+- Evidence in current tree: `cargo xtask deny` now runs hard `cargo deny check` plus hard `cargo audit --deny warnings`; `cargo-audit` pin added to xtask setup, CI, devcontainer, and integrity parity checks
+- Relation to prior findings: direct closure of the earlier supply-chain blind spot
+- Closure in this pass: closed, with one explicit narrow allowlist for `RUSTSEC-2026-0097` because the remaining vulnerable `rand 0.9.2` edge is upstream in `proptest`'s dev-only dependency graph after batpak's own runtime/test-hook code was moved off `rand`
+
+#### Finding T2 — structural drift toward old misleading names could reappear by copy-paste
+- Severity: MEDIUM
+- Surface: build/integrity guardrails
+- Why easy to miss: regressions usually re-enter through docs and convenience refactors, not the original bug site
+- Exploit / failure story: a future edit reintroduces `subscribe()`, `cursor()`, `test-support`, or fixed temp-file patterns and the repo quietly starts lying again
+- Preconditions: ordinary maintenance drift
+- Impact: semantics regress faster than reviewers notice
+- Evidence in current tree: new build-time and integrity-time checks for stale surface names and fixed temp-file patterns in `build.rs` and `tools/integrity/src/main.rs`
+- Relation to prior findings: “idiot-proof us too” hardening from the second follow-up pass
+- Closure in this pass: closed
+
+### Banana-Split And Bulkhead Refactors That Removed Drift-Prone Parallel State
+
+- `ProjectionWatcher` is now the clearest banana-split win in the tree: one full fold, then watermark-based delta application instead of replay-from-genesis on every notification.
+- Cold-start rebuild now fuses scan and replay insertion: `scan_segment_index_into()` emits entries directly into the replay cursor instead of allocating per-segment intermediate vectors first.
+- Batch append continues to preserve the crucial durability boundary of `precompute -> write -> fsync -> stage/publish`, but the per-item facts that must not drift (`prev_hash`, `event_hash`, `clock`, `wall_ms`, causation, event id) are computed once and reused verbatim downstream.
+- Reactor handling now carries the already-committed event envelope once instead of shipping a lightweight notification and forcing a second fold back through disk.
+
+### Status Updates On Prior Findings
+
+- H1 broken same-entity batch hash chain: `Superseded in current tree`
+- H2 committed batch dropped on cold start without SIDX: `Superseded in current tree`
+- M1 wall clock regression in batch path: `Superseded in current tree`
+- M2 misleading native-cache durability expectation: bounded, documented, and no longer paired with euphemistic freshness naming
+
+### Prioritized Hardening Threads Closed In This Pass
+
+- Hostile temp-file and symlink leaf handling for checkpoint and native cache
+- Real single-event payload cap
+- Fixed coordinate component length caps
+- Explicit lossy vs guaranteed delivery naming
+- Explicit maybe-stale freshness naming
+- Open-state lifecycle typestate plus explicit `Closed` terminal result
+- Watermark-based watcher catch-up
+- Scan-to-sink cold-start rebuild fusion
+- Private richer reactor envelope to remove redundant event rereads
+- Hard advisory gating in xtask / CI / release flow

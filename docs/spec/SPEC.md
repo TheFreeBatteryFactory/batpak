@@ -277,7 +277,7 @@ batpak/
 # ⚠ HISTORICAL SNAPSHOT — pre-Keller-Cut era. Live version is 0.3.0.
 # See `Cargo.toml` at the repo root for the current dependency surface.
 # The `[features]` block below predates the redb/lmdb removal: only
-# `blake3` and `test-support` exist as of 0.3.0.
+# `blake3` and `dangerous-test-hooks` exist as of 0.3.0.
 [package]
 name = "batpak"
 version = "0.1.0"
@@ -289,7 +289,7 @@ description = "Event-sourced state machines over coordinate spaces"
 [features]
 default = ["blake3"]
 blake3 = ["dep:blake3"]
-test-support = []
+dangerous-test-hooks = []
 
 [dependencies]
 uuid = { version = "1", features = ["v7"] }
@@ -1037,7 +1037,7 @@ in `src/store/error.rs`, append/compaction contracts live in
 `src/store/ancestors.rs` plus cfg-specific helper files, lifecycle helpers live
 in `src/store/maintenance.rs`, projection wiring lives in
 `src/store/projection_flow.rs`, and test-only hooks live behind the
-`test-support` feature in `src/store/test_support.rs`. Read this block as API
+`dangerous-test-hooks` feature in `src/store/test_support.rs`. Read this block as API
 intent, not as the literal final file layout.
 
 ```
@@ -1074,8 +1074,8 @@ PROJECT:
     -> Result<Option<T>, StoreError>
 
 SUBSCRIBE:
-  subscribe(region: &Region) -> Subscription     // push, per-subscriber flume channel
-  cursor(region: &Region) -> Cursor              // pull, guaranteed delivery
+  subscribe_lossy(region: &Region) -> Subscription   // push, bounded flume channel, lossy
+  cursor_guaranteed(region: &Region) -> Cursor       // pull, guaranteed replay delivery
 
 CONVENIENCE (sugar over Region):
   stream(entity) = query(&Region::entity(entity))
@@ -1083,7 +1083,7 @@ CONVENIENCE (sugar over Region):
   by_fact(kind) = query(&Region::all().fact(KindFilter::Exact(kind)))
 
 LIFECYCLE:
-  sync(), snapshot(dest), compact(), close(self)
+  sync(), snapshot(dest), compact(), close(self) -> Result<Closed, StoreError>
 
 DIAGNOSTICS:
   stats() -> StoreStats, diagnostics() -> StoreDiagnostics
@@ -1157,7 +1157,7 @@ StoreConfig is composed from sub-structs (refactored in 0.3.0):
   clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>  (default: None = SystemTime::now())
     Injectable clock for deterministic testing. Returns microseconds since epoch.
 
-  fault_injector: Option<Arc<dyn FaultInjector>>     (default: None; test-support only)
+  fault_injector: Option<Arc<dyn FaultInjector>>     (default: None; dangerous-test-hooks only)
 
 All `with_*` builder methods on StoreConfig (e.g. `with_sync_every_n_events`,
 `with_sync_mode`, `with_writer_channel_capacity`) preserve their old names so
@@ -1256,9 +1256,11 @@ Shutdown drain semantics:
   responds to Shutdown. Commands beyond the cap get StoreError::ShuttingDown
   on their respond channel. Producers that send after Shutdown get flume
   SendError because the channel is dropped after drain completes.
-  This prevents silent data loss on close(). Products that call
+  This prevents silent data loss on explicit close(self). Products that call
   store.close() after a burst of appends get all queued events persisted
-  (up to the cap). ~10 LOC.
+  (up to the cap) and receive a terminal Closed token. Drop remains a
+  best-effort drain only and logs a warning so wrappers do not mistake it
+  for durable shutdown. ~10 LOC.
 
   In production, set shutdown_drain_limit high enough to cover your
   burst size. In tests, default 1024 is fine.
@@ -1357,7 +1359,7 @@ pub trait ProjectionCache: Send + Sync + 'static {
 }
 
 pub struct CacheMeta { pub watermark: u64, pub cached_at_us: i64 }
-pub enum Freshness { Consistent, BestEffort { max_stale_ms: u64 } }
+pub enum Freshness { Consistent, MaybeStale { max_stale_ms: u64 } }
 pub struct NoCache;     // default: every read replays from segments
 pub struct NativeCache; // file-backed cache rooted at a directory.
                         // Atomic via tempfile + rename. No fsync on put
@@ -1617,7 +1619,7 @@ jobs:
       - run: cargo check --all-features
       - run: cargo check --no-default-features
       - run: cargo check --features blake3
-      - run: cargo check --features test-support
+      - run: cargo check --features dangerous-test-hooks
 
   test:
     runs-on: ubuntu-latest
@@ -1977,7 +1979,7 @@ All drift corrections verified against this document:
 [✓] Shutdown drain semantics
     writer.rs: Shutdown drains up to shutdown_drain_limit queued commands,
     then fsync, then responds. Beyond cap → StoreError::ShuttingDown.
-    No silent data loss on store.close() after burst of appends.
+    No silent data loss on explicit store.close() after burst of appends.
 
 [✓] causation_id on EventHeader
     header.rs: causation_id: Option<u128> — which event CAUSED this one.
@@ -2085,7 +2087,7 @@ decisions the PRDs specify the WHAT.
    The store's primary API (append with &impl Serialize, get returning
    serde_json::Value, project) fundamentally requires serialization.
    Layer 0 types derive(Serialize, Deserialize) unconditionally.
-   blake3 (default) and test-support are the only optional features.
+   blake3 (default) and dangerous-test-hooks are the only optional features.
    --no-default-features builds everything except blake3 hashing (which
    falls back to [0u8; 32] genesis convention).
 

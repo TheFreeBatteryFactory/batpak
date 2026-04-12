@@ -48,7 +48,7 @@ pub trait EventSourced<P>: Sized {
 /// # }
 /// # fn example(store: &Store, reactor: &MyReactor) {
 /// let region = Region::entity("order:*");
-/// let sub = store.subscribe(&region);
+/// let sub = store.subscribe_lossy(&region);
 /// while let Some(notif) = sub.recv() {
 ///     let stored = store.get(notif.event_id).unwrap();
 ///     for (coord, kind, payload) in reactor.react(&stored.event) {

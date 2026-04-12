@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 
+/// Hard cap for each coordinate component. Prevents accidental or hostile
+/// cardinality bombs from turning entity/scope keys into unbounded memory sinks.
+pub const MAX_COORDINATE_COMPONENT_LEN: usize = 1024;
+
 /// Coordinate: WHO (entity) + WHERE (scope). The address of an event stream.
 /// [SPEC:src/coordinate/mod.rs]
 
@@ -24,6 +28,20 @@ pub enum CoordinateError {
     EmptyEntity,
     /// The scope string was empty.
     EmptyScope,
+    /// The entity string exceeded the maximum supported length.
+    EntityTooLong {
+        /// Actual entity string length.
+        len: usize,
+        /// Maximum permitted length.
+        max: usize,
+    },
+    /// The scope string exceeded the maximum supported length.
+    ScopeTooLong {
+        /// Actual scope string length.
+        len: usize,
+        /// Maximum permitted length.
+        max: usize,
+    },
 }
 
 /// Region: the ONE predicate type for query, subscription, cursor, traversal.
@@ -67,6 +85,18 @@ impl Coordinate {
         if scope.is_empty() {
             return Err(CoordinateError::EmptyScope);
         }
+        if entity.len() > MAX_COORDINATE_COMPONENT_LEN {
+            return Err(CoordinateError::EntityTooLong {
+                len: entity.len(),
+                max: MAX_COORDINATE_COMPONENT_LEN,
+            });
+        }
+        if scope.len() > MAX_COORDINATE_COMPONENT_LEN {
+            return Err(CoordinateError::ScopeTooLong {
+                len: scope.len(),
+                max: MAX_COORDINATE_COMPONENT_LEN,
+            });
+        }
         Ok(Self {
             entity: Arc::from(entity),
             scope: Arc::from(scope),
@@ -101,6 +131,12 @@ impl fmt::Display for CoordinateError {
         match self {
             Self::EmptyEntity => write!(f, "entity cannot be empty"),
             Self::EmptyScope => write!(f, "scope cannot be empty"),
+            Self::EntityTooLong { len, max } => {
+                write!(f, "entity length {len} exceeds maximum {max}")
+            }
+            Self::ScopeTooLong { len, max } => {
+                write!(f, "scope length {len} exceeds maximum {max}")
+            }
         }
     }
 }

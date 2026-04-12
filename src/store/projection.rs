@@ -1,7 +1,7 @@
 use crate::store::StoreError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use tempfile::NamedTempFile;
 
 /// Describes optional capabilities supported by a cache backend.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -116,7 +116,7 @@ pub enum Freshness {
     /// Always replay from the current head; never return a stale cached value.
     Consistent,
     /// Return a cached value if it is no older than `max_stale_ms` milliseconds.
-    BestEffort {
+    MaybeStale {
         /// Maximum age in milliseconds a cached value may have before forcing a replay.
         max_stale_ms: u64,
     },
@@ -160,8 +160,6 @@ impl ProjectionCache for NoCache {
 /// cache hit (microseconds).
 pub struct NativeCache {
     root: PathBuf,
-    /// Monotonic counter for unique temp-file names (no rand dependency).
-    counter: AtomicU64,
 }
 
 impl NativeCache {
@@ -171,11 +169,9 @@ impl NativeCache {
     /// Returns `StoreError::CacheFailed` if the root directory cannot be created.
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, StoreError> {
         let root = path.as_ref().to_path_buf();
+        reject_symlink_leaf(&root)?;
         std::fs::create_dir_all(&root).map_err(StoreError::cache_error)?;
-        Ok(Self {
-            root,
-            counter: AtomicU64::new(0),
-        })
+        Ok(Self { root })
     }
 
     /// Compute the file path for a cache key: `<root>/<shard>/<hex_key>.bin`
@@ -185,12 +181,6 @@ impl NativeCache {
         let shard_dir = self.root.join(shard);
         let file_path = shard_dir.join(format!("{hex}.bin"));
         (shard_dir, file_path)
-    }
-
-    /// Generate a unique temp-file path within a shard directory.
-    fn tmp_path(&self, shard_dir: &std::path::Path) -> PathBuf {
-        let n = self.counter.fetch_add(1, Ordering::Relaxed);
-        shard_dir.join(format!(".tmp_{pid}_{n}", pid = std::process::id()))
     }
 }
 
@@ -222,10 +212,11 @@ impl ProjectionCache for NativeCache {
         let (shard_dir, final_path) = self.key_path(key);
 
         // Ensure shard directory exists (lazy creation).
+        reject_symlink_leaf(&shard_dir)?;
         std::fs::create_dir_all(&shard_dir).map_err(StoreError::cache_error)?;
+        reject_symlink_leaf(&final_path)?;
 
         let buf = meta.encode_with_value(value);
-        let tmp = self.tmp_path(&shard_dir);
 
         // Atomic write: temp file → rename. **Intentionally no fsync.**
         //
@@ -243,23 +234,18 @@ impl ProjectionCache for NativeCache {
         // source of truth and a missing cache entry simply triggers a
         // replay-and-rewrite on the next `project()` call.
         let write_result = (|| -> Result<(), StoreError> {
+            let tmp = NamedTempFile::new_in(&shard_dir).map_err(StoreError::cache_error)?;
             {
                 use std::io::Write;
-                let mut f = std::io::BufWriter::new(
-                    std::fs::File::create(&tmp).map_err(StoreError::cache_error)?,
-                );
+                let mut f = std::io::BufWriter::new(tmp.as_file());
                 f.write_all(&buf).map_err(StoreError::cache_error)?;
                 f.into_inner()
                     .map_err(|e| StoreError::CacheFailed(Box::new(e.into_error())))?;
             }
-            replace_existing(&tmp, &final_path)?;
+            tmp.persist(&final_path)
+                .map_err(|e| StoreError::CacheFailed(Box::new(e.error)))?;
             Ok(())
         })();
-
-        if write_result.is_err() {
-            // Best-effort cleanup of temp file on failure.
-            let _ = std::fs::remove_file(&tmp);
-        }
         write_result
     }
 
@@ -325,29 +311,24 @@ impl ProjectionCache for NativeCache {
     }
 }
 
+fn reject_symlink_leaf(path: &std::path::Path) -> Result<(), StoreError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Err(StoreError::CacheFailed(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to use cache path through symlink {}",
+                    path.display()
+                ),
+            ))))
+        }
+        Ok(_) | Err(_) => Ok(()),
+    }
+}
+
 /// Encode bytes as lowercase hex string.
 fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// Replace `dst` with `src`, overwriting `dst` if it exists.
-///
-/// **Atomicity guarantees:**
-/// - **Unix**: `std::fs::rename()` calls `rename(2)`, which atomically
-///   replaces the destination on POSIX-compliant filesystems.
-/// - **Windows**: since Rust 1.57, `std::fs::rename()` calls `MoveFileExW`
-///   with `MOVEFILE_REPLACE_EXISTING`, which is atomic on local NTFS for
-///   same-volume renames. Cross-volume or non-NTFS targets may fall back
-///   to a non-atomic copy+delete by the OS, but the destination is never
-///   left in a torn state by `MoveFileExW` itself.
-///
-/// In short: this function delegates to the platform's atomic-replace
-/// primitive. The previous code had a manual remove+rename fallback for
-/// Windows, but it was unnecessary (Rust's `std::fs::rename` already
-/// handles overwrites since 1.57) and the fallback path was non-atomic.
-/// Both are now removed.
-fn replace_existing(src: &std::path::Path, dst: &std::path::Path) -> Result<(), StoreError> {
-    std::fs::rename(src, dst).map_err(StoreError::cache_error)
 }
 
 #[cfg(test)]

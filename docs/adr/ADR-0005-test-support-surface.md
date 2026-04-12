@@ -7,7 +7,7 @@ Accepted
 Some tests need privileged hooks such as intentional writer panic injection, but those hooks should not appear in default production builds.
 
 ## Decision
-Privileged test hooks live behind a non-default `test-support` feature and are exercised by targeted integration tests and CI feature matrices.
+Privileged test hooks live behind a non-default `dangerous-test-hooks` feature and are exercised by targeted integration tests and CI feature matrices.
 
 ## Consequences
 - Default consumers do not see test-only APIs.

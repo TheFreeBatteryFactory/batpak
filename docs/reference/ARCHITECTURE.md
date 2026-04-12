@@ -80,8 +80,8 @@ The **Store** is the runtime. It manages:
 - **Write path**: `append()` serializes to MessagePack, sends to the background writer thread via flume channel, writer appends to the active segment file, computes CRC32 + optional Blake3 hash, indexes the event, broadcasts to subscribers.
 - **Read path**: `get()`, `query()`, `stream()`, `by_scope()`, `by_fact()` — all sync, all go through the in-memory index.
 - **Projection path**: `project::<T>(entity, freshness)` replays events through `EventSourced::from_events()` with optional caching (NoCache, NativeCache).
-- **Subscription path**: `subscribe(region)` returns a push-based `Subscription` (lossy, bounded flume channel). `cursor(region)` returns a pull-based `Cursor` (guaranteed delivery). `watch_projection::<T>(entity, freshness)` returns a `ProjectionWatcher` that auto-re-projects on new events.
-- **Lifecycle**: `sync()`, `snapshot()`, `compact()`, `close()`.
+- **Subscription path**: `subscribe_lossy(region)` returns a push-based `Subscription` (lossy, bounded flume channel). `cursor_guaranteed(region)` returns a pull-based `Cursor` (guaranteed replay from the index). `watch_projection::<T>(entity, freshness)` returns a `ProjectionWatcher` that performs one full replay, then tails by watermark so missed lossy notifications still converge.
+- **Lifecycle**: `sync()`, `snapshot()`, `compact()`, `close(self) -> Result<Closed, StoreError>`. `Drop` is best-effort only and logs loudly if you skip explicit close.
 
 ### The Writer Thread
 

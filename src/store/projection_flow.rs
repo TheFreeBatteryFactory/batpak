@@ -15,7 +15,7 @@ where
         entity,
         freshness = match freshness {
             Freshness::Consistent => "consistent",
-            Freshness::BestEffort { .. } => "best_effort",
+            Freshness::MaybeStale { .. } => "maybe_stale",
         }
     );
     let entries = store.index.stream(entity);
@@ -71,7 +71,7 @@ where
         Ok(Some((bytes, meta))) => {
             let is_fresh = match freshness {
                 Freshness::Consistent => meta.watermark == watermark,
-                Freshness::BestEffort { max_stale_ms } => {
+                Freshness::MaybeStale { max_stale_ms } => {
                     let age_us = store
                         .config
                         .now_us()

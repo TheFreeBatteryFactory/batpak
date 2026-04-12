@@ -9,7 +9,7 @@
     - `columnar.rs` — SoA/AoSoA/SoAoS secondary query index
     - `interner.rs` — string interning for compact index keys
     - `projection_flow.rs` — projection replay + incremental apply + schema versioning
-    - `fault.rs` — fault injection framework for chaos testing (test-support feature)
+    - `fault.rs` — fault injection framework for chaos testing (dangerous-test-hooks feature)
     - `writer.rs` — background writer thread, single/batch append, two-phase commit
     - `contracts.rs` — `BatchAppendItem`, `CausationRef`, `AppendOptions`
 - `tests/`: integration, property, compile-fail, and perf-gate tests (30 files)

@@ -9,7 +9,7 @@ compile_error!(
 );
 
 use crate::coordinate::{Coordinate, DagPosition};
-use crate::event::{Event, EventHeader, EventKind, HashChain};
+use crate::event::{Event, EventHeader, EventKind, HashChain, StoredEvent};
 use crate::store::contracts::{BatchAppendItem, CausationRef};
 use crate::store::index::{DiskPos, IndexEntry, StoreIndex};
 use crate::store::segment::{self, Active, FramePayloadRef, Segment};
@@ -48,7 +48,7 @@ pub(crate) enum WriterCommand {
         respond: Sender<Result<(), StoreError>>,
     },
     /// Test-only: trigger a panic in the writer thread to exercise restart_policy.
-    #[cfg(feature = "test-support")]
+    #[cfg(feature = "dangerous-test-hooks")]
     #[doc(hidden)]
     PanicForTest {
         respond: Sender<Result<(), StoreError>>,
@@ -59,6 +59,7 @@ pub(crate) enum WriterCommand {
 pub(crate) struct WriterHandle {
     pub tx: Sender<WriterCommand>,
     pub subscribers: Arc<SubscriberList>,
+    pub reactor_subscribers: Arc<ReactorSubscriberList>,
     _thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -66,6 +67,18 @@ pub(crate) struct WriterHandle {
 /// [SPEC:src/store/writer.rs — try_send pattern]
 pub(crate) struct SubscriberList {
     senders: Mutex<Vec<Sender<Notification>>>,
+}
+
+/// Private richer event envelope used by internal reactor consumers so they do
+/// not need to re-read the just-committed event from disk.
+#[derive(Clone, Debug)]
+pub(crate) struct CommittedEventEnvelope {
+    pub notification: Notification,
+    pub stored: StoredEvent<serde_json::Value>,
+}
+
+pub(crate) struct ReactorSubscriberList {
+    senders: Mutex<Vec<Sender<CommittedEventEnvelope>>>,
 }
 
 /// Notification: lightweight event summary pushed to subscribers.
@@ -133,6 +146,29 @@ impl SubscriberList {
     }
 }
 
+impl ReactorSubscriberList {
+    pub(crate) fn new() -> Self {
+        Self {
+            senders: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn subscribe(&self, capacity: usize) -> Receiver<CommittedEventEnvelope> {
+        let (tx, rx) = flume::bounded(capacity);
+        self.senders.lock().push(tx);
+        rx
+    }
+
+    pub(crate) fn broadcast(&self, envelope: &CommittedEventEnvelope) {
+        let mut guard = self.senders.lock();
+        guard.retain(|tx| match tx.try_send(envelope.clone()) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => true,
+            Err(TrySendError::Disconnected(_)) => false,
+        });
+    }
+}
+
 impl WriterHandle {
     /// Spawn the background writer thread.
     /// [SPEC:src/store/writer.rs — "batpak-writer-{hash}" thread]
@@ -140,6 +176,7 @@ impl WriterHandle {
         config: &Arc<StoreConfig>,
         index: &Arc<StoreIndex>,
         subscribers: &Arc<SubscriberList>,
+        reactor_subscribers: &Arc<ReactorSubscriberList>,
         reader: &Arc<crate::store::reader::Reader>,
     ) -> Result<Self, StoreError> {
         // Fallible init — propagate errors to Store::open() caller
@@ -149,6 +186,7 @@ impl WriterHandle {
 
         let (tx, rx) = flume::bounded::<WriterCommand>(config.writer.channel_capacity);
         let subs = Arc::clone(subscribers);
+        let reactor_subs = Arc::clone(reactor_subscribers);
         let cfg = Arc::clone(config);
         let idx = Arc::clone(index);
         let rdr = Arc::clone(reader);
@@ -169,11 +207,14 @@ impl WriterHandle {
         let thread = builder
             .spawn(move || {
                 writer_thread_main(
-                    &rx,
-                    &cfg,
-                    &idx,
-                    &subs,
-                    &rdr,
+                    WriterRuntime {
+                        rx: &rx,
+                        config: &cfg,
+                        index: &idx,
+                        subscribers: &subs,
+                        reactor_subscribers: &reactor_subs,
+                        reader: &rdr,
+                    },
                     initial_segment,
                     initial_segment_id,
                 );
@@ -183,6 +224,7 @@ impl WriterHandle {
         Ok(Self {
             tx,
             subscribers: Arc::clone(subscribers),
+            reactor_subscribers: Arc::clone(reactor_subscribers),
             _thread: Some(thread),
         })
     }
@@ -195,6 +237,7 @@ impl WriterHandle {
         Self {
             tx,
             subscribers,
+            reactor_subscribers: Arc::new(ReactorSubscriberList::new()),
             _thread: None,
         }
     }
@@ -212,11 +255,22 @@ struct WriterState<'a> {
     segment_id: &'a mut u64,
     config: &'a StoreConfig,
     subscribers: &'a SubscriberList,
+    reactor_subscribers: &'a ReactorSubscriberList,
     /// Reader handle — updated on segment rotation so mmap dispatch is correct.
     reader: Arc<crate::store::reader::Reader>,
     /// Accumulates SIDX entries for the current active segment.
     /// Flushed as a footer on segment rotation and shutdown.
     sidx_collector: crate::store::sidx::SidxEntryCollector,
+}
+
+#[derive(Clone, Copy)]
+struct WriterRuntime<'a> {
+    rx: &'a Receiver<WriterCommand>,
+    config: &'a StoreConfig,
+    index: &'a StoreIndex,
+    subscribers: &'a SubscriberList,
+    reactor_subscribers: &'a ReactorSubscriberList,
+    reader: &'a Arc<crate::store::reader::Reader>,
 }
 
 /// Writer thread entry point with panic recovery and restart logic.
@@ -226,11 +280,7 @@ struct WriterState<'a> {
 /// previous one is dropped during unwind.
 /// [SPEC:src/store/writer.rs — RestartPolicy enforcement]
 fn writer_thread_main(
-    rx: &Receiver<WriterCommand>,
-    config: &StoreConfig,
-    index: &StoreIndex,
-    subscribers: &SubscriberList,
-    reader: &Arc<crate::store::reader::Reader>,
+    runtime: WriterRuntime<'_>,
     initial_segment: Segment<Active>,
     initial_segment_id: u64,
 ) {
@@ -240,9 +290,20 @@ fn writer_thread_main(
     let mut window_start = Instant::now();
 
     loop {
-        let rdr = Arc::clone(reader);
+        let rdr = Arc::clone(runtime.reader);
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            writer_loop(rx, config, index, subscribers, rdr, segment, seg_id);
+            writer_loop(
+                WriterRuntime {
+                    rx: runtime.rx,
+                    config: runtime.config,
+                    index: runtime.index,
+                    subscribers: runtime.subscribers,
+                    reactor_subscribers: runtime.reactor_subscribers,
+                    reader: &rdr,
+                },
+                segment,
+                seg_id,
+            );
         }));
 
         match result {
@@ -256,7 +317,7 @@ fn writer_thread_main(
                     "unknown panic".to_string()
                 };
 
-                let budget_ok = match &config.writer.restart_policy {
+                let budget_ok = match &runtime.config.writer.restart_policy {
                     RestartPolicy::Once => {
                         if restarts >= 1 {
                             false
@@ -287,22 +348,22 @@ fn writer_thread_main(
                     tracing::error!(
                         "writer restart budget exhausted — thread exiting. \
                          Last panic: {panic_msg}. Policy: {:?}",
-                        config.writer.restart_policy
+                        runtime.config.writer.restart_policy
                     );
                     return;
                 }
 
                 tracing::warn!(
                     "writer panic — restarting ({restarts}/{max}). Panic: {panic_msg}",
-                    max = match &config.writer.restart_policy {
+                    max = match &runtime.config.writer.restart_policy {
                         RestartPolicy::Once => 1,
                         RestartPolicy::Bounded { max_restarts, .. } => *max_restarts,
                     }
                 );
 
                 // Re-create segment: the previous one was dropped during unwind.
-                seg_id = find_latest_segment_id(&config.data_dir).unwrap_or(seg_id) + 1;
-                segment = match Segment::<Active>::create(&config.data_dir, seg_id) {
+                seg_id = find_latest_segment_id(&runtime.config.data_dir).unwrap_or(seg_id) + 1;
+                segment = match Segment::<Active>::create(&runtime.config.data_dir, seg_id) {
                     Ok(s) => s,
                     Err(e) => {
                         tracing::error!(
@@ -319,28 +380,25 @@ fn writer_thread_main(
 /// The writer's main loop. Runs on the background thread.
 /// The spawn closure owns the Arcs; this function borrows them.
 fn writer_loop(
-    rx: &Receiver<WriterCommand>,
-    config: &StoreConfig,
-    index: &StoreIndex,
-    subscribers: &SubscriberList,
-    reader: Arc<crate::store::reader::Reader>,
+    runtime: WriterRuntime<'_>,
     mut active_segment: Segment<Active>,
     mut segment_id: u64,
 ) {
     let mut events_since_sync: u32 = 0;
 
     let mut state = WriterState {
-        index,
+        index: runtime.index,
         active_segment: &mut active_segment,
         segment_id: &mut segment_id,
-        config,
-        subscribers,
-        reader,
+        config: runtime.config,
+        subscribers: runtime.subscribers,
+        reactor_subscribers: runtime.reactor_subscribers,
+        reader: Arc::clone(runtime.reader),
         sidx_collector: crate::store::sidx::SidxEntryCollector::new(),
     };
 
     // Main loop: recv commands, dispatch.
-    for cmd in rx.iter() {
+    for cmd in runtime.rx.iter() {
         match cmd {
             WriterCommand::Append {
                 coord,
@@ -358,16 +416,20 @@ fn writer_loop(
                 // group_commit_max_batch == 0 means unbounded drain (drain all pending).
                 // group_commit_max_batch == 1 means no draining (backward compat, per-event).
                 // group_commit_max_batch > 1 means drain up to (batch - 1) more.
-                let extra_budget = if config.batch.group_commit_max_batch == 0 {
+                let extra_budget = if runtime.config.batch.group_commit_max_batch == 0 {
                     u32::MAX
-                } else if config.batch.group_commit_max_batch == 1 {
+                } else if runtime.config.batch.group_commit_max_batch == 1 {
                     0u32
                 } else {
-                    config.batch.group_commit_max_batch.saturating_sub(1)
+                    runtime
+                        .config
+                        .batch
+                        .group_commit_max_batch
+                        .saturating_sub(1)
                 };
                 let mut drained = 0u32;
                 while drained < extra_budget {
-                    match rx.try_recv() {
+                    match runtime.rx.try_recv() {
                         Ok(WriterCommand::Append {
                             coord: c2,
                             event: ev2,
@@ -389,7 +451,9 @@ fn writer_loop(
                         }
                         Ok(WriterCommand::Sync { respond: r }) => {
                             // Sync mid-batch: honor immediately, stop draining.
-                            let sr = state.active_segment.sync_with_mode(&config.sync.mode);
+                            let sr = state
+                                .active_segment
+                                .sync_with_mode(&runtime.config.sync.mode);
                             let _ = r.send(sr);
                             events_since_sync = 0;
                             break;
@@ -398,7 +462,9 @@ fn writer_loop(
                             // Shutdown mid-batch: sync current batch, then exit.
                             // Propagate sync errors honestly — lifecycle honesty invariant.
                             let shutdown_result = if events_since_sync > 0 {
-                                let sr = state.active_segment.sync_with_mode(&config.sync.mode);
+                                let sr = state
+                                    .active_segment
+                                    .sync_with_mode(&runtime.config.sync.mode);
                                 if let Err(ref e) = sr {
                                     tracing::error!("group commit pre-shutdown sync: {e}");
                                 }
@@ -409,7 +475,7 @@ fn writer_loop(
                             let _ = r.send(shutdown_result);
                             return;
                         }
-                        #[cfg(feature = "test-support")]
+                        #[cfg(feature = "dangerous-test-hooks")]
                         Ok(WriterCommand::PanicForTest { respond: r }) => {
                             // Don't panic mid-drain — acknowledge and stop draining.
                             // The test should send PanicForTest as a standalone command
@@ -424,8 +490,11 @@ fn writer_loop(
                 }
 
                 // Single fsync for the entire batch.
-                if events_since_sync >= config.sync.every_n_events {
-                    if let Err(e) = state.active_segment.sync_with_mode(&config.sync.mode) {
+                if events_since_sync >= runtime.config.sync.every_n_events {
+                    if let Err(e) = state
+                        .active_segment
+                        .sync_with_mode(&runtime.config.sync.mode)
+                    {
                         tracing::error!("periodic sync failed: {e}");
                     }
                     events_since_sync = 0;
@@ -437,15 +506,20 @@ fn writer_loop(
                 events_since_sync += 1; // Batch counts as one sync event
 
                 // Sync after batch if needed.
-                if events_since_sync >= config.sync.every_n_events {
-                    if let Err(e) = state.active_segment.sync_with_mode(&config.sync.mode) {
+                if events_since_sync >= runtime.config.sync.every_n_events {
+                    if let Err(e) = state
+                        .active_segment
+                        .sync_with_mode(&runtime.config.sync.mode)
+                    {
                         tracing::error!("post-batch sync failed: {e}");
                     }
                     events_since_sync = 0;
                 }
             }
             WriterCommand::Sync { respond } => {
-                let result = state.active_segment.sync_with_mode(&config.sync.mode);
+                let result = state
+                    .active_segment
+                    .sync_with_mode(&runtime.config.sync.mode);
                 let _ = respond.send(result);
                 events_since_sync = 0;
             }
@@ -453,8 +527,8 @@ fn writer_loop(
                 // Drain up to shutdown_drain_limit queued commands.
                 // [SPEC:src/store/writer.rs — Shutdown drain semantics]
                 let mut drained = 0;
-                while drained < config.writer.shutdown_drain_limit {
-                    match rx.try_recv() {
+                while drained < runtime.config.writer.shutdown_drain_limit {
+                    match runtime.rx.try_recv() {
                         Ok(WriterCommand::Append {
                             coord,
                             event,
@@ -470,7 +544,11 @@ fn writer_loop(
                             let _ = r.send(Ok(()));
                         }
                         Ok(WriterCommand::Sync { respond: r }) => {
-                            let _ = r.send(state.active_segment.sync_with_mode(&config.sync.mode));
+                            let _ = r.send(
+                                state
+                                    .active_segment
+                                    .sync_with_mode(&runtime.config.sync.mode),
+                            );
                         }
                         Ok(WriterCommand::AppendBatch { items, respond: r }) => {
                             // Drain batches during shutdown.
@@ -479,7 +557,7 @@ fn writer_loop(
                             drained += 1;
                         }
                         // test-only: discard PanicForTest during shutdown drain
-                        #[cfg(feature = "test-support")]
+                        #[cfg(feature = "dangerous-test-hooks")]
                         Ok(WriterCommand::PanicForTest { respond: r }) => {
                             let _ = r.send(Ok(())); // discard during drain
                         }
@@ -493,7 +571,9 @@ fn writer_loop(
                 {
                     tracing::warn!("shutdown SIDX footer write failed (non-fatal): {e}");
                 }
-                let sync_result = state.active_segment.sync_with_mode(&config.sync.mode);
+                let sync_result = state
+                    .active_segment
+                    .sync_with_mode(&runtime.config.sync.mode);
                 if let Err(ref e) = sync_result {
                     tracing::error!("shutdown sync failed: {e}");
                 }
@@ -501,7 +581,7 @@ fn writer_loop(
                 return; // exit writer loop
             }
             // test-only: intentional panic to exercise restart_policy
-            #[cfg(feature = "test-support")]
+            #[cfg(feature = "dangerous-test-hooks")]
             // intentional: this panic IS the test - it exercises catch_unwind in writer_thread_main
             #[allow(clippy::panic)]
             // intentional: this panic IS the test — it exercises catch_unwind in writer_thread_main
@@ -1009,6 +1089,9 @@ impl WriterState<'_> {
             kind,
             sequence: global_seq,
         });
+        if let Ok(envelope) = self.single_event_envelope(coord.clone(), &event, global_seq) {
+            self.reactor_subscribers.broadcast(&envelope);
+        }
 
         Ok(AppendReceipt {
             event_id: event.header.event_id,
@@ -1041,7 +1124,7 @@ impl WriterState<'_> {
         let first_seq = self.index.reserve_sequences(items.len() as u64);
 
         // FAULT INJECTION: Batch start
-        #[cfg(feature = "test-support")]
+        #[cfg(feature = "dangerous-test-hooks")]
         crate::store::fault::maybe_inject(
             crate::store::fault::InjectionPoint::BatchStart {
                 batch_id,
@@ -1063,7 +1146,7 @@ impl WriterState<'_> {
         trace!(batch_id, offset = marker_offset, "batch marker written");
 
         // FAULT INJECTION: After BEGIN marker written
-        #[cfg(feature = "test-support")]
+        #[cfg(feature = "dangerous-test-hooks")]
         crate::store::fault::maybe_inject(
             crate::store::fault::InjectionPoint::BatchBeginWritten {
                 batch_id,
@@ -1080,7 +1163,7 @@ impl WriterState<'_> {
             self.write_batch_event_frames(items, &computed, batch_id)?;
 
         // FAULT INJECTION: All batch items complete
-        #[cfg(feature = "test-support")]
+        #[cfg(feature = "dangerous-test-hooks")]
         crate::store::fault::maybe_inject(
             crate::store::fault::InjectionPoint::BatchItemsComplete {
                 batch_id,
@@ -1099,7 +1182,7 @@ impl WriterState<'_> {
         trace!(batch_id, "batch commit marker written");
 
         // FAULT INJECTION: After COMMIT written, before fsync
-        #[cfg(feature = "test-support")]
+        #[cfg(feature = "dangerous-test-hooks")]
         crate::store::fault::maybe_inject(
             crate::store::fault::InjectionPoint::BatchCommitWritten { batch_id },
             &self.config.fault_injector,
@@ -1110,7 +1193,7 @@ impl WriterState<'_> {
         // commit marker. Recovery will discard incomplete batches.
 
         // FAULT INJECTION: During fsync
-        #[cfg(feature = "test-support")]
+        #[cfg(feature = "dangerous-test-hooks")]
         crate::store::fault::maybe_inject(
             crate::store::fault::InjectionPoint::BatchFsync { batch_id },
             &self.config.fault_injector,
@@ -1129,7 +1212,7 @@ impl WriterState<'_> {
             self.stage_batch_index_entries(items, &computed, &frame_offsets, &receipts)?;
 
         // FAULT INJECTION: Before atomic publish to index
-        #[cfg(feature = "test-support")]
+        #[cfg(feature = "dangerous-test-hooks")]
         crate::store::fault::maybe_inject(
             crate::store::fault::InjectionPoint::BatchPrePublish {
                 batch_id,
@@ -1254,7 +1337,7 @@ impl WriterState<'_> {
             });
 
             // FAULT INJECTION: After each batch item written
-            #[cfg(feature = "test-support")]
+            #[cfg(feature = "dangerous-test-hooks")]
             crate::store::fault::maybe_inject(
                 crate::store::fault::InjectionPoint::BatchItemWritten {
                     batch_id,
@@ -1264,7 +1347,7 @@ impl WriterState<'_> {
                 &self.config.fault_injector,
             )?;
         }
-        // Suppress unused warning when test-support is disabled.
+        // Suppress unused warning when dangerous-test-hooks is disabled.
         let _ = batch_id;
 
         Ok((frame_offsets, receipts))
@@ -1373,8 +1456,87 @@ impl WriterState<'_> {
                 kind: item.kind,
                 sequence: global_seq,
             });
+            if let Ok(envelope) = self.batch_event_envelope(item, c, global_seq) {
+                self.reactor_subscribers.broadcast(&envelope);
+            }
         }
         Ok(())
+    }
+
+    fn single_event_envelope(
+        &self,
+        coord: Coordinate,
+        event: &Event<Vec<u8>>,
+        sequence: u64,
+    ) -> Result<CommittedEventEnvelope, StoreError> {
+        let notification = Notification {
+            event_id: event.header.event_id,
+            correlation_id: event.header.correlation_id,
+            causation_id: event.header.causation_id,
+            coord: coord.clone(),
+            kind: event.header.event_kind,
+            sequence,
+        };
+        let payload = rmp_serde::from_slice::<serde_json::Value>(&event.payload)
+            .map_err(|e| StoreError::Serialization(Box::new(e)))?;
+        Ok(CommittedEventEnvelope {
+            notification,
+            stored: StoredEvent {
+                coordinate: coord,
+                event: Event {
+                    header: event.header.clone(),
+                    payload,
+                    hash_chain: event.hash_chain.clone(),
+                },
+            },
+        })
+    }
+
+    fn batch_event_envelope(
+        &self,
+        item: &BatchAppendItem,
+        computed: &BatchItemComputed,
+        sequence: u64,
+    ) -> Result<CommittedEventEnvelope, StoreError> {
+        let event_id = computed.event_id;
+        let correlation_id = item.options.correlation_id.unwrap_or(event_id);
+        let coord = item.coord.clone();
+        let header = EventHeader::new(
+            event_id,
+            correlation_id,
+            computed.causation_id,
+            computed.wall_us,
+            DagPosition::child_at(computed.clock, computed.wall_ms, 0),
+            u32::try_from(item.payload_bytes.len())
+                .map_err(|_| StoreError::ser_msg("batch payload exceeds u32"))?,
+            item.kind,
+        )
+        .with_flags(item.options.flags);
+        let mut event = Event::new(
+            header,
+            rmp_serde::from_slice::<serde_json::Value>(&item.payload_bytes)
+                .map_err(|e| StoreError::Serialization(Box::new(e)))?,
+        );
+        event.hash_chain = Some(HashChain {
+            prev_hash: computed.prev_hash,
+            event_hash: computed.event_hash,
+        });
+        event.header.content_hash = computed.event_hash;
+
+        Ok(CommittedEventEnvelope {
+            notification: Notification {
+                event_id,
+                correlation_id,
+                causation_id: computed.causation_id,
+                coord: coord.clone(),
+                kind: item.kind,
+                sequence,
+            },
+            stored: StoredEvent {
+                coordinate: coord,
+                event,
+            },
+        })
     }
 }
 

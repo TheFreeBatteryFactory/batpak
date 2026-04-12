@@ -9,7 +9,7 @@ mod contracts;
 pub mod cursor;
 mod error;
 /// Fault injection framework for testing failure scenarios.
-#[cfg(feature = "test-support")]
+#[cfg(feature = "dangerous-test-hooks")]
 pub mod fault;
 /// In-memory 2D event index, rebuilt from segments on startup.
 pub mod index;
@@ -32,7 +32,7 @@ pub(crate) mod sidx;
 pub mod stats;
 /// Push-based (lossy) event subscription via broadcast channel.
 pub mod subscription;
-#[cfg(feature = "test-support")]
+#[cfg(feature = "dangerous-test-hooks")]
 mod test_support;
 /// Background writer thread, restart policy, and subscriber fanout.
 pub mod writer;
@@ -47,7 +47,7 @@ pub use contracts::{
 pub use cursor::Cursor;
 pub use error::BatchStage;
 pub use error::StoreError;
-#[cfg(feature = "test-support")]
+#[cfg(feature = "dangerous-test-hooks")]
 pub use fault::{
     CountdownAction, CountdownInjector, FaultInjector, InjectionPoint, ProbabilisticInjector,
 };
@@ -68,7 +68,7 @@ use index::StoreIndex;
 use reader::Reader;
 use serde::Serialize;
 use std::sync::Arc;
-use writer::{AppendGuards, SubscriberList, WriterCommand, WriterHandle};
+use writer::{AppendGuards, ReactorSubscriberList, SubscriberList, WriterCommand, WriterHandle};
 // ProjectionCache re-exported above via pub use, no separate use needed.
 
 /// Store: the runtime. Sync API. Send + Sync.
@@ -80,16 +80,24 @@ use writer::{AppendGuards, SubscriberList, WriterCommand, WriterHandle};
 #[cfg(feature = "async-store")]
 compile_error!("INVARIANT 2: Store API is sync. Use spawn_blocking or flume recv_async.");
 
+/// Typestate marker for an open store.
+pub struct Open;
+
+/// Typestate marker for a cleanly closed store.
+pub struct Closed;
+
 /// The main event store handle. Sync API; all methods are blocking. Send + Sync.
-pub struct Store {
-    index: Arc<StoreIndex>,
-    reader: Arc<Reader>,
-    cache: Box<dyn ProjectionCache>,
-    writer: WriterHandle,
-    config: Arc<StoreConfig>,
+pub struct Store<State = Open> {
+    pub(crate) index: Arc<StoreIndex>,
+    pub(crate) reader: Arc<Reader>,
+    pub(crate) cache: Box<dyn ProjectionCache>,
+    pub(crate) writer: WriterHandle,
+    pub(crate) config: Arc<StoreConfig>,
+    pub(crate) should_shutdown_on_drop: bool,
+    pub(crate) _state: std::marker::PhantomData<State>,
 }
 
-impl Store {
+impl Store<Open> {
     /// Open a store at the given config's data directory. Creates the directory if absent.
     /// Uses `NoCache` for projection (no external cache backend).
     ///
@@ -141,7 +149,9 @@ impl Store {
         reader.set_active_segment(active_seg_id);
 
         let subscribers = Arc::new(SubscriberList::new());
-        let writer = WriterHandle::spawn(&config, &index, &subscribers, &reader)?;
+        let reactor_subscribers = Arc::new(ReactorSubscriberList::new());
+        let writer =
+            WriterHandle::spawn(&config, &index, &subscribers, &reactor_subscribers, &reader)?;
 
         Ok(Self {
             index,
@@ -149,6 +159,8 @@ impl Store {
             cache,
             writer,
             config,
+            should_shutdown_on_drop: true,
+            _state: std::marker::PhantomData,
         })
     }
 
@@ -306,7 +318,7 @@ impl Store {
     }
 
     /// SUBSCRIBE: push-based, lossy.
-    pub fn subscribe(&self, region: &Region) -> Subscription {
+    pub fn subscribe_lossy(&self, region: &Region) -> Subscription {
         let rx = self
             .writer
             .subscribers
@@ -315,7 +327,7 @@ impl Store {
     }
 
     /// CURSOR: pull-based, guaranteed delivery.
-    pub fn cursor(&self, region: &Region) -> Cursor {
+    pub fn cursor_guaranteed(&self, region: &Region) -> Cursor {
         Cursor::new(region.clone(), Arc::clone(&self.index))
     }
 
@@ -352,22 +364,21 @@ impl Store {
         R: crate::event::sourcing::Reactive<serde_json::Value> + Send + 'static,
     {
         let store = Arc::clone(self);
-        let sub = self.subscribe(region);
+        let region = region.clone();
+        let sub = self
+            .writer
+            .reactor_subscribers
+            .subscribe(self.config.broadcast_capacity);
         std::thread::Builder::new()
             .name("batpak-reactor".into())
             .spawn(move || {
-                while let Some(notif) = sub.recv() {
-                    let stored = match store.get(notif.event_id) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::warn!(
-                                "react_loop: failed to get event {}: {e}",
-                                notif.event_id
-                            );
-                            continue;
-                        }
-                    };
-                    for (coord, kind, payload) in reactor.react(&stored.event) {
+                while let Ok(envelope) = sub.recv() {
+                    let notif = envelope.notification;
+                    if !region.matches_event(notif.coord.entity(), notif.coord.scope(), notif.kind)
+                    {
+                        continue;
+                    }
+                    for (coord, kind, payload) in reactor.react(&envelope.stored.event) {
                         if let Err(e) = store.append_reaction(
                             &coord,
                             kind,
@@ -402,7 +413,7 @@ impl Store {
             + Send
             + 'static,
     {
-        let sub = self.subscribe(&Region::entity(entity));
+        let sub = self.subscribe_lossy(&Region::entity(entity));
         let store = Arc::clone(self);
         let entity_owned = entity.to_owned();
         ProjectionWatcher {
@@ -410,6 +421,8 @@ impl Store {
             store,
             entity: entity_owned,
             freshness,
+            cached_state: None,
+            watermark: None,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -475,6 +488,13 @@ impl Store {
         }
         let payload_bytes =
             rmp_serde::to_vec_named(payload).map_err(|e| StoreError::Serialization(Box::new(e)))?;
+        if payload_bytes.len() > self.config.single_append_max_bytes as usize {
+            return Err(StoreError::Configuration(format!(
+                "single append bytes {} exceeds max {}",
+                payload_bytes.len(),
+                self.config.single_append_max_bytes
+            )));
+        }
         let payload_len = checked_payload_len(&payload_bytes)?;
         let mut header = EventHeader::new(
             event_id,
@@ -564,7 +584,7 @@ impl Store {
     ///
     /// # Errors
     /// Returns `StoreError::WriterCrashed` if the writer thread has already exited unexpectedly.
-    pub fn close(self) -> Result<(), StoreError> {
+    pub fn close(self) -> Result<Closed, StoreError> {
         maintenance::close(self)
     }
 
@@ -582,8 +602,14 @@ impl Store {
 /// Safety net: if Store is dropped without calling close(), send a best-effort
 /// Shutdown to the writer thread and wait briefly for it to drain pending events.
 /// close(self) is still the preferred explicit path for guaranteed clean shutdown.
-impl Drop for Store {
+impl<State> Drop for Store<State> {
     fn drop(&mut self) {
+        if !self.should_shutdown_on_drop {
+            return;
+        }
+        tracing::warn!(
+            "Store dropped without explicit close(); only a bounded best-effort drain will run"
+        );
         let (tx, rx) = flume::bounded(1);
         if self
             .writer
@@ -606,9 +632,11 @@ impl Drop for Store {
 /// and returns the updated state. Returns `None` when the store is dropped.
 pub struct ProjectionWatcher<T> {
     sub: Subscription,
-    store: Arc<Store>,
+    store: Arc<Store<Open>>,
     entity: String,
     freshness: Freshness,
+    cached_state: Option<Vec<u8>>,
+    watermark: Option<u64>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -622,13 +650,52 @@ where
     ///
     /// # Errors
     /// Returns `StoreError` if the projection fails (e.g., segment read error).
-    pub fn recv(&self) -> Result<Option<T>, StoreError> {
+    pub fn recv(&mut self) -> Result<Option<T>, StoreError> {
         // Wait for any event on this entity's stream.
         if self.sub.recv().is_none() {
             return Ok(None); // store dropped
         }
-        // Re-project with the latest state.
-        self.store.project::<T>(&self.entity, &self.freshness)
+        if self.cached_state.is_none()
+            || !T::supports_incremental_apply()
+            || !self.store.config.index.incremental_projection
+        {
+            return self.refresh_from_full_projection();
+        }
+
+        let Some(watermark) = self.watermark else {
+            return self.refresh_from_full_projection();
+        };
+        let mut delta_entries = self.store.index.stream_since(&self.entity, watermark);
+        let relevant_kinds = T::relevant_event_kinds();
+        if !relevant_kinds.is_empty() {
+            delta_entries.retain(|entry| relevant_kinds.contains(&entry.kind));
+        }
+        if delta_entries.is_empty() {
+            return self.deserialize_cached_state().map(Some);
+        }
+
+        let Some(bytes) = self.cached_state.as_ref() else {
+            return self.refresh_from_full_projection();
+        };
+        let mut state = match serde_json::from_slice::<T>(bytes) {
+            Ok(value) => value,
+            Err(_) => return self.refresh_from_full_projection(),
+        };
+        let positions: Vec<&crate::store::DiskPos> =
+            delta_entries.iter().map(|entry| &entry.disk_pos).collect();
+        let stored_events = self.store.reader.read_entries_batch(&positions)?;
+        for stored in stored_events {
+            state.apply_event(&stored.event);
+        }
+        let new_watermark = delta_entries
+            .last()
+            .map(|entry| entry.global_sequence)
+            .unwrap_or(watermark);
+        let encoded =
+            serde_json::to_vec(&state).map_err(|e| StoreError::Serialization(Box::new(e)))?;
+        self.cached_state = Some(encoded);
+        self.watermark = Some(new_watermark);
+        Ok(Some(state))
     }
 
     /// Expose the underlying subscription's receiver for async integration.
@@ -636,5 +703,32 @@ where
     #[doc(hidden)]
     pub fn subscription(&self) -> &Subscription {
         &self.sub
+    }
+
+    fn refresh_from_full_projection(&mut self) -> Result<Option<T>, StoreError> {
+        let result = self.store.project::<T>(&self.entity, &self.freshness)?;
+        if let Some(ref value) = result {
+            self.cached_state = Some(
+                serde_json::to_vec(value).map_err(|e| StoreError::Serialization(Box::new(e)))?,
+            );
+            self.watermark = self
+                .store
+                .index
+                .stream(&self.entity)
+                .last()
+                .map(|entry| entry.global_sequence);
+        } else {
+            self.cached_state = None;
+            self.watermark = None;
+        }
+        Ok(result)
+    }
+
+    fn deserialize_cached_state(&self) -> Result<T, StoreError> {
+        let bytes = self
+            .cached_state
+            .as_ref()
+            .ok_or_else(|| StoreError::Configuration("projection watcher state missing".into()))?;
+        serde_json::from_slice(bytes).map_err(|e| StoreError::Serialization(Box::new(e)))
     }
 }

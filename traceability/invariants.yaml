@@ -36,10 +36,10 @@
   artifacts:
     - ART-GUARD-RECEIPT
     - ART-TYPESTATE-TESTS
-- id: INV-TEST-SUPPORT-NONDEFAULT
-  statement: Test-only writer panic control is not exposed in default production builds.
+- id: INV-DANGEROUS-TEST-HOOKS-NONDEFAULT
+  statement: Dangerous test hooks are not exposed in default production builds.
   artifacts:
-    - ART-STORE-TEST-SUPPORT
+    - ART-STORE-DANGEROUS-TEST-HOOKS
     - ART-STORE-ADVANCED
 - id: INV-CACHE-CAPABILITIES-EXPLICIT
   statement: Cache prefetch behavior must be discoverable through an explicit capability surface.
@@ -116,7 +116,7 @@
     - ART-STORE-READER
     - ART-BATCH-TESTS
 - id: INV-FAULT-INJECT-GATED
-  statement: Fault injection infrastructure (InjectionPoint, FaultInjector trait, maybe_inject hooks) is compiled only under the test-support feature gate and has zero cost in production builds.
+  statement: Fault injection infrastructure (InjectionPoint, FaultInjector trait, maybe_inject hooks) is compiled only under the dangerous-test-hooks feature gate and has zero cost in production builds.
   artifacts:
     - ART-STORE-FAULT
     - ART-STORE-CONFIG

@@ -68,8 +68,8 @@ pub enum StoreError {
         /// The underlying error.
         source: Box<StoreError>,
     },
-    /// A fault was injected by the test-support fault injection framework.
-    #[cfg(feature = "test-support")]
+    /// A fault was injected by the dangerous-test-hooks fault injection framework.
+    #[cfg(feature = "dangerous-test-hooks")]
     FaultInjected(String),
 }
 
@@ -110,7 +110,7 @@ impl std::fmt::Display for StoreError {
                 "batch failed at item {} during {:?}: {}",
                 item_index, stage, source
             ),
-            #[cfg(feature = "test-support")]
+            #[cfg(feature = "dangerous-test-hooks")]
             Self::FaultInjected(msg) => write!(f, "fault injected: {msg}"),
         }
     }
@@ -131,7 +131,7 @@ impl std::error::Error for StoreError {
             | Self::Configuration(_)
             | Self::IdempotencyRequired
             | Self::BatchFailed { .. } => None,
-            #[cfg(feature = "test-support")]
+            #[cfg(feature = "dangerous-test-hooks")]
             Self::FaultInjected(_) => None,
         }
     }

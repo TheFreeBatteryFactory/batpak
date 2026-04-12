@@ -341,8 +341,8 @@ Store { index: Arc<StoreIndex>, reader: Arc<Reader>, cache: Box<dyn ProjectionCa
   .query(region: &Region) -> Vec<IndexEntry>
   .walk_ancestors(event_id: u128, limit: usize) -> Vec<StoredEvent<Value>>
   .project<T: EventSourced<Value>>(entity: &str, freshness: Freshness) -> Result<Option<T>, StoreError>
-  .subscribe(region: &Region) -> Subscription
-  .cursor(region: &Region) -> Cursor
+  .subscribe_lossy(region: &Region) -> Subscription
+  .cursor_guaranteed(region: &Region) -> Cursor
   .stream(entity) .by_scope(scope) .by_fact(kind)  // convenience sugar
   .sync() .close(self) .stats() -> StoreStats
 
@@ -398,7 +398,7 @@ WriterCommand: Append{entity,scope,event,kind,correlation_id,causation_id,respon
   | Sync{respond} | Shutdown{respond}
 
 SubscriberList { senders: Mutex<Vec<Sender<Notification>>> }
-  .subscribe(capacity) -> Receiver<Notification>
+  .subscribe_lossy(capacity) -> Receiver<Notification>
   .broadcast(Notification)  // try_send, retain on Ok|Full, prune on Disconnected
 
 Notification: Clone + Debug
@@ -420,7 +420,7 @@ ProjectionCache: trait (Send + Sync + 'static)
   .sync() -> Result<(), StoreError>
 
 CacheMeta { pub watermark: u64, pub cached_at_us: i64 }
-Freshness: Consistent | BestEffort { max_stale_ms: u64 }
+Freshness: Consistent | MaybeStale { max_stale_ms: u64 }
 NoCache — default, always miss, forces replay from segments
 
 SegmentHeader { pub version: u16, pub flags: u16, pub created_ns: i64, pub segment_id: u64 }
@@ -3391,7 +3391,7 @@ pub struct CacheMeta {
 #[derive(Clone, Debug)]
 pub enum Freshness {
     Consistent,
-    BestEffort { max_stale_ms: u64 },
+    MaybeStale { max_stale_ms: u64 },
 }
 
 /// NoCache: default. Every read replays from segments. No state.
@@ -3715,7 +3715,7 @@ lives in `src/store/error.rs`, append/compaction contracts live in
 `src/store/ancestors.rs` plus cfg-specific helper files, lifecycle helpers live
 in `src/store/maintenance.rs`, projection orchestration lives in
 `src/store/projection_flow.rs`, and test-only hooks live behind the
-`test-support` feature in `src/store/test_support.rs`. Read the section below
+`dangerous-test-hooks` feature in `src/store/test_support.rs`. Read the section below
 as public API intent, not as the literal final file layout.
 
 IMPORTS:
@@ -4043,13 +4043,13 @@ impl Store {
     }
 
     /// SUBSCRIBE: push-based, lossy.
-    pub fn subscribe(&self, region: &Region) -> Subscription {
+    pub fn subscribe_lossy(&self, region: &Region) -> Subscription {
         let rx = self.writer.subscribers.subscribe(self.config.broadcast_capacity);
         Subscription::new(rx, region.clone())
     }
 
     /// CURSOR: pull-based, guaranteed delivery.
-    pub fn cursor(&self, region: &Region) -> Cursor {
+    pub fn cursor_guaranteed(&self, region: &Region) -> Cursor {
         Cursor::new(region.clone(), Arc::clone(&self.index))
     }
 
@@ -4072,7 +4072,7 @@ impl Store {
         rx.recv().map_err(|_| StoreError::WriterCrashed)?
     }
 
-    pub fn close(self) -> Result<(), StoreError> {
+    pub fn close(self) -> Result<Closed, StoreError> {
         let (tx, rx) = flume::bounded(1);
         self.writer.tx.send(WriterCommand::Shutdown { respond: tx })
             .map_err(|_| StoreError::WriterCrashed)?;

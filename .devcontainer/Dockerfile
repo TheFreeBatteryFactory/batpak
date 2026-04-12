@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN cargo install --locked cargo-deny@0.19.0 \
+    && cargo install --locked cargo-audit@0.22.1 \
     && cargo install --locked cargo-nextest@0.9.132 \
     && cargo install --locked cargo-llvm-cov@0.8.5 \
     && cargo install --locked cargo-mutants@27.0.0 \

@@ -11,6 +11,18 @@ documentation = "https://docs.rs/batpak"
 readme = "README.md"
 keywords = ["event-sourcing", "audit-trail", "causal-graph", "hash-chain", "policy-engine"]
 categories = ["database", "concurrency"]
+exclude = [
+    ".devcontainer/**",
+    ".github/**",
+    "AGENTS.md",
+    "benches/**",
+    "docs/**",
+    "guide/**",
+    "scripts/**",
+    "templates/**",
+    "tools/**",
+    "traceability/**",
+]
 
 [workspace]
 members = ["tools/integrity", "tools/xtask"]
@@ -24,7 +36,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 default = ["blake3"]
 blake3 = ["dep:blake3"]
-test-support = ["dep:rand"]
+dangerous-test-hooks = ["dep:fastrand"]
 
 [dependencies]
 uuid = { version = "1", features = ["v7"] }
@@ -38,7 +50,8 @@ dashmap = "5"
 parking_lot = "0.12"
 tracing = "0.1"
 memmap2 = "0.9"
-rand = { version = "0.9", optional = true }
+fastrand = { version = "2", optional = true }
+tempfile = "3"
 # NO TOKIO. Invariant 1.
 
 [dev-dependencies]
@@ -48,7 +61,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 trybuild = "1"
 tokio = { version = "1", features = ["rt", "macros"] }
-rand = "0.9"
+fastrand = "2"
 serial_test = "3.4.0"
 loom = "0.7"
 tracing-subscriber = { version = "0.3", features = ["fmt", "std"] }

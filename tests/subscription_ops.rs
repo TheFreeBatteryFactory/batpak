@@ -22,7 +22,7 @@ fn ops_recv_without_filters() {
     let kind = EventKind::custom(0xF, 1);
 
     let region = Region::entity("entity:");
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
     let mut ops = sub.ops();
 
     // Spawn producer thread — recv() is blocking so append must happen concurrently.
@@ -61,7 +61,7 @@ fn ops_filter_passes_matching() {
     let target_kind = EventKind::custom(0xF, 1);
 
     let region = Region::entity("entity:");
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
     let mut ops = sub
         .ops()
         .filter(move |n: &Notification| n.kind == target_kind);
@@ -100,7 +100,7 @@ fn ops_filter_rejects_non_matching() {
     let unwanted_kind = EventKind::custom(0xF, 2);
 
     let region = Region::entity("entity:");
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
     // Filter only passes wanted_kind. Take 1 so the test terminates.
     let mut ops = sub
         .ops()
@@ -145,7 +145,7 @@ fn ops_take_limits_count() {
     let kind = EventKind::custom(0xF, 1);
 
     let region = Region::entity("entity:");
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
     let mut ops = sub.ops().take(2);
 
     let store_w = Arc::clone(&store);
@@ -184,7 +184,7 @@ fn ops_filter_and_take_combined() {
     let other_kind = EventKind::custom(0xF, 2);
 
     let region = Region::entity("entity:");
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
     // Filter for wanted_kind only, take 2.
     let mut ops = sub
         .ops()
@@ -260,7 +260,7 @@ fn ops_map_transforms_notification() {
     let mapped_kind = EventKind::custom(0xF, 5);
 
     let region = Region::entity("entity:");
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
     // Map: change the kind field of every notification
     let mut ops = sub
         .ops()
@@ -311,7 +311,7 @@ fn ops_map_returning_none_skips_event() {
     let pass_kind = EventKind::custom(0xF, 2);
 
     let region = Region::entity("entity:");
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
     // Map: return None for skip_kind (acts as filter), Some for pass_kind
     let mut ops = sub
         .ops()
@@ -365,7 +365,7 @@ fn ops_multiple_filters_all_must_pass() {
     let kind_c = EventKind::custom(0xF, 3);
 
     let region = Region::entity("entity:");
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
     // Two independent filters: must be kind_a OR kind_b, AND must have sequence > 0
     // Only events passing BOTH filters are received.
     let mut ops = sub
@@ -409,7 +409,7 @@ fn ops_channel_closed_returns_none() {
     let store = Arc::new(store);
 
     let region = Region::entity("entity:");
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
     let mut ops = sub.ops();
 
     // Close the store — this shuts down the writer, which closes broadcast channels

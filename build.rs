@@ -15,6 +15,8 @@ fn main() {
     check_store_config_field_usage();
     check_allow_justifications();
     check_no_stubs_in_src();
+    check_store_surface_honesty();
+    check_no_fixed_temp_patterns();
     check_pub_items_have_tests();
 }
 
@@ -226,6 +228,58 @@ fn check_no_banned_patterns() {
                     }
                 }
             }
+        }
+    });
+}
+
+fn check_store_surface_honesty() {
+    let store_mod =
+        fs::read_to_string("src/store/mod.rs").expect("read src/store/mod.rs for surface check");
+    if store_mod.contains("pub fn subscribe(") {
+        panic!(
+            "PUBLIC API HONESTY VIOLATION: src/store/mod.rs still exports `pub fn subscribe(`.\n\
+             The lossy broadcast API must be named `subscribe_lossy` so callers cannot\n\
+             confuse it with guaranteed delivery."
+        );
+    }
+    if store_mod.contains("pub fn cursor(") {
+        panic!(
+            "PUBLIC API HONESTY VIOLATION: src/store/mod.rs still exports `pub fn cursor(`.\n\
+             The guaranteed replay API must be named `cursor_guaranteed`."
+        );
+    }
+    if store_mod.contains("Freshness::BestEffort") || store_mod.contains("BestEffort") {
+        panic!(
+            "PUBLIC API HONESTY VIOLATION: stale `Freshness::BestEffort` reference in src/store/mod.rs.\n\
+             Use `Freshness::MaybeStale {{ max_stale_ms }}`."
+        );
+    }
+
+    walk_rs_files(Path::new("src/store"), &|path, contents| {
+        let path_str = path.display().to_string();
+        if contents.contains("test-support") {
+            panic!(
+                "FEATURE HONESTY VIOLATION in {path_str}: stale `test-support` reference.\n\
+                 The explicit risk-bearing feature name is `dangerous-test-hooks`."
+            );
+        }
+    });
+}
+
+fn check_no_fixed_temp_patterns() {
+    walk_rs_files(Path::new("src/store"), &|path, contents| {
+        let path_str = path.display().to_string();
+        if contents.contains("index.ckpt.tmp") || contents.contains(".tmp_{pid}_{n}") {
+            panic!(
+                "TEMP FILE HARDENING VIOLATION in {path_str}: fixed temp-file pattern found.\n\
+                 Use same-directory `tempfile::NamedTempFile` instead of predictable names."
+            );
+        }
+        if contents.contains("create(true)") && contents.contains("truncate(true)") {
+            panic!(
+                "TEMP FILE HARDENING VIOLATION in {path_str}: `create(true)` + `truncate(true)` found.\n\
+                 This is the symlink-clobber shape the release hardening pass bans in src/store."
+            );
         }
     });
 }

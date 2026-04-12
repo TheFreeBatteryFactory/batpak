@@ -806,7 +806,7 @@ fn correctness_gates_self_validate() {
             .expect("append");
     }
     let region = Region::entity("cursor:test");
-    let mut cursor = store.cursor(&region);
+    let mut cursor = store.cursor_guaranteed(&region);
     let mut cursor_count = 0;
     while cursor.poll().is_some() {
         cursor_count += 1;

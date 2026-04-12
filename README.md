@@ -42,10 +42,11 @@ println!("stored {} at {}", receipt.event_id, receipt.sequence);
 - Optional Blake3 hash chains
 - Causal metadata and region queries
 - **Atomic batch append**: multi-event commit with two-phase markers, crash recovery, and intra-batch causation
-- Fault injection framework (`test-support` feature) for chaos testing batch and write paths
+- Fault injection framework (`dangerous-test-hooks` feature) for chaos testing batch and write paths
 - Gate / receipt workflow for policy enforcement
 - Event-sourced projections with optional native file-backed cache
-- Push subscriptions, pull cursors, typestate helpers
+- `subscribe_lossy` / `cursor_guaranteed` delivery names that say what they do
+- `close(self) -> Closed` for explicit durable shutdown; `Drop` is best-effort only
 - Query/read operations yield `StoredEvent<serde_json::Value>` at the storage boundary
 
 ## Docs
@@ -60,7 +61,7 @@ println!("stored {} at {}", receipt.event_id, receipt.sequence);
 ## Features
 
 - `blake3` (default): hash-chain verification
-- `test-support`: explicit test-only runtime hooks
+- `dangerous-test-hooks`: explicit test-only runtime hooks
 
 ## Canonical Commands
 

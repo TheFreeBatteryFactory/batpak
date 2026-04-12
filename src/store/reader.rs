@@ -383,11 +383,20 @@ impl Reader {
     /// Tries the SIDX footer first (O(1) seek + bulk read); falls back to
     /// frame-by-frame msgpack deserialization if no SIDX footer is present.
     /// Accepts optional `batch_state` for cross-segment batch recovery.
-    pub(crate) fn scan_segment_index(
+    /// Scan segment index metadata and push entries directly into `sink`.
+    ///
+    /// This lets cold-start rebuild stream scanned entries straight into the
+    /// replay cursor instead of allocating a per-segment `Vec` only to fold it
+    /// again immediately afterward.
+    pub(crate) fn scan_segment_index_into<F>(
         &self,
         path: &Path,
         mut batch_state: Option<&mut BatchRecoveryState>,
-    ) -> Result<Vec<ScannedIndexEntry>, StoreError> {
+        mut sink: F,
+    ) -> Result<(), StoreError>
+    where
+        F: FnMut(ScannedIndexEntry) -> Result<(), StoreError>,
+    {
         // Fast path: try SIDX footer for sealed segments only.
         // Sealed segments cannot have incomplete batches, so SIDX is safe.
         // Active segment might have incomplete batches, so use slow path.
@@ -400,7 +409,6 @@ impl Reader {
 
         if !is_active && batch_state.as_ref().is_none_or(|s| !s.in_batch) {
             if let Ok(Some((sidx_entries, strings))) = crate::store::sidx::read_footer(path) {
-                let mut result = Vec::with_capacity(sidx_entries.len());
                 for se in sidx_entries {
                     let kind = crate::store::sidx::raw_to_kind(se.kind);
                     // Skip batch markers in SIDX fast path.
@@ -417,7 +425,7 @@ impl Reader {
                         .get(se.scope_idx as usize)
                         .cloned()
                         .unwrap_or_default();
-                    result.push(ScannedIndexEntry {
+                    sink(ScannedIndexEntry {
                         header: crate::event::EventHeader::from_sidx(
                             se.event_id,
                             se.correlation_id,
@@ -442,9 +450,9 @@ impl Reader {
                         // SIDX footer carries the original sequence — preserve it
                         // so sparse `global_sequence` values survive cold-start rebuild.
                         global_sequence: Some(se.global_sequence),
-                    });
+                    })?;
                 }
-                return Ok(result);
+                return Ok(());
             }
         }
 
@@ -479,7 +487,7 @@ impl Reader {
             Some(id) => id,
             None => {
                 tracing::warn!(?path, "skipping segment with unparseable filename");
-                return Ok(Vec::new());
+                return Ok(());
             }
         };
 
@@ -496,8 +504,6 @@ impl Reader {
         }
 
         let mut cursor = (8 + header_len) as u64;
-        let mut entries = Vec::new();
-
         // Use cross-segment batch state if provided, otherwise create local state.
         // This enables batches that span segment boundaries to be recovered correctly.
         let mut local_state = BatchRecoveryState::default();
@@ -578,7 +584,7 @@ impl Reader {
                                     );
                                 } else {
                                     // Normal event: commit immediately.
-                                    entries.push(ScannedIndexEntry {
+                                    sink(ScannedIndexEntry {
                                         header: payload.event.header,
                                         entity: payload.entity,
                                         scope: payload.scope,
@@ -591,7 +597,7 @@ impl Reader {
                                         // Slow path: no SIDX footer, so no durable sequence source.
                                         // Caller (rebuild) will synthesize via the ReplayCursor allocator.
                                         global_sequence: None,
-                                    });
+                                    })?;
                                 }
                             } else if kind == EventKind::SYSTEM_BATCH_COMMIT {
                                 // COMMIT marker: verify count matches and commit.
@@ -603,7 +609,9 @@ impl Reader {
                                 if state_ref.remaining == 0 {
                                     // Complete batch: commit all staged.
                                     let completed_batch = std::mem::take(&mut state_ref.staged);
-                                    entries.extend(completed_batch);
+                                    for entry in completed_batch {
+                                        sink(entry)?;
+                                    }
                                     state_ref.in_batch = false;
                                     tracing::debug!(
                                         segment_id,
@@ -716,7 +724,7 @@ impl Reader {
             }
         }
 
-        Ok(entries)
+        Ok(())
     }
 
     /// Run `op` against the cached (or freshly opened) file descriptor for `segment_id`,

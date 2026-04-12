@@ -367,6 +367,20 @@ impl StoreIndex {
             .unwrap_or_default()
     }
 
+    pub(crate) fn stream_since(&self, entity: &str, watermark: u64) -> Vec<IndexEntry> {
+        let vis = self.sequence.visible();
+        self.streams
+            .get(entity)
+            .map(|r| {
+                r.value()
+                    .values()
+                    .filter(|arc| arc.global_sequence < vis && arc.global_sequence > watermark)
+                    .map(|arc| arc.as_ref().clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn query(&self, region: &crate::coordinate::Region) -> Vec<IndexEntry> {
         // Region query strategy:
         // 1. Determine candidate set based on most selective filter

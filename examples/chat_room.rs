@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // -- Set up a subscriber BEFORE any messages are sent --
     // Subscriptions are push-based: you only see events that happen AFTER subscribing.
     let general_region = Region::scope("chat:general");
-    let sub = store.subscribe(&general_region);
+    let sub = store.subscribe_lossy(&general_region);
 
     // -- Spawn a listener thread that collects messages via subscription --
     let store_clone = Arc::clone(&store);
@@ -127,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- Cursor: Pull-based replay ---");
     println!("  (Cursors see ALL events, even ones before the cursor was created)\n");
 
-    let mut cursor = store.cursor(&general_region);
+    let mut cursor = store.cursor_guaranteed(&general_region);
     let mut cursor_events = vec![];
     while let Some(entry) = cursor.poll() {
         cursor_events.push(entry);
@@ -207,7 +207,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Verify all batch messages are visible
-    let all_general = store.cursor(&general_region).poll_batch(100).len();
+    let all_general = store
+        .cursor_guaranteed(&general_region)
+        .poll_batch(100)
+        .len();
     println!("  Total messages in #general: {}", all_general);
 
     drop(store);

@@ -22,7 +22,7 @@
   summary: The store runtime must expose only production-valid APIs by default and make privileged paths explicit.
   artifacts:
     - ART-STORE-MOD
-    - ART-STORE-TEST-SUPPORT
+    - ART-STORE-DANGEROUS-TEST-HOOKS
     - ART-STORE-ADVANCED
 - id: REQ-CACHE-CAPABILITY
   summary: Cache behavior must express capabilities explicitly rather than hiding behind silent default no-ops.

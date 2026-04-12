@@ -3,10 +3,11 @@ use crate::event::{EventKind, StoredEvent};
 use crate::store::reader;
 use crate::store::segment::{self, Active, FramePayload};
 use crate::store::{
-    CompactionConfig, CompactionStrategy, Store, StoreDiagnostics, StoreError, StoreStats,
+    Closed, CompactionConfig, CompactionStrategy, Open, Store, StoreDiagnostics, StoreError,
+    StoreStats,
 };
 
-pub(crate) fn sync(store: &Store) -> Result<(), StoreError> {
+pub(crate) fn sync(store: &Store<Open>) -> Result<(), StoreError> {
     tracing::debug!(target: "batpak::flow", flow = "sync");
     let (tx, rx) = flume::bounded(1);
     store
@@ -17,13 +18,14 @@ pub(crate) fn sync(store: &Store) -> Result<(), StoreError> {
     rx.recv().map_err(|_| StoreError::WriterCrashed)?
 }
 
-pub(crate) fn snapshot(store: &Store, dest: &std::path::Path) -> Result<(), StoreError> {
+pub(crate) fn snapshot(store: &Store<Open>, dest: &std::path::Path) -> Result<(), StoreError> {
     tracing::debug!(
         target: "batpak::flow",
         flow = "snapshot",
         destination = %dest.display()
     );
     sync(store)?;
+    reject_symlink_leaf(dest)?;
     std::fs::create_dir_all(dest).map_err(StoreError::Io)?;
     let entries = std::fs::read_dir(&store.config.data_dir).map_err(StoreError::Io)?;
     for entry in entries.flatten() {
@@ -34,6 +36,7 @@ pub(crate) fn snapshot(store: &Store, dest: &std::path::Path) -> Result<(), Stor
             .unwrap_or(false)
         {
             let dest_path = dest.join(entry.file_name());
+            reject_symlink_leaf(&dest_path)?;
             std::fs::copy(&path, &dest_path).map_err(StoreError::Io)?;
         }
     }
@@ -41,7 +44,7 @@ pub(crate) fn snapshot(store: &Store, dest: &std::path::Path) -> Result<(), Stor
 }
 
 pub(crate) fn compact(
-    store: &Store,
+    store: &Store<Open>,
     config: &CompactionConfig,
 ) -> Result<segment::CompactionResult, StoreError> {
     tracing::debug!(target: "batpak::flow", flow = "compact");
@@ -199,7 +202,7 @@ pub(crate) fn compact(
     })
 }
 
-pub(crate) fn close(store: Store) -> Result<(), StoreError> {
+pub(crate) fn close(mut store: Store<Open>) -> Result<Closed, StoreError> {
     tracing::debug!(target: "batpak::flow", flow = "close");
     let (tx, rx) = flume::bounded(1);
     store
@@ -209,20 +212,22 @@ pub(crate) fn close(store: Store) -> Result<(), StoreError> {
         .map_err(|_| StoreError::WriterCrashed)?;
     let result = rx.recv().map_err(|_| StoreError::WriterCrashed)?;
 
+    result?;
+
     // Write index checkpoint after writer shutdown (all data fsynced).
+    // Explicit close() is the honest durable path, so checkpoint write
+    // failures must surface to the caller instead of being downgraded to
+    // a warning.
     if store.config.index.enable_checkpoint {
-        if let Err(e) = write_checkpoint_on_close(&store) {
-            tracing::warn!("failed to write checkpoint on close: {e}");
-            // Non-fatal: next open will fall back to full segment scan.
-        }
+        write_checkpoint_on_close(&store)?;
     }
 
-    drop(store);
-    result
+    store.should_shutdown_on_drop = false;
+    Ok(Closed)
 }
 
 /// Determine watermark from the latest segment file and write checkpoint.
-fn write_checkpoint_on_close(store: &Store) -> Result<(), StoreError> {
+fn write_checkpoint_on_close(store: &Store<Open>) -> Result<(), StoreError> {
     let (seg_id, offset) = find_latest_segment_watermark(&store.config.data_dir)?;
     crate::store::checkpoint::write_checkpoint(&store.index, &store.config.data_dir, seg_id, offset)
 }
@@ -259,14 +264,14 @@ fn find_latest_segment_watermark(data_dir: &std::path::Path) -> Result<(u64, u64
     }
 }
 
-pub(crate) fn stats(store: &Store) -> StoreStats {
+pub(crate) fn stats(store: &Store<Open>) -> StoreStats {
     StoreStats {
         event_count: store.index.len(),
         global_sequence: store.index.global_sequence(),
     }
 }
 
-pub(crate) fn diagnostics(store: &Store) -> StoreDiagnostics {
+pub(crate) fn diagnostics(store: &Store<Open>) -> StoreDiagnostics {
     // Extract tile stats from columnar index (0 for non-columnar layouts).
     let (index_layout, tile_count) = match &store.index.scan {
         crate::store::columnar::ScanIndex::Maps { .. } => ("AoS", 0),
@@ -282,5 +287,15 @@ pub(crate) fn diagnostics(store: &Store) -> StoreDiagnostics {
         restart_policy: store.config.writer.restart_policy.clone(),
         index_layout,
         tile_count,
+    }
+}
+
+fn reject_symlink_leaf(path: &std::path::Path) -> Result<(), StoreError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(StoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("refusing to operate on symlink path {}", path.display()),
+        ))),
+        Ok(_) | Err(_) => Ok(()),
     }
 }

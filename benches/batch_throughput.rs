@@ -211,7 +211,7 @@ fn bench_batch_causation(c: &mut Criterion) {
 }
 
 /// Benchmark: batch recovery after simulated crash
-#[cfg(feature = "test-support")]
+#[cfg(feature = "dangerous-test-hooks")]
 fn bench_batch_recovery(c: &mut Criterion) {
     use batpak::store::CountdownInjector;
 
@@ -278,9 +278,9 @@ fn bench_batch_recovery(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(not(feature = "test-support"))]
+#[cfg(not(feature = "dangerous-test-hooks"))]
 fn bench_batch_recovery(_c: &mut Criterion) {
-    // Recovery benchmark requires test-support for fault injection
+    // Recovery benchmark requires dangerous-test-hooks for fault injection
 }
 
 criterion_group!(

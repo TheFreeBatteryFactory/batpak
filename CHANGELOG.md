@@ -4,7 +4,39 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-_Nothing yet — next entries go here._
+### Changed
+- Public delivery semantics are now explicit in the API surface:
+  `Store::subscribe_lossy()` replaces `subscribe()`,
+  `Store::cursor_guaranteed()` replaces `cursor()`, and
+  `Freshness::MaybeStale { max_stale_ms }` replaces `Freshness::BestEffort`.
+- Store lifecycle now carries an open-state typestate marker
+  (`Store<Open>`) and `close(self)` returns a terminal `Closed` token.
+  `Drop` remains best-effort only and now logs loudly when callers skip
+  explicit close.
+- `dangerous-test-hooks` replaces the old `test-support` feature name
+  across code, CI, docs, and traceability so downstream enablement risk is
+  explicit instead of euphemistic.
+
+### Security
+- Checkpoint and native-cache persistence now use same-directory
+  `tempfile`-backed atomic writes, reject symlink leaf targets, and keep the
+  rename-after-fsync durability boundary intact.
+- Single-event appends are now bounded by `StoreConfig::single_append_max_bytes`
+  instead of being effectively limited only by `u32::MAX`.
+- Coordinate components now have fixed length limits at construction time,
+  bounding pathological entity/scope growth before it fans out into interner
+  pressure.
+- `react_loop` now consumes a private committed-event envelope from the writer
+  instead of re-reading the just-committed event from disk.
+- `watch_projection` now tails from an index watermark and catches up by
+  delta replay after lossy notifications instead of re-projecting from
+  genesis on every update.
+- Cold-start rebuild now streams scanned entries directly into replay
+  insertion instead of building a per-segment intermediate vector.
+- `cargo xtask deny` is now a hard gate again: `cargo deny check` and
+  `cargo audit --deny warnings` both have to pass with zero exceptions, and
+  `cargo xtask release --dry-run` inherits that gate. No advisory ignore
+  entries remain.
 
 ## [0.3.0] - 2026-04-11
 
@@ -118,7 +150,7 @@ _Nothing yet — next entries go here._
 - Cold-start batch recovery: global streaming scan with committedness enforcement
 - Batch size limits (`batch_max_size`) and byte limits (`batch_max_bytes`) in config
 - Marker invisibility: batch envelope frames never appear in queries/cursors/subscriptions
-- Fault injection framework (`test-support` feature): `InjectionPoint`, `FaultInjector` trait, `CountdownInjector`, `ProbabilisticInjector` for chaos testing write paths
+- Fault injection framework (`dangerous-test-hooks` feature): `InjectionPoint`, `FaultInjector` trait, `CountdownInjector`, `ProbabilisticInjector` for chaos testing write paths
 - `batch_append.rs` example demonstrating atomic multi-event commit with intra-batch causation
 
 ### Changed

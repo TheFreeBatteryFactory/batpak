@@ -2,7 +2,7 @@ use crate::store::RestartPolicy;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-#[cfg(feature = "test-support")]
+#[cfg(feature = "dangerous-test-hooks")]
 use crate::store::fault::FaultInjector;
 
 /// Sync strategy for segment fsync.
@@ -146,6 +146,8 @@ pub struct StoreConfig {
     pub fd_budget: usize,
     /// Capacity of each subscriber's broadcast channel.
     pub broadcast_capacity: usize,
+    /// Maximum serialized payload size for a single append operation.
+    pub single_append_max_bytes: u32,
     /// Batch append limits and group-commit behavior.
     pub batch: BatchConfig,
     /// Writer thread channel, stack, restart, and shutdown-drain configuration.
@@ -158,8 +160,8 @@ pub struct StoreConfig {
     /// None = std::time::SystemTime::now() (production default).
     pub clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
     /// Fault injector for testing failure scenarios.
-    /// Only available with the `test-support` feature.
-    #[cfg(feature = "test-support")]
+    /// Only available with the `dangerous-test-hooks` feature.
+    #[cfg(feature = "dangerous-test-hooks")]
     pub fault_injector: Option<Arc<dyn FaultInjector>>,
 }
 
@@ -173,12 +175,13 @@ impl StoreConfig {
             segment_max_bytes: 256 * 1024 * 1024,
             fd_budget: 64,
             broadcast_capacity: 8192,
+            single_append_max_bytes: 16 * 1024 * 1024,
             batch: BatchConfig::default(),
             writer: WriterConfig::default(),
             sync: SyncConfig::default(),
             index: IndexConfig::default(),
             clock: None,
-            #[cfg(feature = "test-support")]
+            #[cfg(feature = "dangerous-test-hooks")]
             fault_injector: None,
         }
     }
@@ -207,6 +210,11 @@ impl StoreConfig {
         if self.broadcast_capacity == 0 {
             return Err(crate::store::StoreError::Configuration(
                 "broadcast_capacity must be > 0 (0 creates rendezvous channels that starve subscribers)".into(),
+            ));
+        }
+        if self.single_append_max_bytes == 0 || self.single_append_max_bytes > 64 * 1024 * 1024 {
+            return Err(crate::store::StoreError::Configuration(
+                "single_append_max_bytes must be 1..=64MB".into(),
             ));
         }
         if self.batch.max_size == 0 || self.batch.max_size > 4096 {
@@ -249,6 +257,12 @@ impl StoreConfig {
     /// Set the per-subscriber broadcast channel capacity.
     pub fn with_broadcast_capacity(mut self, broadcast_capacity: usize) -> Self {
         self.broadcast_capacity = broadcast_capacity;
+        self
+    }
+
+    /// Set the maximum serialized payload size for a single append.
+    pub fn with_single_append_max_bytes(mut self, single_append_max_bytes: u32) -> Self {
+        self.single_append_max_bytes = single_append_max_bytes;
         self
     }
 
@@ -336,12 +350,13 @@ impl Clone for StoreConfig {
             segment_max_bytes: self.segment_max_bytes,
             fd_budget: self.fd_budget,
             broadcast_capacity: self.broadcast_capacity,
+            single_append_max_bytes: self.single_append_max_bytes,
             batch: self.batch.clone(),
             writer: self.writer.clone(),
             sync: self.sync.clone(),
             index: self.index.clone(),
             clock: self.clock.clone(),
-            #[cfg(feature = "test-support")]
+            #[cfg(feature = "dangerous-test-hooks")]
             fault_injector: self.fault_injector.clone(),
         }
     }
@@ -354,6 +369,7 @@ impl std::fmt::Debug for StoreConfig {
             .field("segment_max_bytes", &self.segment_max_bytes)
             .field("fd_budget", &self.fd_budget)
             .field("broadcast_capacity", &self.broadcast_capacity)
+            .field("single_append_max_bytes", &self.single_append_max_bytes)
             .field("batch", &self.batch)
             .field("writer", &self.writer)
             .field("sync", &self.sync)

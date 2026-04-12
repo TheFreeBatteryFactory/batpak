@@ -32,7 +32,7 @@ fn bench_append_with_subscribers(c: &mut Criterion) {
                         let store = Store::open(config).expect("open store");
                         let region = Region::entity("fanout:entity");
                         for _ in 0..subscribers {
-                            let _ = store.subscribe(&region);
+                            let _ = store.subscribe_lossy(&region);
                         }
                         let coord =
                             Coordinate::new("fanout:entity", "fanout:scope").expect("valid");
@@ -82,7 +82,7 @@ fn bench_drain_notifications(c: &mut Criterion) {
                         let region = Region::entity("fanout:entity");
                         let mut receivers = Vec::new();
                         for _ in 0..subscribers {
-                            receivers.push(store.subscribe(&region));
+                            receivers.push(store.subscribe_lossy(&region));
                         }
                         for i in 0..event_count {
                             store

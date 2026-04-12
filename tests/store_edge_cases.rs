@@ -135,7 +135,7 @@ fn subscription_recv_returns_none_on_store_drop() {
     let dir = TempDir::new().expect("tmpdir");
     let store = test_store(&dir);
     let region = Region::entity("entity:test");
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
 
     // Spawn a thread that will block on recv
     let handle = std::thread::Builder::new()
@@ -166,7 +166,7 @@ fn subscription_filters_by_region_in_recv_loop() {
 
     // Subscribe only to entity:a
     let region = Region::entity("entity:a");
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
 
     // Append to entity:b first (should be filtered), then entity:a
     store.append(&coord_b, kind, &"ignored").expect("append b");
@@ -223,6 +223,104 @@ fn segment_max_bytes_very_small_forces_frequent_rotation() {
         events.len(),
         5,
         "all events should survive frequent rotation"
+    );
+}
+
+#[test]
+fn single_append_payload_over_limit_is_rejected_cleanly() {
+    let dir = TempDir::new().expect("tmpdir");
+    let config = StoreConfig::new(dir.path()).with_single_append_max_bytes(8);
+    let store = Store::open(config).expect("open");
+    let coord = test_coord();
+    let kind = EventKind::custom(1, 1);
+    let payload = "this payload is larger than eight bytes";
+
+    let err = match store.append(&coord, kind, &payload) {
+        Ok(_) => panic!("PROPERTY: oversized payload should not append successfully"),
+        Err(err) => err,
+    };
+
+    assert!(
+        matches!(err, StoreError::Configuration(ref msg) if msg.contains("single append bytes")),
+        "expected Configuration payload-limit error, got {err:?}"
+    );
+}
+
+#[test]
+fn coordinate_component_length_limit_is_enforced() {
+    let long = "x".repeat(batpak::coordinate::MAX_COORDINATE_COMPONENT_LEN + 1);
+
+    let entity_err = match Coordinate::new(&long, "scope:test") {
+        Ok(_) => panic!("PROPERTY: overlong entity should be rejected"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(entity_err, CoordinateError::EntityTooLong { .. }),
+        "expected EntityTooLong, got {entity_err:?}"
+    );
+
+    let scope_err = match Coordinate::new("entity:test", &long) {
+        Ok(_) => panic!("PROPERTY: overlong scope should be rejected"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(scope_err, CoordinateError::ScopeTooLong { .. }),
+        "expected ScopeTooLong, got {scope_err:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn close_rejects_checkpoint_symlink_leaf() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().expect("tmpdir");
+    let config = StoreConfig::new(dir.path()).with_enable_checkpoint(true);
+    let store = Store::open(config).expect("open");
+    let coord = test_coord();
+    let kind = EventKind::custom(1, 1);
+    store.append(&coord, kind, &"event").expect("append");
+
+    let target = dir.path().join("attacker-target.ckpt");
+    std::fs::write(&target, b"sentinel").expect("write target");
+    let checkpoint_path = dir.path().join("index.ckpt");
+    symlink(&target, &checkpoint_path).expect("create checkpoint symlink");
+
+    let err = match store.close() {
+        Ok(_) => panic!("PROPERTY: close should reject checkpoint symlink leaf"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, StoreError::Io(ref io) if io.kind() == std::io::ErrorKind::InvalidInput),
+        "expected Io(InvalidInput), got {err:?}"
+    );
+
+    assert_eq!(
+        std::fs::read(&target).expect("read target"),
+        b"sentinel",
+        "checkpoint hardening must not clobber the symlink target"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn open_with_native_cache_rejects_symlink_leaf() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().expect("tmpdir");
+    let cache_real = dir.path().join("cache-real");
+    std::fs::create_dir_all(&cache_real).expect("create real cache dir");
+    let cache_link = dir.path().join("cache-link");
+    symlink(&cache_real, &cache_link).expect("create cache symlink");
+
+    let err = match Store::open_with_native_cache(StoreConfig::new(dir.path()), &cache_link) {
+        Ok(_) => panic!("PROPERTY: native cache root symlink should be rejected"),
+        Err(err) => err,
+    };
+
+    assert!(
+        matches!(err, StoreError::CacheFailed(_)),
+        "expected CacheFailed, got {err:?}"
     );
 }
 

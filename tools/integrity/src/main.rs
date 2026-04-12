@@ -90,6 +90,7 @@ fn doctor(strict: bool) -> Result<()> {
     check_command("cargo", &["fmt", "--version"])?;
     check_command("cargo", &["clippy", "--version"])?;
     check_command("cargo", &["deny", "--version"])?;
+    check_command("cargo", &["audit", "--version"])?;
     check_command("cargo", &["nextest", "--version"])?;
     check_command("cargo", &["llvm-cov", "--version"])?;
     check_command("cargo", &["mutants", "--version"])?;
@@ -322,6 +323,7 @@ fn structural_check() -> Result<()> {
     let tracked_files = tracked_repo_files(&repo_root)?;
     check_for_absolute_paths(&repo_root, &tracked_files)?;
     check_for_stale_references(&repo_root, &tracked_files)?;
+    check_release_hardening_patterns(&repo_root, &tracked_files)?;
     check_allow_justifications(&repo_root)?;
     check_pub_items_have_references(&repo_root)?;
     check_ci_parity(&repo_root)?;
@@ -473,6 +475,7 @@ fn check_ci_parity(repo_root: &Path) -> Result<()> {
     let pinned_tools = [
         "cargo-nextest",
         "cargo-deny",
+        "cargo-audit",
         "cargo-llvm-cov",
         "cargo-mutants",
         "mdbook",
@@ -712,6 +715,11 @@ fn check_for_stale_references(repo_root: &Path, tracked_files: &[PathBuf]) -> Re
         "with_cache_map_size_bytes",
         "open_with_redb_cache",
         "open_with_lmdb_cache",
+        // Pre-hardening public names and semantics.
+        "Freshness::BestEffort",
+        "subscribe(region)",
+        "cursor(region)",
+        "`test-support`",
     ];
     let allow = [
         // Audit report legitimately documents historical state
@@ -726,6 +734,8 @@ fn check_for_stale_references(repo_root: &Path, tracked_files: &[PathBuf]) -> Re
         repo_root.join("docs/adr/ADR-0003-cache-safety-assumptions.md"),
         // AGENTS.md may legitimately mention removed concepts in historical context
         repo_root.join("AGENTS.md"),
+        // Detector sources are allowed to mention banned terms as the thing they ban.
+        repo_root.join("build.rs"),
     ];
     for path in tracked_files {
         if allow.iter().any(|allowed| allowed == path) {
@@ -749,6 +759,69 @@ fn check_for_stale_references(repo_root: &Path, tracked_files: &[PathBuf]) -> Re
                 ),
             )?;
         }
+    }
+    Ok(())
+}
+
+fn check_release_hardening_patterns(repo_root: &Path, tracked_files: &[PathBuf]) -> Result<()> {
+    let historical_allow = [
+        repo_root.join("docs/audits/HICP_AUDIT_REPORT.md"),
+        repo_root.join("CHANGELOG.md"),
+        repo_root.join("tools/integrity/src/main.rs"),
+        repo_root.join("build.rs"),
+    ];
+    for path in tracked_files {
+        let rel = relative(repo_root, path);
+        let ext = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or_default();
+        let is_text = matches!(ext, "md" | "rs" | "toml" | "yml" | "yaml" | "json" | "sh");
+        if !is_text {
+            continue;
+        }
+        let content =
+            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+
+        if rel == "src/store/mod.rs" {
+            ensure(
+                !content.contains("pub fn subscribe("),
+                "structural-check: src/store/mod.rs still exports ambiguous `subscribe`",
+            )?;
+            ensure(
+                !content.contains("pub fn cursor("),
+                "structural-check: src/store/mod.rs still exports ambiguous `cursor`",
+            )?;
+        }
+
+        if rel.starts_with("src/store/") {
+            ensure(
+                !content.contains("index.ckpt.tmp"),
+                format!(
+                    "structural-check: fixed checkpoint temp-file pattern found in {}",
+                    rel
+                ),
+            )?;
+            ensure(
+                !content.contains(".tmp_{pid}_{n}"),
+                format!(
+                    "structural-check: fixed native-cache temp-file pattern found in {}",
+                    rel
+                ),
+            )?;
+        }
+
+        if historical_allow.iter().any(|allowed| allowed == path) {
+            continue;
+        }
+
+        ensure(
+            !content.contains("test-support"),
+            format!(
+                "structural-check: stale `test-support` reference found in {}",
+                rel
+            ),
+        )?;
     }
     Ok(())
 }

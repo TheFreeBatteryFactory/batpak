@@ -210,6 +210,10 @@ fn setup(args: SetupArgs) -> Result<()> {
             &["install", "--locked", "cargo-deny@0.19.0"][..],
         ),
         (
+            "cargo-audit",
+            &["install", "--locked", "cargo-audit@0.22.1"][..],
+        ),
+        (
             "cargo-llvm-cov",
             &["install", "--locked", "cargo-llvm-cov@0.8.5"][..],
         ),
@@ -258,30 +262,9 @@ fn integrity<const N: usize>(subcommand: &str, extra: [&str; N]) -> Result<()> {
     cargo(args)
 }
 
-/// Run `cargo deny check` split into hard gates + warn-only advisories.
-///
-/// Bans, licenses, and sources are run as hard gates — they protect
-/// against banned dependencies, license violations, and unauthorized
-/// registries.
-///
-/// Advisories are run separately and treated as warn-only because the
-/// upstream RustSec/advisory-db currently ships a malformed
-/// `crates/abi_stable/RUSTSEC-2020-0105.md` that crashes cargo-deny's
-/// parser ("failed to find toml block") before any filter can be applied.
-/// cargo-deny stderr is still printed, so legitimate advisories remain
-/// visible — they just do not fail the command until upstream is fixed.
-///
-/// TODO: collapse back to a single `cargo deny check` once cargo-deny
-/// or RustSec/advisory-db fixes the parse failure.
 fn deny_split() -> Result<()> {
-    cargo(["deny", "check", "bans", "licenses", "sources"])?;
-    if cargo(["deny", "check", "advisories"]).is_err() {
-        eprintln!(
-            "warning: cargo-deny advisories check failed (upstream advisory-db parse issue) — \
-             continuing without enforcement. See `deny_split` in tools/xtask/src/main.rs."
-        );
-    }
-    Ok(())
+    cargo(["deny", "check"])?;
+    cargo(["audit", "--deny", "warnings"])
 }
 
 fn bench(args: BenchArgs) -> Result<()> {
@@ -623,7 +606,9 @@ fn release(args: ReleaseArgs) -> Result<()> {
     ci()?;
     docs(DocsArgs { open: false })?;
     if args.dry_run {
-        cargo(["publish", "--dry-run"])
+        // Release verification runs before the commit is cut, so package the
+        // current tree intentionally instead of requiring a clean git state.
+        cargo(["publish", "--dry-run", "--allow-dirty"])
     } else {
         bail!("release without --dry-run is intentionally disabled in xtask")
     }

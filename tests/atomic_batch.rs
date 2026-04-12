@@ -117,7 +117,7 @@ fn batch_empty_is_noop_and_store_remains_usable() {
          and produce a non-zero event_id (the writer must not be in a \
          broken state). Got event_id = 0."
     );
-    let visible_count = store.cursor(&Region::all()).poll_batch(10).len();
+    let visible_count = store.cursor_guaranteed(&Region::all()).poll_batch(10).len();
     assert_eq!(
         visible_count, 1,
         "PROPERTY: after empty batch + one append, exactly 1 event must \
@@ -179,7 +179,10 @@ fn batch_oversized_item_no_partial_visibility() {
     );
 
     // Critical: NONE of the 4 items should be visible.
-    let visible_count = store.cursor(&Region::all()).poll_batch(100).len();
+    let visible_count = store
+        .cursor_guaranteed(&Region::all())
+        .poll_batch(100)
+        .len();
     assert_eq!(
         visible_count, 0,
         "PROPERTY: BATCH ATOMICITY VIOLATION — a batch that failed during \
@@ -237,7 +240,7 @@ fn batch_atomicity_full_visibility_on_success() {
     assert_eq!(receipts.len(), 5);
 
     // All events should be queryable.
-    let mut cursor = store.cursor(&Region::all());
+    let mut cursor = store.cursor_guaranteed(&Region::all());
     let mut found = HashSet::new();
     for entry in cursor.poll_batch(10) {
         found.insert(entry.event_id);
@@ -274,7 +277,7 @@ fn batch_marker_invisible() {
         .expect("append batch with invisible marker envelope");
 
     // Query should only return the data event, not the marker.
-    let mut cursor = store.cursor(&Region::all());
+    let mut cursor = store.cursor_guaranteed(&Region::all());
     let entries = cursor.poll_batch(10);
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].kind, EventKind::DATA);
@@ -315,7 +318,7 @@ fn batch_intra_batch_causation() {
     assert_eq!(receipts.len(), 2);
 
     // Second event's causation_id should equal first event's event_id.
-    let mut cursor = store.cursor(&Region::all());
+    let mut cursor = store.cursor_guaranteed(&Region::all());
     let entries = cursor.poll_batch(10);
     assert_eq!(entries.len(), 2);
 
@@ -365,7 +368,7 @@ fn batch_size_limits() {
 
 /// Test: restart recovery discards incomplete batch (crash after BEGIN, before COMMIT).
 /// Uses fault injection framework to simulate crash at exact point.
-#[cfg(feature = "test-support")]
+#[cfg(feature = "dangerous-test-hooks")]
 #[test]
 fn batch_restart_recovery_discards_incomplete_after_begin() {
     use batpak::store::CountdownInjector;
@@ -422,7 +425,7 @@ fn batch_restart_recovery_discards_incomplete_after_begin() {
     // Reopen store normally (no fault injector) and verify incomplete batch was discarded.
     let config = StoreConfig::new(tmp.path());
     let store = Store::open(config).expect("reopen store after begin-fault recovery");
-    let mut cursor = store.cursor(&Region::all());
+    let mut cursor = store.cursor_guaranteed(&Region::all());
     let entries = cursor.poll_batch(10);
 
     // Only the first event (seq: 1) should be present. The incomplete batch (seq: 2, 3)
@@ -437,7 +440,7 @@ fn batch_restart_recovery_discards_incomplete_after_begin() {
 
 /// Test: restart recovery discards incomplete batch (crash mid-batch items).
 /// Uses fault injection to crash after writing first item.
-#[cfg(feature = "test-support")]
+#[cfg(feature = "dangerous-test-hooks")]
 #[test]
 fn batch_restart_recovery_discards_incomplete_mid_items() {
     use batpak::store::CountdownInjector;
@@ -494,7 +497,7 @@ fn batch_restart_recovery_discards_incomplete_mid_items() {
     // Reopen store normally and verify no partial batch visible.
     let config = StoreConfig::new(tmp.path());
     let store = Store::open(config).expect("reopen store after mid-items fault recovery");
-    let mut cursor = store.cursor(&Region::all());
+    let mut cursor = store.cursor_guaranteed(&Region::all());
     let entries = cursor.poll_batch(10);
 
     // No events should be present - the partial batch was discarded.
@@ -523,7 +526,7 @@ fn batch_both_markers_invisible() {
         .expect("append batch for both-markers invisible test");
 
     // Query should only return the data event, neither marker.
-    let mut cursor = store.cursor(&Region::all());
+    let mut cursor = store.cursor_guaranteed(&Region::all());
     let entries = cursor.poll_batch(10);
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].kind, EventKind::DATA);
@@ -539,7 +542,7 @@ fn batch_both_markers_invisible() {
 
 /// Test: crash after COMMIT marker but before fsync (fsync ambiguity).
 /// COMMIT is on disk but not durable - should be discarded on recovery.
-#[cfg(feature = "test-support")]
+#[cfg(feature = "dangerous-test-hooks")]
 #[test]
 fn batch_fsync_ambiguity_discards_uncommitted() {
     use batpak::store::{CountdownAction, CountdownInjector, InjectionPoint, SyncMode};
@@ -610,7 +613,7 @@ fn batch_fsync_ambiguity_discards_uncommitted() {
     // Recovery: un-fsynced COMMIT should be discarded (fsync ambiguity rule).
     let config = StoreConfig::new(tmp.path());
     let store = Store::open(config).expect("reopen store after fsync ambiguity fault");
-    let mut cursor = store.cursor(&Region::all());
+    let mut cursor = store.cursor_guaranteed(&Region::all());
     let entries = cursor.poll_batch(10);
 
     // Only pre-established event should be present.
@@ -631,7 +634,7 @@ fn batch_fsync_ambiguity_discards_uncommitted() {
 
 /// Test: post-recovery system operations continue correctly.
 /// Verifies that after recovery, the store is fully functional.
-#[cfg(feature = "test-support")]
+#[cfg(feature = "dangerous-test-hooks")]
 #[test]
 fn batch_recovery_system_remains_coherent() {
     use batpak::store::CountdownInjector;
@@ -681,7 +684,7 @@ fn batch_recovery_system_remains_coherent() {
     let store = Store::open(config).expect("reopen store for recovery coherence verification");
 
     // Verify committed data intact.
-    let mut cursor_a = store.cursor(&Region::entity(coord_a.entity()));
+    let mut cursor_a = store.cursor_guaranteed(&Region::entity(coord_a.entity()));
     let entries_a = cursor_a.poll_batch(10);
     assert_eq!(
         entries_a.len(),
@@ -690,7 +693,7 @@ fn batch_recovery_system_remains_coherent() {
     );
     assert_eq!(entries_a[0].global_sequence, receipt_a1.sequence);
 
-    let mut cursor_b = store.cursor(&Region::entity(coord_b.entity()));
+    let mut cursor_b = store.cursor_guaranteed(&Region::entity(coord_b.entity()));
     let entries_b = cursor_b.poll_batch(10);
     assert!(
         entries_b.is_empty(),
@@ -733,7 +736,7 @@ fn batch_recovery_system_remains_coherent() {
     assert_eq!(batch_receipts.len(), 2);
 
     // Verify cross-entity causation works post-recovery.
-    let mut cursor_all = store.cursor(&Region::all());
+    let mut cursor_all = store.cursor_guaranteed(&Region::all());
     let all_entries = cursor_all.poll_batch(10);
     assert_eq!(all_entries.len(), 4, "should have all committed events");
 
@@ -741,7 +744,7 @@ fn batch_recovery_system_remains_coherent() {
     for entry in &all_entries {
         if entry.clock > 0 {
             // Verify entity clock progression.
-            let mut entity_cursor = store.cursor(&Region::entity(entry.coord.entity()));
+            let mut entity_cursor = store.cursor_guaranteed(&Region::entity(entry.coord.entity()));
             let entity_entries = entity_cursor.poll_batch(10);
             for (i, e) in entity_entries.iter().enumerate() {
                 assert_eq!(e.clock as usize, i, "entity clock should be contiguous");
@@ -762,7 +765,7 @@ fn batch_recovery_system_remains_coherent() {
 /// We can therefore drain the receiver immediately after each operation
 /// without any timing assumption — no spawned threads, no polling, no
 /// `Instant::now()` deadlines, no `thread::sleep`.
-#[cfg(feature = "test-support")]
+#[cfg(feature = "dangerous-test-hooks")]
 #[test]
 fn batch_subscription_atomicity_no_partial_visibility() {
     use batpak::store::CountdownInjector;
@@ -785,7 +788,7 @@ fn batch_subscription_atomicity_no_partial_visibility() {
     let mut config = StoreConfig::new(tmp.path());
     let store =
         Store::open(config.clone()).expect("open baseline store for subscription atomicity");
-    let sub = store.subscribe(&Region::all());
+    let sub = store.subscribe_lossy(&Region::all());
     store
         .append(&coord, EventKind::DATA, &serde_json::json!({"pre": 1}))
         .expect("append pre-crash subscription event");
@@ -802,7 +805,7 @@ fn batch_subscription_atomicity_no_partial_visibility() {
     // Phase 2: reopen with a fault injector that fails the batch mid-flight.
     config.fault_injector = Some(std::sync::Arc::new(CountdownInjector::after_batch_items(1)));
     let store = Store::open(config).expect("open fault-injected store for subscription atomicity");
-    let sub = store.subscribe(&Region::all());
+    let sub = store.subscribe_lossy(&Region::all());
 
     // Phase 3: attempt a batch that will fault. The append_batch call must
     // return Err. Subscriber must observe ZERO notifications because the
@@ -849,7 +852,7 @@ fn batch_subscription_atomicity_no_partial_visibility() {
     // After recovery, verify no partial data is visible.
     let config = StoreConfig::new(tmp.path());
     let store = Store::open(config).expect("reopen store after subscription atomicity fault");
-    let mut cursor = store.cursor(&Region::all());
+    let mut cursor = store.cursor_guaranteed(&Region::all());
     let entries = cursor.poll_batch(10);
 
     // Should only have the pre-established event.
@@ -865,7 +868,7 @@ fn batch_subscription_atomicity_no_partial_visibility() {
 }
 
 /// Test: CountdownInjector::after_commit_before_fsync convenience constructor.
-#[cfg(feature = "test-support")]
+#[cfg(feature = "dangerous-test-hooks")]
 #[test]
 fn fault_injector_after_commit_before_fsync() {
     use batpak::store::{CountdownInjector, FaultInjector, InjectionPoint};
@@ -893,7 +896,7 @@ fn fault_injector_after_commit_before_fsync() {
 
 /// Test: cross-segment batch with fault at segment boundary.
 /// Verifies that partial batches spanning segments are handled correctly.
-#[cfg(feature = "test-support")]
+#[cfg(feature = "dangerous-test-hooks")]
 #[test]
 fn batch_cross_segment_fault_recovery() {
     use batpak::store::{CountdownAction, CountdownInjector, InjectionPoint};
@@ -945,7 +948,7 @@ fn batch_cross_segment_fault_recovery() {
     // Recovery should discard all partial batch data across both segments.
     let config = StoreConfig::new(tmp.path());
     let store = Store::open(config).expect("reopen store after cross-segment fault recovery");
-    let mut cursor = store.cursor(&Region::all());
+    let mut cursor = store.cursor_guaranteed(&Region::all());
     let entries = cursor.poll_batch(10);
 
     // Should only have the first large event.
@@ -978,7 +981,7 @@ fn batch_cross_segment_fault_recovery() {
 /// (not a strict prefix).
 ///
 /// [INV-BATCH-ATOMIC-VISIBILITY]
-#[cfg(feature = "test-support")]
+#[cfg(feature = "dangerous-test-hooks")]
 #[test]
 fn batch_publish_atomicity_no_partial_read_during_insert() {
     use batpak::store::{CountdownAction, CountdownInjector, InjectionPoint};
@@ -1365,7 +1368,11 @@ fn batch_survives_unclean_shutdown_without_sidx_footer() {
         b"SIDX",
         "clean close must have written the SIDX footer (sanity check before truncation)"
     );
-    let string_table_offset = u64::from_le_bytes(trailer[0..8].try_into().unwrap());
+    let string_table_offset = u64::from_le_bytes(
+        trailer[0..8]
+            .try_into()
+            .expect("SIDX trailer offset is exactly 8 bytes"),
+    );
     std::fs::write(
         &seg_path,
         &bytes[..usize::try_from(string_table_offset).expect("offset fits in usize")],

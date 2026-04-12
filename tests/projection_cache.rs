@@ -7,7 +7,7 @@
 //! [SPEC:tests/projection_cache.rs]
 //!
 //! PROVES: LAW-001 (No Fake Success — cached projections must be correct)
-//! DEFENDS: FM-009 (Polite Downgrade — BestEffort must eventually refresh)
+//! DEFENDS: FM-009 (Polite Downgrade — MaybeStale must eventually refresh)
 //! INVARIANTS: INV-TYPE (cache round-trip fidelity), INV-TEMP (freshness semantics)
 
 use batpak::store::projection::{CacheCapabilities, CacheMeta, NoCache, ProjectionCache};
@@ -412,18 +412,18 @@ mod native_tests {
 }
 
 // ================================================================
-// Freshness::BestEffort + cache metadata edge cases
+// Freshness::MaybeStale + cache metadata edge cases
 // PROVES: LAW-001 (No Fake Success — stale cache must not serve wrong data)
-// DEFENDS: FM-009 (Polite Downgrade — BestEffort must eventually refresh)
+// DEFENDS: FM-009 (Polite Downgrade — MaybeStale must eventually refresh)
 // ================================================================
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
-struct BestEffortCounter {
+struct MaybeStaleCounter {
     count: u32,
 }
-impl batpak::prelude::EventSourced<serde_json::Value> for BestEffortCounter {
+impl batpak::prelude::EventSourced<serde_json::Value> for MaybeStaleCounter {
     fn from_events(events: &[batpak::prelude::Event<serde_json::Value>]) -> Option<Self> {
-        Some(BestEffortCounter {
+        Some(MaybeStaleCounter {
             count: u32::try_from(events.len()).expect("test uses < 2^32 events"),
         })
     }
@@ -436,7 +436,7 @@ impl batpak::prelude::EventSourced<serde_json::Value> for BestEffortCounter {
 }
 
 #[test]
-fn freshness_best_effort_serves_stale_cache_within_window() {
+fn freshness_maybe_stale_serves_stale_cache_within_window() {
     use batpak::prelude::*;
     use batpak::store::{Freshness, NativeCache, Store, StoreConfig, SyncConfig};
     use tempfile::TempDir;
@@ -466,43 +466,43 @@ fn freshness_best_effort_serves_stale_cache_within_window() {
         .expect("append 2");
 
     // Project with Consistent to populate cache
-    let result: Option<BestEffortCounter> = store
+    let result: Option<MaybeStaleCounter> = store
         .project("entity:besteff1", &Freshness::Consistent)
         .expect("project consistent");
-    assert_eq!(result, Some(BestEffortCounter { count: 2 }));
+    assert_eq!(result, Some(MaybeStaleCounter { count: 2 }));
 
     // Append a third event — cache is now stale
     store
         .append(&coord, kind, &serde_json::json!({"x": 3}))
         .expect("append 3");
 
-    // BestEffort with large window should serve the stale cached value
-    let result_best: Option<BestEffortCounter> = store
+    // MaybeStale with large window should serve the stale cached value
+    let result_best: Option<MaybeStaleCounter> = store
         .project(
             "entity:besteff1",
-            &Freshness::BestEffort {
+            &Freshness::MaybeStale {
                 max_stale_ms: 60_000,
             },
         )
-        .expect("project best effort");
+        .expect("project maybe stale");
     assert_eq!(
         result_best,
-        Some(BestEffortCounter { count: 2 }),
+        Some(MaybeStaleCounter { count: 2 }),
         "FRESHNESS BEST EFFORT: with large stale window, should serve cached value (count=2) \
          even though a 3rd event was appended.\n\
-         Investigate: src/store/mod.rs project() BestEffort branch."
+         Investigate: src/store/mod.rs project() MaybeStale branch."
     );
 
-    // BestEffort with zero window should force re-replay
-    let result_strict: Option<BestEffortCounter> = store
+    // MaybeStale with zero window should force re-replay
+    let result_strict: Option<MaybeStaleCounter> = store
         .project(
             "entity:besteff1",
-            &Freshness::BestEffort { max_stale_ms: 0 },
+            &Freshness::MaybeStale { max_stale_ms: 0 },
         )
-        .expect("project best effort strict");
+        .expect("project maybe stale strict");
     assert_eq!(
         result_strict,
-        Some(BestEffortCounter { count: 3 }),
+        Some(MaybeStaleCounter { count: 3 }),
         "FRESHNESS BEST EFFORT ZERO: with max_stale_ms=0, cache should always be considered \
          stale, forcing a full replay (count=3)."
     );

@@ -362,7 +362,7 @@ fn flow_connectivity_full_production_path() {
 
     // Step 7: Cursor sees the event
     let region = Region::entity("user:alice");
-    let mut cursor = store.cursor(&region);
+    let mut cursor = store.cursor_guaranteed(&region);
     let entry = cursor.poll();
     assert!(
         entry.is_some(),

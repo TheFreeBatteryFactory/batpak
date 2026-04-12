@@ -92,7 +92,7 @@
   kind: source
   paths:
     - src/store/maintenance.rs
-- id: ART-STORE-TEST-SUPPORT
+- id: ART-STORE-DANGEROUS-TEST-HOOKS
   kind: source
   paths:
     - src/store/test_support.rs

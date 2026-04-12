@@ -9,6 +9,7 @@ fn store_config_builder_methods_are_chainable() {
         .with_fd_budget(9)
         .with_writer_channel_capacity(10)
         .with_broadcast_capacity(11)
+        .with_single_append_max_bytes(12)
         .with_restart_policy(RestartPolicy::Bounded {
             max_restarts: 2,
             within_ms: 30_000,
@@ -23,6 +24,7 @@ fn store_config_builder_methods_are_chainable() {
     assert_eq!(config.fd_budget, 9);
     assert_eq!(config.writer.channel_capacity, 10);
     assert_eq!(config.broadcast_capacity, 11);
+    assert_eq!(config.single_append_max_bytes, 12);
     assert!(matches!(
         config.writer.restart_policy,
         RestartPolicy::Bounded {
@@ -51,4 +53,16 @@ fn open_with_native_cache_is_available_for_common_setup() {
         .append(&coord, kind, &serde_json::json!({"hello": "native"}))
         .expect("append");
     assert!(receipt.event_id != 0);
+    let _closed = store.close().expect("close");
+}
+
+#[test]
+fn renamed_surface_items_are_reachable() {
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let store = Store::open(StoreConfig::new(data_dir.path())).expect("open");
+    let _typed_open: &Store<Open> = &store;
+    let _freshness = Freshness::MaybeStale { max_stale_ms: 5 };
+    let _sub = store.subscribe_lossy(&Region::all());
+    let _cursor = store.cursor_guaranteed(&Region::all());
+    let _closed: Closed = store.close().expect("close");
 }

@@ -19,5 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         receipt.sequence,
         fetched.coordinate.scope()
     );
+
+    store.close()?;
     Ok(())
 }

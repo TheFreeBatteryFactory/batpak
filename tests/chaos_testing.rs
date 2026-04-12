@@ -21,8 +21,6 @@
 use batpak::prelude::*;
 use batpak::store::segment::frame_decode;
 use batpak::store::{AppendOptions, Store, StoreConfig, StoreError, SyncConfig};
-use rand::prelude::*;
-use rand::Rng;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -61,7 +59,7 @@ fn chaos_corrupted_segment_bytes() {
     store.close().expect("close");
 
     // Corrupt random bytes in segment files
-    let mut rng = StdRng::seed_from_u64(42);
+    let mut rng = fastrand::Rng::with_seed(42);
     let segments: Vec<_> = std::fs::read_dir(dir.path())
         .expect("read dir")
         .filter_map(|e| e.ok())
@@ -84,11 +82,11 @@ fn chaos_corrupted_segment_bytes() {
     for seg in &segments {
         let mut data = std::fs::read(seg.path()).expect("read segment");
         // Skip magic bytes (first 4), corrupt some bytes after header
-        let corrupt_count = rng.random_range(1..=5);
+        let corrupt_count = rng.usize(1..=5);
         for _ in 0..corrupt_count {
-            let pos = rng.random_range(40..data.len().max(41));
+            let pos = rng.usize(40..data.len().max(41));
             if pos < data.len() {
-                data[pos] ^= rng.random::<u8>() | 1; // ensure at least 1 bit flips
+                data[pos] ^= rng.u8(..) | 1; // ensure at least 1 bit flips
             }
         }
         std::fs::write(seg.path(), &data).expect("write corrupted");
@@ -233,7 +231,7 @@ fn chaos_concurrent_writer_stress() {
     match Arc::try_unwrap(store) {
         Ok(s) => s.close().expect("close"),
         Err(_) => panic!("Arc still has multiple owners"),
-    }
+    };
 }
 
 // ============================================================
@@ -334,7 +332,7 @@ fn chaos_cas_contention() {
     match Arc::try_unwrap(store) {
         Ok(s) => s.close().expect("close"),
         Err(_) => panic!("Arc still has multiple owners"),
-    }
+    };
 }
 
 // ============================================================
@@ -406,7 +404,7 @@ fn chaos_idempotency_concurrent() {
     match Arc::try_unwrap(store) {
         Ok(s) => s.close().expect("close"),
         Err(_) => panic!("Arc still has multiple owners"),
-    }
+    };
 }
 
 // ============================================================
@@ -690,14 +688,14 @@ fn chaos_batch_cross_segment_rotation() {
 
 #[test]
 fn chaos_frame_decode_random_bombardment() {
-    let mut rng = StdRng::seed_from_u64(0xCA05);
+    let mut rng = fastrand::Rng::with_seed(0xCA05);
     let iterations = chaos_iterations();
     let mut ok_count = 0u64;
     let mut err_count = 0u64;
 
     for _ in 0..iterations {
-        let len = rng.random_range(0..2048);
-        let data: Vec<u8> = (0..len).map(|_| rng.random()).collect();
+        let len = rng.usize(0..2048);
+        let data: Vec<u8> = (0..len).map(|_| rng.u8(..)).collect();
         match frame_decode(&data) {
             Ok(_) => ok_count += 1,
             Err(_) => err_count += 1,
@@ -741,7 +739,7 @@ fn chaos_subscription_write_storm() {
     let iterations = chaos_iterations().min(200);
 
     // Start subscriber
-    let sub = store.subscribe(&region);
+    let sub = store.subscribe_lossy(&region);
 
     // Writer thread hammers events
     let store2 = Arc::clone(&store);
@@ -778,7 +776,7 @@ fn chaos_subscription_write_storm() {
     match Arc::try_unwrap(store) {
         Ok(s) => s.close().expect("close"),
         Err(_) => panic!("Arc still has multiple owners"),
-    }
+    };
 }
 
 // ============================================================
@@ -807,7 +805,7 @@ fn chaos_cursor_completeness_concurrent() {
 
     // Create cursor and drain
     let region = Region::entity("chaos:cursor");
-    let mut cursor = store.cursor(&region);
+    let mut cursor = store.cursor_guaranteed(&region);
     let mut seen = Vec::new();
     while let Some(entry) = cursor.poll() {
         seen.push(entry.event_id);
@@ -841,7 +839,7 @@ fn chaos_cursor_completeness_concurrent() {
     match Arc::try_unwrap(store) {
         Ok(s) => s.close().expect("close"),
         Err(_) => panic!("Arc still has multiple owners"),
-    }
+    };
 }
 
 // ============================================================
