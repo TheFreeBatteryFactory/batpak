@@ -4,16 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Changed
-- Public delivery semantics are now explicit in the API surface:
+_Nothing yet — next entries go here._
+
+## [0.3.0] - 2026-04-12
+
+### Changed (breaking — red team hardening pass)
+- **Public delivery semantics are now explicit in the API surface:**
   `Store::subscribe_lossy()` replaces `subscribe()`,
   `Store::cursor_guaranteed()` replaces `cursor()`, and
   `Freshness::MaybeStale { max_stale_ms }` replaces `Freshness::BestEffort`.
-- Store lifecycle now carries an open-state typestate marker
+- **Store lifecycle now carries an open-state typestate marker**
   (`Store<Open>`) and `close(self)` returns a terminal `Closed` token.
   `Drop` remains best-effort only and now logs loudly when callers skip
   explicit close.
-- `dangerous-test-hooks` replaces the old `test-support` feature name
+- **`dangerous-test-hooks` replaces the old `test-support` feature name**
   across code, CI, docs, and traceability so downstream enablement risk is
   explicit instead of euphemistic.
 
@@ -37,8 +41,6 @@ All notable changes to this project will be documented in this file.
   `cargo audit --deny warnings` both have to pass with zero exceptions, and
   `cargo xtask release --dry-run` inherits that gate. No advisory ignore
   entries remain.
-
-## [0.3.0] - 2026-04-11
 
 ### Added
 - `SequenceGate`: in-memory visibility watermark separating sequence allocation
@@ -383,6 +385,26 @@ For LMDB/redb users: replace `Store::open_with_lmdb_cache(config, path)` or
 `Store::open_with_redb_cache(config, path)` with
 `Store::open_with_native_cache(config, path)`. Old `.redb` files and LMDB
 `data.mdb` files in your cache directory can be safely deleted.
+
+## [0.2.0] - 2026-04-05
+
+### Added
+- Group-commit writer with configurable `group_commit_max_batch`.
+- Memory-mapped sealed-segment reader with LRU FD cache.
+- Six `IndexLayout` variants (AoS, columnar tiles) with runtime selection.
+- SIDX segment footer for fast cold-start rebuild.
+- Checkpoint v2 with CRC32 integrity and sparse-sequence support.
+- Incremental projection apply (skip already-applied events on cache hit).
+- Schema versioning in segment headers.
+- `watch_projection` reactive projection watcher.
+
+### Changed
+- Cold-start rebuild uses SIDX fast path when available, falls back to
+  frame-by-frame scan only for the active (unsealed) segment.
+
+### Fixed
+- `Arc<str>` serialization through rmp-serde (required enabling the serde
+  `rc` feature flag for `Coordinate` round-trip through MessagePack).
 
 ## [0.1.0] - 2026-04-04
 

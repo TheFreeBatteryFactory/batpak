@@ -27,6 +27,8 @@ let coord = Coordinate::new("player:alice", "room:dungeon")?;
 let kind = EventKind::custom(0xF, 1);
 let receipt = store.append(&coord, kind, &serde_json::json!({"x": 10, "y": 20}))?;
 println!("stored {} at {}", receipt.event_id, receipt.sequence);
+
+store.close()?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
