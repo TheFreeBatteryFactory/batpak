@@ -12,7 +12,10 @@ pub(crate) struct ProjectionTimings {
     pub cache_key_build_us: u64,
     pub prefetch_us: u64,
     pub external_cache_probe_us: u64,
+    /// Batch read from disk (frame decode + msgpack deser + coordinate build).
     pub disk_read_us: u64,
+    /// Extracting Event<Value> from StoredEvent (discarding coordinate).
+    pub event_extract_us: u64,
     pub replay_fold_us: u64,
     pub cache_store_us: u64,
     pub total_us: u64,
@@ -266,9 +269,15 @@ where
         .map(|item| &item.disk_pos)
         .collect();
     let stored_events = store.reader.read_entries_batch(&positions)?;
-    let events: Vec<_> = stored_events.into_iter().map(|s| s.event).collect();
     if let Some(t) = timings.as_deref_mut() {
         t.disk_read_us = t_disk.elapsed().as_micros() as u64;
+    }
+
+    // Phase 6b: Extract Event<Value> from StoredEvent (discards coordinate)
+    let t_extract = std::time::Instant::now();
+    let events: Vec<_> = stored_events.into_iter().map(|s| s.event).collect();
+    if let Some(t) = timings.as_deref_mut() {
+        t.event_extract_us = t_extract.elapsed().as_micros() as u64;
     }
 
     let t_fold = std::time::Instant::now();
@@ -423,7 +432,14 @@ mod tests {
             "  external_cache_probe: {:>8} us",
             timings.external_cache_probe_us
         );
-        eprintln!("  disk_read:            {:>8} us", timings.disk_read_us);
+        eprintln!(
+            "  disk_read:            {:>8} us  (frame decode + deser + coord build)",
+            timings.disk_read_us
+        );
+        eprintln!(
+            "  event_extract:        {:>8} us  (StoredEvent -> Event, discard coord)",
+            timings.event_extract_us
+        );
         eprintln!("  replay_fold:          {:>8} us", timings.replay_fold_us);
         eprintln!("  cache_store:          {:>8} us", timings.cache_store_us);
         eprintln!("  total:                {:>8} us", timings.total_us);
@@ -433,6 +449,7 @@ mod tests {
             + timings.prefetch_us
             + timings.external_cache_probe_us
             + timings.disk_read_us
+            + timings.event_extract_us
             + timings.replay_fold_us
             + timings.cache_store_us;
         eprintln!(
