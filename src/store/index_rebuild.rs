@@ -34,6 +34,7 @@ pub struct OpenIndexReport {
 /// 1. Try mmap snapshot (`index.fbati`) → if valid, restore + replay tail.
 /// 2. Try checkpoint (`index.ckpt`) → if valid, restore + replay tail.
 /// 3. Fall back to full segment rebuild (parallel SIDX on sealed + sequential active).
+#[allow(clippy::cast_possible_truncation)] // as_micros() -> u64: overflow at ~584,942 years
 pub(crate) fn open_index(
     index: &StoreIndex,
     reader: &Reader,

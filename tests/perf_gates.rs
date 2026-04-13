@@ -983,6 +983,72 @@ fn projection_latency_gate() {
     store.close().expect("close");
 }
 
+/// Projection cold-path gate: measures first-pass projection on a freshly
+/// reopened store. This isolates the cold projection cost from warm caches.
+/// [SPEC:tests/perf_gates.rs — BN6 projection cold-path gate]
+#[test]
+#[ignore = "hardware-dependent perf gate — run via `cargo xtask perf-gates`. Asserts cold-path projection latency."]
+fn projection_cold_path_gate() {
+    let dir = TempDir::new().expect("temp dir");
+    let config = StoreConfig {
+        data_dir: dir.path().to_path_buf(),
+        ..StoreConfig::new("")
+    };
+    let store = Store::open(config).expect("open");
+    let coord = Coordinate::new("gate:cold-proj", "gate:scope").expect("valid coord");
+    let kind = EventKind::custom(0xF, 1);
+    let n = 1_000u64;
+
+    for i in 0..n {
+        store
+            .append(&coord, kind, &serde_json::json!({"i": i}))
+            .expect("append");
+    }
+    store.close().expect("close");
+
+    // Reopen for a true cold path
+    let config = StoreConfig {
+        data_dir: dir.path().to_path_buf(),
+        ..StoreConfig::new("")
+    };
+    let store = Store::open(config).expect("reopen");
+
+    let start = Instant::now();
+    let _: Option<BenchCounter> = store
+        .project("gate:cold-proj", &batpak::store::Freshness::Consistent)
+        .expect("project cold path");
+    let projection_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    let mut gates = GateSet::new();
+    // Cold-path threshold: 50ms for 1K events (generous for CI,
+    // observed ~9ms on dev hardware after projection-specific reader).
+    gates.push(ProjectionGate { max_ms: 50.0 });
+
+    let ctx = PerfContext {
+        event_count: n,
+        events_per_sec: 0.0,
+        query_us: 0.0,
+        projection_ms,
+    };
+    let denials = gates.evaluate_all(&ctx);
+
+    eprintln!("\n  PROJECTION COLD-PATH GATE ({n} events):");
+    eprintln!("    First-pass replay: {projection_ms:.1} ms");
+
+    if !denials.is_empty() {
+        for d in &denials {
+            eprintln!("    DENIED: [{gate}] {msg}", gate = d.gate, msg = d.message);
+        }
+        panic!(
+            "PROJECTION COLD-PATH GATE FAILED: {:.1}ms > 50ms max.\n\
+             Investigate: src/store/projection_flow.rs, src/store/reader.rs read_events_batch.",
+            projection_ms
+        );
+    }
+
+    store.close().expect("close");
+}
+
 /// Verify the correctness gates actually FIRE when properties are violated.
 /// Without this, a broken gate that always passes would be invisible.
 #[test]

@@ -151,6 +151,34 @@ fn bench_cold_start_paths(c: &mut Criterion) {
             SnapshotLane::Checkpoint,
         );
 
+        // open-only: measures ONLY Store::open(), no close().
+        // This is the honest "product open regression" number.
+        group.bench_with_input(
+            BenchmarkId::new("reopen_open_only", count),
+            &count,
+            |b, &_count| {
+                b.iter_batched(
+                    || {
+                        let iter_dir = TempDir::new().expect("create iteration dir");
+                        copy_dir_recursive(default_fixture.path(), iter_dir.path());
+                        iter_dir
+                    },
+                    |iter_dir| {
+                        let config = StoreConfig {
+                            data_dir: iter_dir.path().to_path_buf(),
+                            ..StoreConfig::new("")
+                        };
+                        let _store = Store::open(config).expect("reopen populated store");
+                        // close() excluded — drop triggers best-effort shutdown only
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+
+        // open+close lifecycle: measures the full open → close cycle including
+        // cold-start artifact serialization on close. Kept separate so "product
+        // open regression" and "lifecycle cost" are never conflated.
         group.bench_with_input(
             BenchmarkId::new("reopen_holistic_default", count),
             &count,

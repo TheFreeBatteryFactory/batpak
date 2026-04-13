@@ -169,5 +169,77 @@ fn bench_projection_lanes(c: &mut Criterion) {
     store.close().expect("close");
 }
 
-criterion_group!(benches, bench_projection_lanes);
+fn bench_projection_strategy_lanes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("projection_strategy");
+    apply_profile(&mut group, BenchProfile::Quick);
+    throughput_elements(&mut group, 1_000);
+
+    // Cold path with NoCache (DirectReplay strategy)
+    let nocache_dir = TempDir::new().expect("temp dir");
+    let nocache_config = StoreConfig::new(nocache_dir.path())
+        .with_enable_checkpoint(false)
+        .with_enable_mmap_index(false);
+    let nocache_store = Store::open(nocache_config).expect("open nocache");
+    populate_projection_fixture(&nocache_store, "bench:cold", 1_000);
+    nocache_store.close().expect("close nocache");
+
+    group.bench_function("cold_nocache", |b| {
+        b.iter_batched(
+            || {
+                Store::open(
+                    StoreConfig::new(nocache_dir.path())
+                        .with_enable_checkpoint(false)
+                        .with_enable_mmap_index(false),
+                )
+                .expect("reopen nocache")
+            },
+            |store| {
+                let _: Option<Counter> = store
+                    .project("bench:cold", &Freshness::Consistent)
+                    .expect("project");
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    // Cold path with NativeCache (ExternalCacheThenReplay strategy, guaranteed miss)
+    let native_dir = TempDir::new().expect("temp dir");
+    let native_config = StoreConfig::new(native_dir.path().join("data"))
+        .with_enable_checkpoint(false)
+        .with_enable_mmap_index(false);
+    let native_store = Store::open(native_config).expect("open native");
+    populate_projection_fixture(&native_store, "bench:cold-native", 1_000);
+    native_store.close().expect("close native");
+
+    group.bench_function("cold_native_cache", |b| {
+        b.iter_batched(
+            || {
+                let cache_path = native_dir
+                    .path()
+                    .join(format!("cache_{}", fastrand::u64(..)));
+                Store::open_with_native_cache(
+                    StoreConfig::new(native_dir.path().join("data"))
+                        .with_enable_checkpoint(false)
+                        .with_enable_mmap_index(false),
+                    cache_path,
+                )
+                .expect("reopen native")
+            },
+            |store| {
+                let _: Option<Counter> = store
+                    .project("bench:cold-native", &Freshness::Consistent)
+                    .expect("project");
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_projection_lanes,
+    bench_projection_strategy_lanes
+);
 criterion_main!(benches);

@@ -2,7 +2,7 @@
 
 use batpak::coordinate::{Coordinate, Region};
 use batpak::event::EventKind;
-use batpak::store::{OpenIndexPath, ReadOnly, Store, StoreConfig};
+use batpak::store::{OpenIndexPath, OpenIndexReport, ReadOnly, Store, StoreConfig};
 use tempfile::TempDir;
 
 fn mmap_config(dir: &TempDir) -> StoreConfig {
@@ -141,7 +141,7 @@ fn default_config_reopen_uses_mmap_path() {
     let default_config2 = StoreConfig::new(dir.path());
     let store2 = Store::open(default_config2).expect("reopen store");
     let diag = store2.diagnostics();
-    let report = diag
+    let report: OpenIndexReport = diag
         .open_report
         .expect("open_report must be populated after open");
     assert_eq!(

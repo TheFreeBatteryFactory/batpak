@@ -317,7 +317,12 @@ fn close_rejects_checkpoint_symlink_leaf() {
     use std::os::unix::fs::symlink;
 
     let dir = TempDir::new().expect("tmpdir");
-    let config = StoreConfig::new(dir.path()).with_enable_checkpoint(true);
+    // Disable mmap so close() exercises the checkpoint write path.
+    // With mmap enabled (default), checkpoint is skipped and the symlink
+    // is never touched.
+    let config = StoreConfig::new(dir.path())
+        .with_enable_checkpoint(true)
+        .with_enable_mmap_index(false);
     let store = Store::open(config).expect("open");
     let coord = test_coord();
     let kind = EventKind::custom(1, 1);

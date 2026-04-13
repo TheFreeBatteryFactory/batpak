@@ -115,6 +115,7 @@ where
 }
 
 /// Shared projection executor. Optional timing sink gated behind `timings.is_some()`.
+#[allow(clippy::cast_possible_truncation)] // as_micros() -> u64: overflow at ~584,942 years
 fn project_inner<T, State>(
     store: &Store<State>,
     entity: &str,
@@ -166,7 +167,25 @@ where
             (0, 0, 0, TypeId::of::<T>(), Vec::new())
         };
 
-    // 1c: Group-local cache slot + freshness
+    // 1c: Fire prefetch early so I/O overlaps with group-local CPU work.
+    // On warm path (group-local hit), the prefetch is wasted (one stat).
+    // On cold path (group-local miss), the I/O may already be done by the
+    // time execute_external_cache_path needs the result.
+    let t_prefetch = std::time::Instant::now();
+    if has_replay_plan && store.cache.capabilities().supports_prefetch {
+        let predicted_meta = projection::CacheMeta {
+            watermark,
+            cached_at_us,
+        };
+        if let Err(error) = store.cache.prefetch(&cache_key, predicted_meta) {
+            tracing::warn!("cache prefetch failed (non-fatal): {error}");
+        }
+    }
+    if let Some(t) = timings.as_deref_mut() {
+        t.prefetch_us = t_prefetch.elapsed().as_micros() as u64;
+    }
+
+    // 1d: Group-local cache slot + freshness
     let t_group = std::time::Instant::now();
     let group_local_slot = if has_replay_plan {
         store.index.cached_projection(entity, type_id)
@@ -343,6 +362,8 @@ where
 /// External cache probe with incremental apply and fresh-hit paths, then fallback to full replay.
 // cold path -- keep out of the hot dispatch to reduce instruction cache pressure
 #[inline(never)]
+// as_micros() -> u64 cannot overflow in practice; extracted helper needs all parent context
+#[allow(clippy::cast_possible_truncation, clippy::too_many_arguments)]
 fn execute_external_cache_path<T, State>(
     store: &Store<State>,
     entity: &str,
@@ -358,22 +379,9 @@ fn execute_external_cache_path<T, State>(
 where
     T: EventSourced<serde_json::Value> + serde::Serialize + serde::de::DeserializeOwned + 'static,
 {
-    // Prefetch
-    let t_prefetch = std::time::Instant::now();
-    let predicted_meta = projection::CacheMeta {
-        watermark,
-        cached_at_us,
-    };
-    if store.cache.capabilities().supports_prefetch {
-        if let Err(error) = store.cache.prefetch(cache_key, predicted_meta) {
-            tracing::warn!("cache prefetch failed (non-fatal): {error}");
-        }
-    }
-    if let Some(t) = timings.as_deref_mut() {
-        t.prefetch_us = t_prefetch.elapsed().as_micros() as u64;
-    }
-
+    // Prefetch already fired in Phase 1c (before group-local check).
     // External cache probe
+
     let t_ext = std::time::Instant::now();
     match store.cache.get(cache_key) {
         Ok(Some((bytes, meta))) => {
@@ -485,6 +493,8 @@ where
 /// Full replay from disk: batch-read events, fold, and store back to cache.
 // cold path -- keep out of the hot dispatch to reduce instruction cache pressure
 #[inline(never)]
+// as_micros() -> u64 cannot overflow in practice; extracted helper needs all parent context
+#[allow(clippy::cast_possible_truncation, clippy::too_many_arguments)]
 fn execute_full_replay<T, State>(
     store: &Store<State>,
     entity: &str,
@@ -629,6 +639,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::print_stderr)] // diagnostic test — eprintln output is the point
     fn projection_timings_cold_path_breakdown() {
         let dir = TempDir::new().expect("temp dir");
         let store = Store::open(StoreConfig::new(dir.path())).expect("open store");
