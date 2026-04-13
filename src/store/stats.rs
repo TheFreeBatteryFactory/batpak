@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::store::index_rebuild::OpenIndexReport;
 use crate::store::RestartPolicy;
 
 /// Lightweight runtime statistics snapshot for the store.
@@ -67,4 +68,6 @@ pub struct StoreDiagnostics {
     pub index_layout: &'static str,
     /// Number of tiles in the columnar index (0 for non-tiled layouts).
     pub tile_count: usize,
+    /// Structured report from the cold-start open path, if available.
+    pub open_report: Option<OpenIndexReport>,
 }

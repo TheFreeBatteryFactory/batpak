@@ -11,6 +11,7 @@ fn test_store_with_writer(tx: flume::Sender<writer::WriterCommand>) -> (Store, T
         writer: Some(writer::WriterHandle::from_parts_for_test(tx, subscribers)),
         config: Arc::new(StoreConfig::new(dir.path().to_path_buf())),
         should_shutdown_on_drop: true,
+        open_report: None,
         _state: std::marker::PhantomData,
     };
     (store, dir)

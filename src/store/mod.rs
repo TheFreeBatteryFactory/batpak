@@ -57,6 +57,7 @@ pub use fault::{
     CountdownAction, CountdownInjector, FaultInjector, InjectionPoint, ProbabilisticInjector,
 };
 pub use index::{ClockKey, DiskPos, IndexEntry};
+pub use index_rebuild::{OpenIndexPath, OpenIndexReport};
 pub use projection::{
     CacheCapabilities, CacheMeta, Freshness, NativeCache, NoCache, ProjectionCache,
 };
@@ -102,6 +103,7 @@ pub struct Store<State = Open> {
     pub(crate) writer: Option<WriterHandle>,
     pub(crate) config: Arc<StoreConfig>,
     pub(crate) should_shutdown_on_drop: bool,
+    pub(crate) open_report: Option<index_rebuild::OpenIndexReport>,
     pub(crate) _state: std::marker::PhantomData<State>,
 }
 
@@ -419,7 +421,7 @@ impl Store<Open> {
 
         // Cold start: checkpoint fast path or full segment scan.
         // [SPEC:IMPLEMENTATION NOTES item 2 — segment naming, alphabetical scan]
-        index_rebuild::open_index(
+        let open_report = index_rebuild::open_index(
             &index,
             &reader,
             &config.data_dir,
@@ -444,6 +446,7 @@ impl Store<Open> {
             writer: Some(writer),
             config,
             should_shutdown_on_drop: true,
+            open_report: Some(open_report),
             _state: std::marker::PhantomData,
         })
     }
@@ -1145,7 +1148,7 @@ impl Store<ReadOnly> {
         let index = Arc::new(StoreIndex::with_config(&config.index));
         let reader = Arc::new(Reader::new(config.data_dir.clone(), config.fd_budget));
 
-        index_rebuild::open_index(
+        let open_report = index_rebuild::open_index(
             &index,
             &reader,
             &config.data_dir,
@@ -1163,6 +1166,7 @@ impl Store<ReadOnly> {
             writer: None,
             config,
             should_shutdown_on_drop: false,
+            open_report: Some(open_report),
             _state: std::marker::PhantomData,
         })
     }

@@ -234,20 +234,22 @@ pub(crate) fn close(mut store: Store<Open>) -> Result<Closed, StoreError> {
     Ok(Closed)
 }
 
-/// Determine watermark from the latest segment file and write all enabled
-/// fast-start artifacts.
+/// Determine watermark from the latest segment file and write the fastest
+/// available cold-start artifact. When mmap is enabled it is strictly
+/// preferred over checkpoint — writing both is redundant work that doubles
+/// close() cost at high event counts.
 fn write_cold_start_artifacts_on_close(store: &Store<Open>) -> Result<(), StoreError> {
     let (seg_id, offset) = find_latest_segment_watermark(&store.config.data_dir)?;
-    if store.config.index.enable_checkpoint {
-        crate::store::checkpoint::write_checkpoint(
+    if store.config.index.enable_mmap_index {
+        crate::store::mmap_index::write_mmap_index(
             &store.index,
             &store.config.data_dir,
             seg_id,
             offset,
         )?;
-    }
-    if store.config.index.enable_mmap_index {
-        crate::store::mmap_index::write_mmap_index(
+    } else if store.config.index.enable_checkpoint {
+        // Checkpoint is the fallback when mmap is not enabled.
+        crate::store::checkpoint::write_checkpoint(
             &store.index,
             &store.config.data_dir,
             seg_id,
@@ -318,6 +320,7 @@ pub(crate) fn diagnostics<State>(store: &Store<State>) -> StoreDiagnostics {
             }),
         index_layout: store.index.layout_name(),
         tile_count: store.index.tile_count(),
+        open_report: store.open_report.clone(),
     }
 }
 

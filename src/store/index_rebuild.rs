@@ -6,29 +6,64 @@ use crate::store::StoreError;
 use rayon::prelude::*;
 use std::path::Path;
 
+/// Which cold-start restore strategy was actually used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenIndexPath {
+    /// Restored from the mmap snapshot (`index.fbati`) plus tail replay.
+    Mmap,
+    /// Restored from the checkpoint (`index.ckpt`) plus tail replay.
+    Checkpoint,
+    /// Full rebuild from segment files (parallel SIDX + sequential active).
+    Rebuild,
+}
+
+/// Diagnostic output from `open_index()`. Hard truth, not logs.
+#[derive(Debug, Clone)]
+pub struct OpenIndexReport {
+    /// Which restore strategy was selected and completed.
+    pub path: OpenIndexPath,
+    /// Number of entries restored from the snapshot (mmap or checkpoint body).
+    pub restored_entries: usize,
+    /// Number of entries replayed from the tail after the snapshot watermark.
+    pub tail_entries: usize,
+    /// Wall-clock microseconds for the entire open_index() call.
+    pub elapsed_us: u64,
+}
+
 /// Open the index using the fastest available path:
-/// 1. Try loading a checkpoint file → if valid, restore from it + replay tail segments.
-/// 2. Fall back to full segment scan if checkpoint is missing, corrupt, or stale.
+/// 1. Try mmap snapshot (`index.fbati`) → if valid, restore + replay tail.
+/// 2. Try checkpoint (`index.ckpt`) → if valid, restore + replay tail.
+/// 3. Fall back to full segment rebuild (parallel SIDX on sealed + sequential active).
 pub(crate) fn open_index(
     index: &StoreIndex,
     reader: &Reader,
     data_dir: &Path,
     enable_checkpoint: bool,
     enable_mmap_index: bool,
-) -> Result<(), StoreError> {
+) -> Result<OpenIndexReport, StoreError> {
+    let t0 = std::time::Instant::now();
+
     if enable_mmap_index {
         if let Some((watermark, stored_allocator)) =
             crate::store::mmap_index::try_restore_mmap_index(index, data_dir)
         {
+            let restored_entries = index.len();
             tracing::info!(
-                "mmap index loaded: watermark segment {} offset {}, allocator {}",
+                "mmap index loaded: watermark segment {} offset {}, allocator {}, entries {}",
                 watermark.watermark_segment_id,
                 watermark.watermark_offset,
                 stored_allocator,
+                restored_entries,
             );
             replay_tail_segments(index, reader, data_dir, &watermark)?;
             restore_cancelled_visibility_ranges(index, data_dir);
-            return Ok(());
+            let tail_entries = index.len() - restored_entries;
+            return Ok(OpenIndexReport {
+                path: OpenIndexPath::Mmap,
+                restored_entries,
+                tail_entries,
+                elapsed_us: t0.elapsed().as_micros() as u64,
+            });
         }
         tracing::debug!("no valid mmap index, trying checkpoint path");
     }
@@ -36,9 +71,10 @@ pub(crate) fn open_index(
         if let Some((entries, interner_strings, watermark, stored_allocator)) =
             crate::store::checkpoint::try_load_checkpoint(data_dir)
         {
+            let restored_entries = entries.len();
             tracing::info!(
                 "checkpoint v2 loaded: {} entries, {} interner strings, watermark segment {} offset {}, allocator {}",
-                entries.len(),
+                restored_entries,
                 interner_strings.len(),
                 watermark.watermark_segment_id,
                 watermark.watermark_offset,
@@ -50,16 +86,27 @@ pub(crate) fn open_index(
                 &interner_strings,
                 stored_allocator,
             )?;
-            // Replay segments newer than the watermark.
             replay_tail_segments(index, reader, data_dir, &watermark)?;
             restore_cancelled_visibility_ranges(index, data_dir);
-            return Ok(());
+            let total_entries = index.len();
+            let tail_entries = total_entries - restored_entries.min(total_entries);
+            return Ok(OpenIndexReport {
+                path: OpenIndexPath::Checkpoint,
+                restored_entries,
+                tail_entries,
+                elapsed_us: t0.elapsed().as_micros() as u64,
+            });
         }
         tracing::debug!("no valid checkpoint, performing full index rebuild");
     }
     rebuild_from_segments(index, reader, data_dir)?;
     restore_cancelled_visibility_ranges(index, data_dir);
-    Ok(())
+    Ok(OpenIndexReport {
+        path: OpenIndexPath::Rebuild,
+        restored_entries: index.len(),
+        tail_entries: 0,
+        elapsed_us: t0.elapsed().as_micros() as u64,
+    })
 }
 
 pub(crate) fn restore_cancelled_visibility_ranges(index: &StoreIndex, data_dir: &Path) {
@@ -183,24 +230,38 @@ fn read_sealed_sidx_entries_sequential(
     Ok(flat)
 }
 
-/// Build an `IndexEntry` from a `ScannedIndexEntry`, sourcing `global_sequence`
-/// from the SIDX footer if available, otherwise asking the cursor to synthesize
-/// the next free slot. This keeps sparse `global_sequence` values from disk
-/// preserved verbatim across cold-start rebuilds.
+#[derive(Default)]
+struct SequenceTracker {
+    max_seen: u64,
+    inserted_any: bool,
+}
+
+impl SequenceTracker {
+    fn synthesize_next(&self) -> u64 {
+        if self.inserted_any {
+            self.max_seen.saturating_add(1)
+        } else {
+            0
+        }
+    }
+
+    fn note_seen(&mut self, global_sequence: u64) {
+        self.max_seen = self.max_seen.max(global_sequence);
+        self.inserted_any = true;
+    }
+}
+
+/// Build an `IndexEntry` from a `ScannedIndexEntry` and the chosen
+/// `global_sequence`.
 fn entry_from_scan(
     index: &StoreIndex,
-    cursor: &mut crate::store::index::ReplayCursor<'_>,
     se: crate::store::reader::ScannedIndexEntry,
+    global_sequence: u64,
 ) -> Result<IndexEntry, StoreError> {
     let coord = Coordinate::new(&se.entity, &se.scope)?;
     let entity_id = index.interner.intern(&se.entity);
     let scope_id = index.interner.intern(&se.scope);
     let clock = se.header.position.sequence;
-    // SIDX-stored sequence wins; otherwise synthesize from the cursor's
-    // running maximum (active segment / footerless slow path).
-    let global_sequence = se
-        .global_sequence
-        .unwrap_or_else(|| cursor.synthesize_next());
     Ok(IndexEntry {
         event_id: se.header.event_id,
         correlation_id: se.header.correlation_id,
@@ -253,7 +314,10 @@ fn replay_tail_segments(
                 {
                     return Ok(());
                 }
-                let entry = entry_from_scan(index, &mut cursor, se)?;
+                let global_sequence = se
+                    .global_sequence
+                    .unwrap_or_else(|| cursor.synthesize_next());
+                let entry = entry_from_scan(index, se, global_sequence)?;
                 cursor.insert(entry);
                 Ok(())
             })?;
@@ -287,8 +351,10 @@ pub(crate) fn rebuild_from_segments(
     let entries = segment_paths(data_dir)?;
     let configured_active_segment = reader.active_segment_id();
     let active_segment_id = (configured_active_segment != 0).then_some(configured_active_segment);
-
-    let mut cursor = index.begin_replay();
+    index.clear();
+    index.interner.reset();
+    let mut rebuilt_entries = Vec::new();
+    let mut tracker = SequenceTracker::default();
 
     let scan_result = (|| -> Result<(), StoreError> {
         let sealed_segments: Vec<_> = entries
@@ -299,15 +365,23 @@ pub(crate) fn rebuild_from_segments(
         if !sealed_segments.is_empty() {
             if let Some(scanned) = read_sealed_sidx_entries_parallel(&sealed_segments) {
                 for se in scanned {
-                    let entry = entry_from_scan(index, &mut cursor, se)?;
-                    cursor.insert(entry);
+                    let global_sequence = se
+                        .global_sequence
+                        .unwrap_or_else(|| tracker.synthesize_next());
+                    let entry = entry_from_scan(index, se, global_sequence)?;
+                    tracker.note_seen(global_sequence);
+                    rebuilt_entries.push(entry);
                 }
             } else {
                 let mut batch_state = crate::store::reader::BatchRecoveryState::default();
                 for (_, path) in &sealed_segments {
                     reader.scan_segment_index_into(path, Some(&mut batch_state), |se| {
-                        let entry = entry_from_scan(index, &mut cursor, se)?;
-                        cursor.insert(entry);
+                        let global_sequence = se
+                            .global_sequence
+                            .unwrap_or_else(|| tracker.synthesize_next());
+                        let entry = entry_from_scan(index, se, global_sequence)?;
+                        tracker.note_seen(global_sequence);
+                        rebuilt_entries.push(entry);
                         Ok(())
                     })?;
                 }
@@ -320,8 +394,12 @@ pub(crate) fn rebuild_from_segments(
                 continue;
             }
             reader.scan_segment_index_into(path, Some(&mut batch_state), |se| {
-                let entry = entry_from_scan(index, &mut cursor, se)?;
-                cursor.insert(entry);
+                let global_sequence = se
+                    .global_sequence
+                    .unwrap_or_else(|| tracker.synthesize_next());
+                let entry = entry_from_scan(index, se, global_sequence)?;
+                tracker.note_seen(global_sequence);
+                rebuilt_entries.push(entry);
                 Ok(())
             })?;
         }
@@ -330,15 +408,11 @@ pub(crate) fn rebuild_from_segments(
 
     match scan_result {
         Ok(()) => {
-            // Full rebuild complete. No allocator hint — preserve SIDX
-            // sequences as-is and advance the allocator past the maximum seen.
-            cursor.commit(0);
+            rebuilt_entries.sort_by_key(|entry| entry.global_sequence);
+            index.restore_sorted_entries(rebuilt_entries, 0);
             Ok(())
         }
-        Err(e) => {
-            cursor.abort();
-            Err(e)
-        }
+        Err(e) => Err(e),
     }
 }
 

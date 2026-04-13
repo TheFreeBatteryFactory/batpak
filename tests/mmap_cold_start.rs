@@ -2,7 +2,7 @@
 
 use batpak::coordinate::{Coordinate, Region};
 use batpak::event::EventKind;
-use batpak::store::{ReadOnly, Store, StoreConfig};
+use batpak::store::{OpenIndexPath, ReadOnly, Store, StoreConfig};
 use tempfile::TempDir;
 
 fn mmap_config(dir: &TempDir) -> StoreConfig {
@@ -108,4 +108,56 @@ fn truncated_mmap_index_falls_back_cleanly() {
         "PROPERTY: truncated mmap index must fall back to segment scan and recover all 12 events \
          without data loss."
     );
+}
+
+#[test]
+fn default_config_reopen_uses_mmap_path() {
+    let dir = TempDir::new().expect("temp dir");
+
+    // Populate with default config (mmap=true, checkpoint=true)
+    let default_config = StoreConfig::new(dir.path()).with_sync_every_n_events(1);
+    let store = Store::open(default_config).expect("open store");
+    let coord = Coordinate::new("entity:default", "scope:test").expect("coord");
+    let kind = EventKind::custom(0xF, 1);
+    for i in 0..100u32 {
+        store
+            .append(&coord, kind, &serde_json::json!({"i": i}))
+            .expect("append");
+    }
+    store.close().expect("close");
+
+    // When mmap is enabled (default), only the mmap artifact is written.
+    // Checkpoint is skipped to avoid redundant serialization on close.
+    assert!(
+        dir.path().join("index.fbati").exists(),
+        "close() with default config must write index.fbati"
+    );
+    assert!(
+        !dir.path().join("index.ckpt").exists(),
+        "close() with mmap enabled should skip checkpoint (redundant)"
+    );
+
+    // Reopen with default config and check which path was used
+    let default_config2 = StoreConfig::new(dir.path());
+    let store2 = Store::open(default_config2).expect("reopen store");
+    let diag = store2.diagnostics();
+    let report = diag
+        .open_report
+        .expect("open_report must be populated after open");
+    assert_eq!(
+        report.path,
+        OpenIndexPath::Mmap,
+        "PROPERTY: default config reopen must use the mmap path (fastest). \
+         Got {:?} with {} restored + {} tail entries in {}us.",
+        report.path,
+        report.restored_entries,
+        report.tail_entries,
+        report.elapsed_us,
+    );
+    assert_eq!(
+        store2.stream("entity:default").len(),
+        100,
+        "all events must be present after mmap reopen"
+    );
+    store2.close().expect("close");
 }
