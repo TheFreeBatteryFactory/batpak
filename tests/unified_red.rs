@@ -28,7 +28,9 @@ struct KindFilteredCounter {
     noise_count: u64,
 }
 
-impl EventSourced<serde_json::Value> for KindFilteredCounter {
+impl EventSourced for KindFilteredCounter {
+    type Input = batpak::prelude::ValueInput;
+
     fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
         if events.is_empty() {
             return None;
@@ -58,7 +60,9 @@ struct AllCounter {
     count: u64,
 }
 
-impl EventSourced<serde_json::Value> for AllCounter {
+impl EventSourced for AllCounter {
+    type Input = batpak::prelude::ValueInput;
+
     fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
         if events.is_empty() {
             return None;
@@ -83,7 +87,9 @@ struct VersionedCounterV2 {
     count: u64,
 }
 
-impl EventSourced<serde_json::Value> for VersionedCounterV2 {
+impl EventSourced for VersionedCounterV2 {
+    type Input = batpak::prelude::ValueInput;
+
     fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
         if events.is_empty() {
             return None;
@@ -111,7 +117,9 @@ struct IncrementalCounter {
     count: u64,
 }
 
-impl EventSourced<serde_json::Value> for IncrementalCounter {
+impl EventSourced for IncrementalCounter {
+    type Input = batpak::prelude::ValueInput;
+
     fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
         if events.is_empty() {
             return None;

@@ -84,11 +84,14 @@ struct IndexScanEvent {
 }
 
 impl Reader {
+    fn decode_frame_payload_raw(msgpack: &[u8]) -> Result<FramePayload<Vec<u8>>, StoreError> {
+        rmp_serde::from_slice(msgpack).map_err(|e| StoreError::Serialization(Box::new(e)))
+    }
+
     fn decode_frame_payload_value(
         msgpack: &[u8],
     ) -> Result<FramePayload<serde_json::Value>, StoreError> {
-        let payload: FramePayload<Vec<u8>> =
-            rmp_serde::from_slice(msgpack).map_err(|e| StoreError::Serialization(Box::new(e)))?;
+        let payload = Self::decode_frame_payload_raw(msgpack)?;
         let event = payload.event;
         let decoded_payload = match event.header.event_kind {
             EventKind::SYSTEM_BATCH_BEGIN | EventKind::SYSTEM_BATCH_COMMIT => {
@@ -795,31 +798,6 @@ impl Reader {
         })
     }
 
-    /// Read multiple events by disk position. Groups by segment_id to minimize
-    /// mmap lookups — one `get_or_map_sealed` call per unique segment instead
-    /// of one per event. Returns results in the same order as `positions`.
-    pub(crate) fn read_entries_batch(
-        &self,
-        positions: &[&DiskPos],
-    ) -> Result<Vec<StoredEvent<serde_json::Value>>, StoreError> {
-        // Fast path: if all positions are from sealed segments, group by segment
-        // to amortize the mmap lookup cost.
-        //
-        // We still use read_entry per position (which dispatches to mmap or fd
-        // internally), but the mmap cache ensures each segment is mapped only once.
-        // The DashMap lookup for a cached mmap is O(1) — the grouping optimization
-        // would only save the DashMap hash overhead, which is negligible.
-        //
-        // The real optimization here: the mmap is populated on first access and
-        // stays cached for all subsequent reads from the same segment. Sequential
-        // positions within a segment benefit from OS page-cache locality.
-        let mut results = Vec::with_capacity(positions.len());
-        for pos in positions {
-            results.push(self.read_entry(pos)?);
-        }
-        Ok(results)
-    }
-
     /// Read a single event by disk position, skipping Coordinate construction.
     /// Returns `Event<serde_json::Value>` directly — suitable for projection
     /// replay where only the event payload matters.
@@ -923,6 +901,100 @@ impl Reader {
         let mut results = Vec::with_capacity(positions.len());
         for pos in positions {
             results.push(self.read_event_only(pos)?);
+        }
+        Ok(results)
+    }
+
+    /// Read a single event by disk position, leaving the payload as raw
+    /// MessagePack bytes.
+    pub(crate) fn read_event_raw_only(&self, pos: &DiskPos) -> Result<Event<Vec<u8>>, StoreError> {
+        if self.is_sealed(pos.segment_id) {
+            return self.read_event_raw_only_mmap(pos);
+        }
+
+        let mut buf = self.acquire_buffer(pos.length as usize);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            let segment_id = pos.segment_id;
+            let offset = pos.offset;
+            self.with_fd(segment_id, |f| {
+                let mut total_read = 0;
+                while total_read < buf.len() {
+                    let n = f
+                        .read_at(&mut buf[total_read..], offset + total_read as u64)
+                        .map_err(StoreError::Io)?;
+                    if n == 0 {
+                        return Err(StoreError::corrupt_eof(segment_id));
+                    }
+                    total_read += n;
+                }
+                Ok(())
+            })?;
+        }
+        #[cfg(not(unix))]
+        {
+            use std::io::{Seek, SeekFrom};
+            let offset = pos.offset;
+            self.with_fd(pos.segment_id, |f| {
+                f.seek(SeekFrom::Start(offset)).map_err(StoreError::Io)?;
+                f.read_exact(&mut buf).map_err(StoreError::Io)
+            })?;
+        }
+
+        let result = segment::frame_decode(&buf).map_err(|e| match e {
+            segment::FrameDecodeError::CrcMismatch { .. } => StoreError::CrcMismatch {
+                segment_id: pos.segment_id,
+                offset: pos.offset,
+            },
+            segment::FrameDecodeError::TooShort | segment::FrameDecodeError::Truncated { .. } => {
+                StoreError::corrupt_frame(pos.segment_id, e.to_string())
+            }
+        });
+        let (msgpack, _) = match result {
+            Ok(v) => v,
+            Err(e) => {
+                self.release_buffer(buf);
+                return Err(e);
+            }
+        };
+        let payload = Self::decode_frame_payload_raw(msgpack)?;
+        self.release_buffer(buf);
+        Ok(payload.event)
+    }
+
+    fn read_event_raw_only_mmap(&self, pos: &DiskPos) -> Result<Event<Vec<u8>>, StoreError> {
+        let mmap_ref = self.get_or_map_sealed(pos.segment_id)?;
+        let mmap: &memmap2::Mmap = mmap_ref.value();
+        let start =
+            usize::try_from(pos.offset).map_err(|_| StoreError::corrupt_eof(pos.segment_id))?;
+        let end = start + pos.length as usize;
+        if end > mmap.len() {
+            return Err(StoreError::corrupt_eof(pos.segment_id));
+        }
+        let frame_buf = &mmap[start..end];
+        let (msgpack, _) = segment::frame_decode(frame_buf).map_err(|e| match e {
+            segment::FrameDecodeError::CrcMismatch { .. } => StoreError::CrcMismatch {
+                segment_id: pos.segment_id,
+                offset: pos.offset,
+            },
+            segment::FrameDecodeError::TooShort | segment::FrameDecodeError::Truncated { .. } => {
+                StoreError::corrupt_frame(pos.segment_id, e.to_string())
+            }
+        })?;
+        let payload = Self::decode_frame_payload_raw(msgpack)?;
+        Ok(payload.event)
+    }
+
+    /// Read events by disk position, leaving payloads as raw MessagePack bytes.
+    pub(crate) fn read_raw_events_batch(
+        &self,
+        positions: &[&DiskPos],
+    ) -> Result<Vec<Event<Vec<u8>>>, StoreError> {
+        let mut results = Vec::with_capacity(positions.len());
+        for pos in positions {
+            results.push(self.read_event_raw_only(pos)?);
         }
         Ok(results)
     }

@@ -202,6 +202,33 @@ fn bench_cold_start_paths(c: &mut Criterion) {
             },
         );
 
+        // close-only: reopen happens in setup, timing captures only artifact
+        // write and shutdown lifecycle cost.
+        group.bench_with_input(
+            BenchmarkId::new("reopen_close_only", count),
+            &count,
+            |b, &_count| {
+                b.iter_batched(
+                    || {
+                        let iter_dir = TempDir::new().expect("create iteration dir");
+                        copy_dir_recursive(default_fixture.path(), iter_dir.path());
+                        let config = StoreConfig {
+                            data_dir: iter_dir.path().to_path_buf(),
+                            ..StoreConfig::new("")
+                        };
+                        (
+                            Store::open(config).expect("reopen populated store"),
+                            iter_dir,
+                        )
+                    },
+                    |(store, _iter_dir)| {
+                        store.close().expect("close");
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+
         group.bench_with_input(
             BenchmarkId::new("open_mmap_snapshot", count),
             &count,

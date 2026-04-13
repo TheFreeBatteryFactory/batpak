@@ -255,11 +255,6 @@ impl StringInterner {
         interner
     }
 
-    /// Reset the interner to its empty state while preserving the sentinel slot.
-    pub(crate) fn reset(&self) {
-        self.install_snapshot_iter(std::iter::empty());
-    }
-
     /// Replace the current contents with a snapshot that includes the sentinel
     /// at slot 0, matching the cold-start artifact formats.
     pub(crate) fn replace_from_full_snapshot(&self, strings: &[String]) {

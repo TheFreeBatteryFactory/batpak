@@ -8,31 +8,50 @@
 use crate::coordinate::Coordinate;
 use crate::event::HashChain;
 use crate::store::checkpoint::WatermarkInfo;
-use crate::store::index::{DiskPos, IndexEntry, StoreIndex};
+use crate::store::index::{
+    recommended_restore_chunk_count, DiskPos, IndexEntry, RoutingSummary, StoreIndex,
+};
 use crate::store::sidx::{kind_to_raw, raw_to_kind};
 use crate::store::StoreError;
 use memmap2::Mmap;
+use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use tempfile::NamedTempFile;
 
 pub(crate) const MMAP_INDEX_MAGIC: &[u8; 6] = b"FBATIX";
-pub(crate) const MMAP_INDEX_VERSION: u16 = 1;
+pub(crate) const MMAP_INDEX_VERSION: u16 = 2;
 pub(crate) const MMAP_INDEX_FILENAME: &str = "index.fbati";
 
 const PREFIX_LEN: usize = 6 + 2 + 4;
-const HEADER_TAIL_LEN: usize = 8 + 8 + 8 + 4 + 8 + 8;
-const HEADER_LEN: usize = PREFIX_LEN + HEADER_TAIL_LEN;
+const HEADER_TAIL_LEN_V1: usize = 8 + 8 + 8 + 4 + 8 + 8;
+const HEADER_TAIL_LEN_V2: usize = HEADER_TAIL_LEN_V1 + 8;
+const HEADER_LEN_V1: usize = PREFIX_LEN + HEADER_TAIL_LEN_V1;
+const HEADER_LEN_V2: usize = PREFIX_LEN + HEADER_TAIL_LEN_V2;
 const MMAP_ENTRY_SIZE: usize = 162;
 
 struct LoadedMmapIndex {
     mmap: Mmap,
     interner_strings: Vec<String>,
+    routing: RoutingSummary,
     entries_offset: usize,
     entry_count: u64,
     watermark: WatermarkInfo,
     stored_allocator: u64,
+}
+
+pub(crate) struct LoadedMmapSnapshot {
+    pub(crate) entries: Vec<IndexEntry>,
+    pub(crate) interner_strings: Vec<String>,
+    pub(crate) watermark: WatermarkInfo,
+    pub(crate) stored_allocator: u64,
+    pub(crate) routing: RoutingSummary,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MmapSummaryDataV2 {
+    routing: RoutingSummary,
 }
 
 fn reject_symlink_leaf(path: &Path) -> Result<(), StoreError> {
@@ -175,10 +194,16 @@ pub(crate) fn write_mmap_index(
 ) -> Result<(), StoreError> {
     let mut entries = index.all_entries();
     entries.sort_by_key(|entry| entry.global_sequence);
+    let routing = RoutingSummary::from_sorted_entries(
+        &entries,
+        recommended_restore_chunk_count(entries.len()),
+    );
 
     let mut interner_strings = vec![String::new()];
     interner_strings.extend(index.interner.to_snapshot());
     let interner_bytes = rmp_serde::to_vec_named(&interner_strings)
+        .map_err(|e| StoreError::Serialization(Box::new(e)))?;
+    let summary_bytes = rmp_serde::to_vec_named(&MmapSummaryDataV2 { routing })
         .map_err(|e| StoreError::Serialization(Box::new(e)))?;
 
     let interner_count = u32::try_from(interner_strings.len())
@@ -187,18 +212,22 @@ pub(crate) fn write_mmap_index(
         .map_err(|_| StoreError::ser_msg("entry count too large for mmap index"))?;
     let interner_bytes_len = u64::try_from(interner_bytes.len())
         .map_err(|_| StoreError::ser_msg("interner payload too large for mmap index"))?;
+    let summary_bytes_len = u64::try_from(summary_bytes.len())
+        .map_err(|_| StoreError::ser_msg("summary payload too large for mmap index"))?;
 
-    let mut header_tail = Vec::with_capacity(HEADER_TAIL_LEN);
+    let mut header_tail = Vec::with_capacity(HEADER_TAIL_LEN_V2);
     header_tail.extend_from_slice(&watermark_segment_id.to_le_bytes());
     header_tail.extend_from_slice(&watermark_offset.to_le_bytes());
     header_tail.extend_from_slice(&index.global_sequence().to_le_bytes());
     header_tail.extend_from_slice(&interner_count.to_le_bytes());
     header_tail.extend_from_slice(&entry_count.to_le_bytes());
     header_tail.extend_from_slice(&interner_bytes_len.to_le_bytes());
+    header_tail.extend_from_slice(&summary_bytes_len.to_le_bytes());
 
     let mut hasher = crc32fast::Hasher::new();
     hasher.update(&header_tail);
     hasher.update(&interner_bytes);
+    hasher.update(&summary_bytes);
 
     let final_path = data_dir.join(MMAP_INDEX_FILENAME);
     reject_symlink_leaf(&final_path)?;
@@ -216,6 +245,7 @@ pub(crate) fn write_mmap_index(
             .map_err(StoreError::Io)?;
         writer.write_all(&header_tail).map_err(StoreError::Io)?;
         writer.write_all(&interner_bytes).map_err(StoreError::Io)?;
+        writer.write_all(&summary_bytes).map_err(StoreError::Io)?;
 
         let mut buf = [0u8; MMAP_ENTRY_SIZE];
         for entry in &entries {
@@ -250,7 +280,6 @@ pub(crate) fn write_mmap_index(
 
 fn try_load_mmap_index(data_dir: &Path) -> Option<LoadedMmapIndex> {
     let path = data_dir.join(MMAP_INDEX_FILENAME);
-    let mut header = [0u8; HEADER_LEN];
     let mut file = match File::open(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
@@ -265,7 +294,8 @@ fn try_load_mmap_index(data_dir: &Path) -> Option<LoadedMmapIndex> {
         }
     };
 
-    if let Err(error) = file.read_exact(&mut header) {
+    let mut prefix = [0u8; PREFIX_LEN];
+    if let Err(error) = file.read_exact(&mut prefix) {
         tracing::warn!(
             target: "batpak::mmap_index",
             path = %path.display(),
@@ -275,7 +305,7 @@ fn try_load_mmap_index(data_dir: &Path) -> Option<LoadedMmapIndex> {
         return None;
     }
 
-    if &header[..6] != MMAP_INDEX_MAGIC {
+    if &prefix[..6] != MMAP_INDEX_MAGIC {
         tracing::warn!(
             target: "batpak::mmap_index",
             path = %path.display(),
@@ -284,8 +314,8 @@ fn try_load_mmap_index(data_dir: &Path) -> Option<LoadedMmapIndex> {
         return None;
     }
 
-    let version = u16::from_le_bytes(header[6..8].try_into().expect("header slice length"));
-    if version != MMAP_INDEX_VERSION {
+    let version = u16::from_le_bytes(prefix[6..8].try_into().expect("prefix slice length"));
+    if version != 1 && version != MMAP_INDEX_VERSION {
         tracing::warn!(
             target: "batpak::mmap_index",
             path = %path.display(),
@@ -296,43 +326,75 @@ fn try_load_mmap_index(data_dir: &Path) -> Option<LoadedMmapIndex> {
         return None;
     }
 
-    let expected_crc = u32::from_le_bytes(header[8..12].try_into().expect("header slice length"));
-    let mut cursor = 12usize;
+    let header_tail_len = if version == 1 {
+        HEADER_TAIL_LEN_V1
+    } else {
+        HEADER_TAIL_LEN_V2
+    };
+    let header_len = if version == 1 {
+        HEADER_LEN_V1
+    } else {
+        HEADER_LEN_V2
+    };
+    let mut header_tail = vec![0u8; header_tail_len];
+    if let Err(error) = file.read_exact(&mut header_tail) {
+        tracing::warn!(
+            target: "batpak::mmap_index",
+            path = %path.display(),
+            error = %error,
+            "mmap index header tail is unreadable"
+        );
+        return None;
+    }
+
+    let expected_crc = u32::from_le_bytes(prefix[8..12].try_into().expect("prefix slice length"));
+    let mut cursor = 0usize;
     let watermark_segment_id = u64::from_le_bytes(
-        header[cursor..cursor + 8]
+        header_tail[cursor..cursor + 8]
             .try_into()
-            .expect("header slice length"),
+            .expect("tail slice length"),
     );
     cursor += 8;
     let watermark_offset = u64::from_le_bytes(
-        header[cursor..cursor + 8]
+        header_tail[cursor..cursor + 8]
             .try_into()
-            .expect("header slice length"),
+            .expect("tail slice length"),
     );
     cursor += 8;
     let stored_allocator = u64::from_le_bytes(
-        header[cursor..cursor + 8]
+        header_tail[cursor..cursor + 8]
             .try_into()
-            .expect("header slice length"),
+            .expect("tail slice length"),
     );
     cursor += 8;
     let interner_count = u32::from_le_bytes(
-        header[cursor..cursor + 4]
+        header_tail[cursor..cursor + 4]
             .try_into()
-            .expect("header slice length"),
+            .expect("tail slice length"),
     );
     cursor += 4;
     let entry_count = u64::from_le_bytes(
-        header[cursor..cursor + 8]
+        header_tail[cursor..cursor + 8]
             .try_into()
-            .expect("header slice length"),
+            .expect("tail slice length"),
     );
     cursor += 8;
     let interner_bytes_len = u64::from_le_bytes(
-        header[cursor..cursor + 8]
+        header_tail[cursor..cursor + 8]
             .try_into()
-            .expect("header slice length"),
+            .expect("tail slice length"),
     );
+    cursor += 8;
+    let summary_bytes_len = if version == 1 {
+        0usize
+    } else {
+        usize::try_from(u64::from_le_bytes(
+            header_tail[cursor..cursor + 8]
+                .try_into()
+                .expect("tail slice length"),
+        ))
+        .ok()?
+    };
 
     let metadata = match file.metadata() {
         Ok(meta) => meta,
@@ -391,13 +453,24 @@ fn try_load_mmap_index(data_dir: &Path) -> Option<LoadedMmapIndex> {
             return None;
         }
     };
-    let entries_offset = match HEADER_LEN.checked_add(interner_bytes_len) {
+    let summary_offset = match header_len.checked_add(interner_bytes_len) {
         Some(offset) => offset,
         None => {
             tracing::warn!(
                 target: "batpak::mmap_index",
                 path = %path.display(),
                 "mmap index header offset overflowed"
+            );
+            return None;
+        }
+    };
+    let entries_offset = match summary_offset.checked_add(summary_bytes_len) {
+        Some(offset) => offset,
+        None => {
+            tracing::warn!(
+                target: "batpak::mmap_index",
+                path = %path.display(),
+                "mmap index summary offset overflowed"
             );
             return None;
         }
@@ -477,7 +550,7 @@ fn try_load_mmap_index(data_dir: &Path) -> Option<LoadedMmapIndex> {
         return None;
     }
 
-    let interner_slice = &mmap[HEADER_LEN..entries_offset];
+    let interner_slice = &mmap[header_len..summary_offset];
     let interner_strings: Vec<String> = match rmp_serde::from_slice(interner_slice) {
         Ok(strings) => strings,
         Err(error) => {
@@ -502,9 +575,28 @@ fn try_load_mmap_index(data_dir: &Path) -> Option<LoadedMmapIndex> {
         return None;
     }
 
+    let routing = if version == 1 {
+        RoutingSummary::default()
+    } else {
+        let summary_slice = &mmap[summary_offset..entries_offset];
+        match rmp_serde::from_slice::<MmapSummaryDataV2>(summary_slice) {
+            Ok(summary) => summary.routing,
+            Err(error) => {
+                tracing::warn!(
+                    target: "batpak::mmap_index",
+                    path = %path.display(),
+                    error = %error,
+                    "failed to decode mmap index summary section"
+                );
+                return None;
+            }
+        }
+    };
+
     Some(LoadedMmapIndex {
         mmap,
         interner_strings,
+        routing,
         entries_offset,
         entry_count,
         watermark: WatermarkInfo {
@@ -517,10 +609,21 @@ fn try_load_mmap_index(data_dir: &Path) -> Option<LoadedMmapIndex> {
 
 /// Restore the index from the mmap-first artifact. Returns the watermark and
 /// allocator position if the artifact was present and valid.
+#[cfg(test)]
 pub(crate) fn try_restore_mmap_index(
     index: &StoreIndex,
     data_dir: &Path,
 ) -> Option<(WatermarkInfo, u64)> {
+    let loaded = try_load_mmap_snapshot(data_dir)?;
+    index.clear();
+    index
+        .interner
+        .replace_from_full_snapshot(&loaded.interner_strings);
+    index.restore_sorted_entries(loaded.entries, loaded.stored_allocator);
+    Some((loaded.watermark, loaded.stored_allocator))
+}
+
+pub(crate) fn try_load_mmap_snapshot(data_dir: &Path) -> Option<LoadedMmapSnapshot> {
     let loaded = try_load_mmap_index(data_dir)?;
 
     let entry_count = match usize::try_from(loaded.entry_count) {
@@ -535,83 +638,99 @@ pub(crate) fn try_restore_mmap_index(
     };
     let entries_end = loaded.entries_offset + (entry_count * MMAP_ENTRY_SIZE);
     let entries_slice = &loaded.mmap[loaded.entries_offset..entries_end];
-    index.clear();
-    index
-        .interner
-        .replace_from_full_snapshot(&loaded.interner_strings);
+    let chunk_ranges = if loaded.routing.chunks.is_empty() {
+        let chunk_count = recommended_restore_chunk_count(entry_count);
+        let base = entry_count / chunk_count;
+        let remainder = entry_count % chunk_count;
+        let mut start = 0usize;
+        let mut ranges = Vec::new();
+        for chunk_index in 0..chunk_count {
+            let len = base + usize::from(chunk_index < remainder);
+            if len == 0 {
+                continue;
+            }
+            ranges.push((start, len));
+            start += len;
+        }
+        ranges
+    } else {
+        loaded
+            .routing
+            .chunks
+            .iter()
+            .map(|chunk| {
+                let start = usize::try_from(chunk.start).ok()?;
+                let len = usize::try_from(chunk.len).ok()?;
+                Some((start, len))
+            })
+            .collect::<Option<Vec<_>>>()?
+    };
+
+    let mut per_chunk = chunk_ranges
+        .into_par_iter()
+        .enumerate()
+        .map(|(chunk_idx, (start, len))| {
+            let start_byte = start * MMAP_ENTRY_SIZE;
+            let end_byte = start_byte + (len * MMAP_ENTRY_SIZE);
+            let mut rebuilt = Vec::with_capacity(len);
+            for chunk in entries_slice[start_byte..end_byte].chunks_exact(MMAP_ENTRY_SIZE) {
+                let entry = MmapIndexEntry::decode_from(chunk)?;
+                let entity = loaded
+                    .interner_strings
+                    .get(entry.entity_idx as usize)
+                    .ok_or_else(|| StoreError::ser_msg("mmap index entity_idx is out of range"))?;
+                let scope = loaded
+                    .interner_strings
+                    .get(entry.scope_idx as usize)
+                    .ok_or_else(|| StoreError::ser_msg("mmap index scope_idx is out of range"))?;
+                let coord = Coordinate::new(entity, scope)?;
+                rebuilt.push(IndexEntry {
+                    event_id: entry.event_id,
+                    correlation_id: entry.correlation_id,
+                    causation_id: (entry.causation_id != 0).then_some(entry.causation_id),
+                    coord,
+                    entity_id: crate::store::interner::InternId(entry.entity_idx),
+                    scope_id: crate::store::interner::InternId(entry.scope_idx),
+                    kind: raw_to_kind(entry.kind),
+                    wall_ms: entry.wall_ms,
+                    clock: entry.clock,
+                    hash_chain: HashChain {
+                        prev_hash: entry.prev_hash,
+                        event_hash: entry.event_hash,
+                    },
+                    disk_pos: DiskPos {
+                        segment_id: entry.segment_id,
+                        offset: entry.frame_offset,
+                        length: entry.frame_length,
+                    },
+                    global_sequence: entry.global_sequence,
+                });
+            }
+            Ok::<_, StoreError>((chunk_idx, rebuilt))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    per_chunk.sort_by_key(|(chunk_idx, _)| *chunk_idx);
     let mut rebuilt_entries = Vec::with_capacity(entry_count);
-
-    for chunk in entries_slice.chunks_exact(MMAP_ENTRY_SIZE) {
-        let entry = match MmapIndexEntry::decode_from(chunk) {
-            Ok(entry) => entry,
-            Err(error) => {
-                tracing::warn!(
-                    target: "batpak::mmap_index",
-                    error = %error,
-                    "mmap index restore failed while decoding an entry"
-                );
-                return None;
-            }
-        };
-        let entity = match loaded.interner_strings.get(entry.entity_idx as usize) {
-            Some(entity) => entity,
-            None => {
-                tracing::warn!(
-                    target: "batpak::mmap_index",
-                    entity_idx = entry.entity_idx,
-                    "mmap index entity_idx is out of range"
-                );
-                return None;
-            }
-        };
-        let scope = match loaded.interner_strings.get(entry.scope_idx as usize) {
-            Some(scope) => scope,
-            None => {
-                tracing::warn!(
-                    target: "batpak::mmap_index",
-                    scope_idx = entry.scope_idx,
-                    "mmap index scope_idx is out of range"
-                );
-                return None;
-            }
-        };
-
-        let coord = match Coordinate::new(entity, scope) {
-            Ok(coord) => coord,
-            Err(error) => {
-                tracing::warn!(
-                    target: "batpak::mmap_index",
-                    error = %error,
-                    "mmap index restore failed while rebuilding a coordinate"
-                );
-                return None;
-            }
-        };
-        rebuilt_entries.push(IndexEntry {
-            event_id: entry.event_id,
-            correlation_id: entry.correlation_id,
-            causation_id: (entry.causation_id != 0).then_some(entry.causation_id),
-            coord,
-            entity_id: crate::store::interner::InternId(entry.entity_idx),
-            scope_id: crate::store::interner::InternId(entry.scope_idx),
-            kind: raw_to_kind(entry.kind),
-            wall_ms: entry.wall_ms,
-            clock: entry.clock,
-            hash_chain: HashChain {
-                prev_hash: entry.prev_hash,
-                event_hash: entry.event_hash,
-            },
-            disk_pos: DiskPos {
-                segment_id: entry.segment_id,
-                offset: entry.frame_offset,
-                length: entry.frame_length,
-            },
-            global_sequence: entry.global_sequence,
-        });
+    for (_, chunk_entries) in per_chunk {
+        rebuilt_entries.extend(chunk_entries);
     }
+    let routing = if loaded.routing.chunks.is_empty() {
+        RoutingSummary::from_sorted_entries(
+            &rebuilt_entries,
+            recommended_restore_chunk_count(rebuilt_entries.len()),
+        )
+    } else {
+        loaded.routing.clone()
+    };
 
-    index.restore_sorted_entries(rebuilt_entries, loaded.stored_allocator);
-    Some((loaded.watermark, loaded.stored_allocator))
+    Some(LoadedMmapSnapshot {
+        entries: rebuilt_entries,
+        interner_strings: loaded.interner_strings,
+        watermark: loaded.watermark,
+        stored_allocator: loaded.stored_allocator,
+        routing,
+    })
 }
 
 #[cfg(test)]
@@ -659,6 +778,13 @@ mod tests {
         let src = make_index(8);
         write_mmap_index(&src, tmp.path(), 7, 512).expect("write mmap index");
 
+        let snapshot = try_load_mmap_snapshot(tmp.path()).expect("load snapshot");
+        assert_eq!(snapshot.routing.entry_count, 8);
+        assert!(
+            !snapshot.routing.chunks.is_empty(),
+            "v2 mmap index must persist chunk summaries"
+        );
+
         let dst = StoreIndex::new();
         let restored = try_restore_mmap_index(&dst, tmp.path()).expect("restore");
         assert_eq!(restored.0.watermark_segment_id, 7);
@@ -695,6 +821,56 @@ mod tests {
         assert!(
             try_restore_mmap_index(&StoreIndex::new(), tmp.path()).is_none(),
             "mmap index must be ignored when the watermark segment is missing"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::cast_possible_truncation)] // test constructs v1 binary format with known small values
+    fn v1_mmap_fallback_is_still_readable() {
+        let tmp = TempDir::new().expect("temp dir");
+        let segment_path = tmp.path().join(crate::store::segment::segment_filename(7));
+        std::fs::write(&segment_path, vec![0u8; 4096]).expect("segment file");
+
+        let idx = make_index(4);
+        let mut entries = idx.all_entries();
+        entries.sort_by_key(|entry| entry.global_sequence);
+        let mut interner_strings = vec![String::new()];
+        interner_strings.extend(idx.interner.to_snapshot());
+        let interner_bytes = rmp_serde::to_vec_named(&interner_strings).expect("interner bytes");
+        let mut header_tail = Vec::with_capacity(HEADER_TAIL_LEN_V1);
+        header_tail.extend_from_slice(&7u64.to_le_bytes());
+        header_tail.extend_from_slice(&128u64.to_le_bytes());
+        header_tail.extend_from_slice(&idx.global_sequence().to_le_bytes());
+        header_tail.extend_from_slice(&(interner_strings.len() as u32).to_le_bytes());
+        header_tail.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+        header_tail.extend_from_slice(&(interner_bytes.len() as u64).to_le_bytes());
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MMAP_INDEX_MAGIC);
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&header_tail);
+        bytes.extend_from_slice(&interner_bytes);
+
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&header_tail);
+        hasher.update(&interner_bytes);
+        let mut buf = [0u8; MMAP_ENTRY_SIZE];
+        for entry in &entries {
+            entry_to_mmap(entry).encode_into(&mut buf);
+            hasher.update(&buf);
+            bytes.extend_from_slice(&buf);
+        }
+        let crc = hasher.finalize();
+        bytes[8..12].copy_from_slice(&crc.to_le_bytes());
+        std::fs::write(tmp.path().join(MMAP_INDEX_FILENAME), bytes).expect("write v1 mmap index");
+
+        let snapshot = try_load_mmap_snapshot(tmp.path()).expect("load v1 snapshot");
+        assert_eq!(snapshot.entries.len(), 4);
+        assert_eq!(snapshot.routing.entry_count, 4);
+        assert!(
+            !snapshot.routing.chunks.is_empty(),
+            "v1 fallback should synthesize chunk summaries on load"
         );
     }
 }

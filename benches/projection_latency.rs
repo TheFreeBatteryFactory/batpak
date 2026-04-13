@@ -13,12 +13,43 @@ struct Counter {
     count: u64,
 }
 
-impl EventSourced<serde_json::Value> for Counter {
+impl EventSourced for Counter {
+    type Input = batpak::prelude::ValueInput;
+
     fn apply_event(&mut self, _event: &Event<serde_json::Value>) {
         self.count += 1;
     }
 
     fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
+        if events.is_empty() {
+            return None;
+        }
+        let mut state = Self::default();
+        for event in events {
+            state.apply_event(event);
+        }
+        Some(state)
+    }
+
+    fn relevant_event_kinds() -> &'static [EventKind] {
+        static KINDS: [EventKind; 1] = [EventKind::custom(0xF, 1)];
+        &KINDS
+    }
+}
+
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
+struct CounterRaw {
+    count: u64,
+}
+
+impl EventSourced for CounterRaw {
+    type Input = batpak::prelude::RawMsgpackInput;
+
+    fn apply_event(&mut self, _event: &Event<Vec<u8>>) {
+        self.count += 1;
+    }
+
+    fn from_events(events: &[Event<Vec<u8>>]) -> Option<Self> {
         if events.is_empty() {
             return None;
         }
@@ -83,6 +114,24 @@ fn bench_projection_lanes(c: &mut Criterion) {
         );
     });
 
+    group.bench_function("projection_first_pass_raw", |b| {
+        b.iter_batched(
+            || {
+                let config = StoreConfig {
+                    data_dir: fixture_dir.path().to_path_buf(),
+                    ..StoreConfig::new("")
+                };
+                Store::open(config).expect("reopen populated store")
+            },
+            |store| {
+                let _: Option<CounterRaw> = store
+                    .project("bench:first-pass", &Freshness::Consistent)
+                    .expect("project raw");
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
     // project + close: measures the full lifecycle including artifact writes.
     // Kept as a separate lane so "projection cost" and "lifecycle cost" are
     // never conflated.
@@ -128,6 +177,17 @@ fn bench_projection_lanes(c: &mut Criterion) {
         });
     });
 
+    let mut replay_raw_index = 0usize;
+    group.bench_function("projection_replay_only_raw", |b| {
+        b.iter(|| {
+            let entity = &replay_entities[replay_raw_index % replay_entities.len()];
+            replay_raw_index += 1;
+            let _: Option<CounterRaw> = replay_store
+                .project(entity, &Freshness::Consistent)
+                .expect("project raw replay only");
+        });
+    });
+
     let dir = TempDir::new().expect("create temp dir");
     let config = StoreConfig {
         data_dir: dir.path().join("data"),
@@ -153,6 +213,14 @@ fn bench_projection_lanes(c: &mut Criterion) {
         });
     });
 
+    group.bench_function("projection_cache_hit_raw", |b| {
+        b.iter(|| {
+            let _: Option<CounterRaw> = store
+                .project("bench:entity", &Freshness::Consistent)
+                .expect("project raw");
+        });
+    });
+
     let mut miss_index = 0usize;
     group.bench_function("projection_cache_miss", |b| {
         b.iter(|| {
@@ -161,6 +229,17 @@ fn bench_projection_lanes(c: &mut Criterion) {
             let _: Option<Counter> = store
                 .project(entity, &Freshness::Consistent)
                 .expect("project miss");
+        });
+    });
+
+    let mut miss_raw_index = 0usize;
+    group.bench_function("projection_cache_miss_raw", |b| {
+        b.iter(|| {
+            let entity = &miss_entities[miss_raw_index % miss_entities.len()];
+            miss_raw_index += 1;
+            let _: Option<CounterRaw> = store
+                .project(entity, &Freshness::Consistent)
+                .expect("project raw miss");
         });
     });
 

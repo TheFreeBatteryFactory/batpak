@@ -1,14 +1,76 @@
 use crate::coordinate::Coordinate;
 use crate::event::{Event, EventKind};
 
-/// `EventSourced<P>`: backward-looking fold. Replay events to reconstruct state.
-/// P is generic — NO serde_json dependency in the trait.
-/// Store uses EventSourced<serde_json::Value>. [SPEC:src/event/sourcing.rs]
-pub trait EventSourced<P>: Sized {
-    /// Reconstructs state by folding over a slice of events; returns `None` if the slice is empty or invalid.
-    fn from_events(events: &[Event<P>]) -> Option<Self>;
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Internal-friendly marker describing which replay lane the store should use
+/// for a projection. This stays tiny and data-oriented on purpose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectionMode {
+    /// Decode projection payloads into `serde_json::Value`.
+    Value,
+    /// Keep projection payloads as raw MessagePack bytes.
+    RawMsgpack,
+}
+
+/// Marker trait selecting how projection replay decodes event payloads.
+///
+/// The store owns the concrete replay pipeline for each input mode. Projection
+/// implementations pick the mode via their associated `Input` type and then
+/// operate over `Event<<Self::Input as ProjectionInput>::Payload>`.
+pub trait ProjectionInput: sealed::Sealed + Send + Sync + 'static {
+    /// Payload type produced by the store for this replay mode.
+    type Payload: Clone + Send + Sync + 'static;
+    /// Replay lane selected for this projection input type.
+    const MODE: ProjectionMode;
+}
+
+/// Default projection replay mode: payloads are decoded into `serde_json::Value`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ValueInput;
+
+impl sealed::Sealed for ValueInput {}
+
+impl ProjectionInput for ValueInput {
+    type Payload = serde_json::Value;
+    const MODE: ProjectionMode = ProjectionMode::Value;
+}
+
+/// Raw replay mode: payloads remain in their original MessagePack bytes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RawMsgpackInput;
+
+impl sealed::Sealed for RawMsgpackInput {}
+
+impl ProjectionInput for RawMsgpackInput {
+    type Payload = Vec<u8>;
+    const MODE: ProjectionMode = ProjectionMode::RawMsgpack;
+}
+
+/// Convenience alias for the payload shape used by a projection type.
+pub type ProjectionPayload<T> = <<T as EventSourced>::Input as ProjectionInput>::Payload;
+
+/// Convenience alias for the event shape used by a projection type.
+pub type ProjectionEvent<T> = Event<ProjectionPayload<T>>;
+
+/// `EventSourced`: backward-looking fold. Replay events to reconstruct state.
+///
+/// The associated `Input` selects the replay decode lane. The default and
+/// most ergonomic choice is [`ValueInput`], which preserves the current
+/// `serde_json::Value` projection behavior. Implement [`RawMsgpackInput`] only
+/// when the projection benefits from operating directly on raw MessagePack
+/// payload bytes.
+pub trait EventSourced: Sized {
+    /// Replay decode mode used for this projection.
+    type Input: ProjectionInput;
+
+    /// Reconstructs state by folding over a slice of events; returns `None`
+    /// if the slice is empty or invalid.
+    fn from_events(events: &[ProjectionEvent<Self>]) -> Option<Self>;
     /// Advances state by incorporating a single event.
-    fn apply_event(&mut self, event: &Event<P>);
+    fn apply_event(&mut self, event: &ProjectionEvent<Self>);
     /// Returns the event kinds this type cares about, used to filter store queries.
     /// The store uses this as a hard filter: only matching events are loaded from disk
     /// and passed to `from_events()`. Empty slice means "no filter — replay all events."

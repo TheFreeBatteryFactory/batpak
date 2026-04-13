@@ -18,7 +18,9 @@ struct BenchCounter {
     count: u64,
 }
 
-impl EventSourced<serde_json::Value> for BenchCounter {
+impl EventSourced for BenchCounter {
+    type Input = batpak::prelude::ValueInput;
+
     fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
         if events.is_empty() {
             return None;

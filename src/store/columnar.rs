@@ -32,7 +32,7 @@
 //! layout and fully vectorisable for AoSoA once LLVM sees the uniform stride.
 
 use crate::event::EventKind;
-use crate::store::index::{ClockKey, DiskPos, IndexEntry};
+use crate::store::index::{ClockKey, DiskPos, IndexEntry, RoutingSummary};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::any::TypeId;
@@ -359,12 +359,44 @@ impl SoAoSInner {
         }
     }
 
-    fn from_entries(entries: &[Arc<IndexEntry>]) -> Self {
-        let mut built = Self::new();
-        for entry in entries {
-            built.push(entry);
+    // Entity run indices are u64 for serialization portability; truncation is safe on 64-bit.
+    #[allow(clippy::cast_possible_truncation)]
+    fn from_restore_base(entries_by_entity: &[Arc<IndexEntry>], routing: &RoutingSummary) -> Self {
+        let mut groups = std::collections::HashMap::with_capacity(routing.entity_runs.len());
+        let mut scope_entities =
+            std::collections::HashMap::<Arc<str>, std::collections::HashSet<Arc<str>>>::new();
+
+        for run in &routing.entity_runs {
+            let start = run.start as usize;
+            let end = start + (run.len as usize);
+            let slice = &entries_by_entity[start..end];
+            if slice.is_empty() {
+                continue;
+            }
+            let entity = slice[0].coord.entity_arc();
+            let mut group = EntityGroup {
+                kinds: Vec::with_capacity(slice.len()),
+                sequences: Vec::with_capacity(slice.len()),
+                entries: Vec::with_capacity(slice.len()),
+                generation: slice.len() as u64,
+                cached_projections: std::collections::HashMap::new(),
+            };
+            for entry in slice {
+                group.kinds.push(entry.kind);
+                group.sequences.push(entry.global_sequence);
+                group.entries.push(Arc::clone(entry));
+                scope_entities
+                    .entry(entry.coord.scope_arc())
+                    .or_default()
+                    .insert(Arc::clone(&entity));
+            }
+            groups.insert(entity, group);
         }
-        built
+
+        Self {
+            groups,
+            scope_entities,
+        }
     }
 
     fn push(&mut self, entry: &Arc<IndexEntry>) {
@@ -583,19 +615,30 @@ impl ColumnarIndex {
         }
     }
 
-    pub(crate) fn rebuild_from_entries(&self, entries: &[Arc<IndexEntry>]) {
+    pub(crate) fn rebuild_from_restore_base(
+        &self,
+        entries_by_sequence: &[Arc<IndexEntry>],
+        entries_by_entity: &[Arc<IndexEntry>],
+        routing: &RoutingSummary,
+    ) {
         match &self.inner {
-            ColumnarVariant::SoA(lock) => *lock.write() = SoAInner::from_entries(entries),
+            ColumnarVariant::SoA(lock) => {
+                *lock.write() = SoAInner::from_entries(entries_by_sequence)
+            }
             #[cfg(test)]
-            ColumnarVariant::AoSoA8(lock) => *lock.write() = AoSoAInner::<8>::from_entries(entries),
+            ColumnarVariant::AoSoA8(lock) => {
+                *lock.write() = AoSoAInner::<8>::from_entries(entries_by_sequence)
+            }
             #[cfg(test)]
             ColumnarVariant::AoSoA16(lock) => {
-                *lock.write() = AoSoAInner::<16>::from_entries(entries)
+                *lock.write() = AoSoAInner::<16>::from_entries(entries_by_sequence)
             }
             ColumnarVariant::AoSoA64(lock) => {
-                *lock.write() = AoSoAInner::<64>::from_entries(entries)
+                *lock.write() = AoSoAInner::<64>::from_entries(entries_by_sequence)
             }
-            ColumnarVariant::SoAoS(lock) => *lock.write() = SoAoSInner::from_entries(entries),
+            ColumnarVariant::SoAoS(lock) => {
+                *lock.write() = SoAoSInner::from_restore_base(entries_by_entity, routing)
+            }
         }
     }
 
@@ -894,7 +937,12 @@ impl ScanIndex {
         }
     }
 
-    pub(crate) fn rebuild_from_entries(&self, entries: &[Arc<IndexEntry>]) {
+    pub(crate) fn rebuild_from_restore_base(
+        &self,
+        entries_by_sequence: &[Arc<IndexEntry>],
+        entries_by_entity: &[Arc<IndexEntry>],
+        routing: &RoutingSummary,
+    ) {
         self.by_fact.clear();
         self.scope_entities.clear();
 
@@ -902,7 +950,7 @@ impl ScanIndex {
             std::collections::HashMap::<EventKind, BTreeMap<ClockKey, Arc<IndexEntry>>>::new();
         let mut scope_entities = std::collections::HashMap::<Arc<str>, HashSet<Arc<str>>>::new();
 
-        for entry in entries {
+        for entry in entries_by_sequence {
             let key = ClockKey {
                 wall_ms: entry.wall_ms,
                 clock: entry.clock,
@@ -926,13 +974,13 @@ impl ScanIndex {
         }
 
         if let Some(idx) = &self.soa {
-            idx.rebuild_from_entries(entries);
+            idx.rebuild_from_restore_base(entries_by_sequence, entries_by_entity, routing);
         }
         if let Some(idx) = &self.entity_groups {
-            idx.rebuild_from_entries(entries);
+            idx.rebuild_from_restore_base(entries_by_sequence, entries_by_entity, routing);
         }
         if let Some(idx) = &self.tiles64 {
-            idx.rebuild_from_entries(entries);
+            idx.rebuild_from_restore_base(entries_by_sequence, entries_by_entity, routing);
         }
     }
 

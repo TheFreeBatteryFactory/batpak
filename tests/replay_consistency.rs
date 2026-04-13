@@ -14,7 +14,9 @@ struct Counter {
     count: u32,
 }
 
-impl EventSourced<serde_json::Value> for Counter {
+impl EventSourced for Counter {
+    type Input = batpak::prelude::ValueInput;
+
     fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
         Some(Self {
             count: u32::try_from(events.len()).expect("small test corpus"),

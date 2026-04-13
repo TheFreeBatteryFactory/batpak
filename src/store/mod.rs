@@ -808,11 +808,7 @@ impl Store<Open> {
         freshness: Freshness,
     ) -> ProjectionWatcher<T>
     where
-        T: EventSourced<serde_json::Value>
-            + serde::Serialize
-            + serde::de::DeserializeOwned
-            + Send
-            + 'static,
+        T: EventSourced + serde::Serialize + serde::de::DeserializeOwned + Send + 'static,
     {
         let sub = self.subscribe_lossy(&Region::entity(entity));
         let store = Arc::clone(self);
@@ -1206,12 +1202,11 @@ impl<State> Store<State> {
     /// # Errors
     /// Returns any replay, deserialization, cache, or disk-read error surfaced
     /// while reconstructing the projection state.
+    #[allow(private_bounds)] // replay lanes are store-internal; public projections select them via Input marker types
     pub fn project<T>(&self, entity: &str, freshness: &Freshness) -> Result<Option<T>, StoreError>
     where
-        T: EventSourced<serde_json::Value>
-            + serde::Serialize
-            + serde::de::DeserializeOwned
-            + 'static,
+        T: EventSourced + serde::Serialize + serde::de::DeserializeOwned + 'static,
+        T::Input: projection_flow::ReplayInput,
     {
         projection_flow::project(self, entity, freshness)
     }
@@ -1233,6 +1228,7 @@ impl<State> Store<State> {
     /// # Errors
     /// Returns any error surfaced by [`Store::project`] when the entity has
     /// changed and the projection must be rebuilt.
+    #[allow(private_bounds)] // replay lanes are store-internal; public projections select them via Input marker types
     pub fn project_if_changed<T>(
         &self,
         entity: &str,
@@ -1240,10 +1236,8 @@ impl<State> Store<State> {
         freshness: &Freshness,
     ) -> Result<Option<(u64, Option<T>)>, StoreError>
     where
-        T: EventSourced<serde_json::Value>
-            + serde::Serialize
-            + serde::de::DeserializeOwned
-            + 'static,
+        T: EventSourced + serde::Serialize + serde::de::DeserializeOwned + 'static,
+        T::Input: projection_flow::ReplayInput,
     {
         let current_generation = self.entity_generation(entity).unwrap_or(0);
         if current_generation == last_seen_generation {
@@ -1333,9 +1327,11 @@ pub struct ProjectionWatcher<T> {
     _phantom: std::marker::PhantomData<T>,
 }
 
+#[allow(private_bounds)] // watcher delta replay uses the same internal replay lanes as Store::project
 impl<T> ProjectionWatcher<T>
 where
-    T: EventSourced<serde_json::Value> + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    T: EventSourced + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    T::Input: projection_flow::ReplayInput,
 {
     /// Block until a new event arrives for the watched entity, then re-project
     /// and return the updated state. Returns `None` if the store is dropped
@@ -1383,9 +1379,9 @@ where
         };
         let positions: Vec<&crate::store::DiskPos> =
             delta_entries.iter().map(|entry| &entry.disk_pos).collect();
-        let stored_events = self.store.reader.read_entries_batch(&positions)?;
-        for stored in stored_events {
-            state.apply_event(&stored.event);
+        let events = projection_flow::read_projection_events::<T>(&self.store.reader, &positions)?;
+        for event in events {
+            state.apply_event(&event);
         }
         let new_watermark = delta_entries
             .last()

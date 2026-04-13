@@ -1,5 +1,6 @@
 use crate::coordinate::Coordinate;
-use crate::store::index::{DiskPos, IndexEntry, StoreIndex};
+use crate::store::index::{DiskPos, IndexEntry, RoutingSummary, StoreIndex};
+use crate::store::interner::StringInterner;
 use crate::store::reader::Reader;
 use crate::store::segment;
 use crate::store::StoreError;
@@ -30,6 +31,122 @@ pub struct OpenIndexReport {
     pub elapsed_us: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreSource {
+    Mmap,
+    Checkpoint,
+    SealedSidxRebuild,
+    FrameScanFallback,
+}
+
+struct RestorePlan {
+    source: RestoreSource,
+    entries: Vec<IndexEntry>,
+    interner_strings: Vec<String>,
+    allocator_hint: u64,
+    routing: RoutingSummary,
+    restored_entries: usize,
+    tail_entries: usize,
+}
+
+struct RestorePlanner<'a> {
+    reader: &'a Reader,
+    data_dir: &'a Path,
+    enable_checkpoint: bool,
+    enable_mmap_index: bool,
+}
+
+impl<'a> RestorePlanner<'a> {
+    fn build(&self) -> Result<RestorePlan, StoreError> {
+        if self.enable_mmap_index {
+            if let Some(snapshot) = crate::store::mmap_index::try_load_mmap_snapshot(self.data_dir)
+            {
+                return self.build_snapshot_plan(
+                    RestoreSource::Mmap,
+                    snapshot.entries,
+                    snapshot.interner_strings,
+                    snapshot.watermark,
+                    snapshot.stored_allocator,
+                    snapshot.routing,
+                );
+            }
+        }
+
+        if self.enable_checkpoint {
+            if let Some(snapshot) =
+                crate::store::checkpoint::try_load_checkpoint_snapshot(self.data_dir)
+            {
+                return self.build_snapshot_plan(
+                    RestoreSource::Checkpoint,
+                    snapshot.entries,
+                    snapshot.interner_strings,
+                    snapshot.watermark,
+                    snapshot.stored_allocator,
+                    snapshot.routing,
+                );
+            }
+        }
+
+        let (source, entries, interner_strings, allocator_hint, chunk_count) =
+            collect_rebuild_entries(self.reader, self.data_dir)?;
+        let routing = RoutingSummary::from_sorted_entries(&entries, chunk_count.max(1));
+        Ok(RestorePlan {
+            source,
+            restored_entries: entries.len(),
+            tail_entries: 0,
+            allocator_hint,
+            interner_strings,
+            routing,
+            entries,
+        })
+    }
+
+    #[allow(clippy::needless_pass_by_value)] // planner takes ownership of snapshot data
+    fn build_snapshot_plan(
+        &self,
+        source: RestoreSource,
+        mut snapshot_entries: Vec<IndexEntry>,
+        interner_strings: Vec<String>,
+        watermark: crate::store::checkpoint::WatermarkInfo,
+        stored_allocator: u64,
+        snapshot_routing: RoutingSummary,
+    ) -> Result<RestorePlan, StoreError> {
+        let interner = StringInterner::new();
+        interner.replace_from_full_snapshot(&interner_strings);
+        let tail_entries = collect_tail_entries(
+            &interner,
+            self.reader,
+            self.data_dir,
+            &watermark,
+            stored_allocator,
+        )?;
+        let restored_entries = snapshot_entries.len();
+        let tail_count = tail_entries.len();
+        snapshot_entries.extend(tail_entries);
+        snapshot_entries.sort_by_key(|entry| entry.global_sequence);
+        let chunk_count = usize::try_from(snapshot_routing.chunk_count)
+            .unwrap_or(1)
+            .max(1)
+            + usize::from(tail_count > 0);
+        let routing = RoutingSummary::from_sorted_entries(&snapshot_entries, chunk_count);
+
+        Ok(RestorePlan {
+            source,
+            allocator_hint: stored_allocator.max(
+                snapshot_entries
+                    .last()
+                    .map(|entry| entry.global_sequence.saturating_add(1))
+                    .unwrap_or(0),
+            ),
+            interner_strings: full_interner_snapshot(&interner),
+            routing,
+            entries: snapshot_entries,
+            restored_entries,
+            tail_entries: tail_count,
+        })
+    }
+}
+
 /// Open the index using the fastest available path:
 /// 1. Try mmap snapshot (`index.fbati`) → if valid, restore + replay tail.
 /// 2. Try checkpoint (`index.ckpt`) → if valid, restore + replay tail.
@@ -43,69 +160,30 @@ pub(crate) fn open_index(
     enable_mmap_index: bool,
 ) -> Result<OpenIndexReport, StoreError> {
     let t0 = std::time::Instant::now();
+    let planner = RestorePlanner {
+        reader,
+        data_dir,
+        enable_checkpoint,
+        enable_mmap_index,
+    };
+    let plan = planner.build()?;
 
-    if enable_mmap_index {
-        if let Some((watermark, stored_allocator)) =
-            crate::store::mmap_index::try_restore_mmap_index(index, data_dir)
-        {
-            let restored_entries = index.len();
-            tracing::info!(
-                "mmap index loaded: watermark segment {} offset {}, allocator {}, entries {}",
-                watermark.watermark_segment_id,
-                watermark.watermark_offset,
-                stored_allocator,
-                restored_entries,
-            );
-            replay_tail_segments(index, reader, data_dir, &watermark)?;
-            restore_cancelled_visibility_ranges(index, data_dir);
-            let tail_entries = index.len() - restored_entries;
-            return Ok(OpenIndexReport {
-                path: OpenIndexPath::Mmap,
-                restored_entries,
-                tail_entries,
-                elapsed_us: t0.elapsed().as_micros() as u64,
-            });
-        }
-        tracing::debug!("no valid mmap index, trying checkpoint path");
-    }
-    if enable_checkpoint {
-        if let Some((entries, interner_strings, watermark, stored_allocator)) =
-            crate::store::checkpoint::try_load_checkpoint(data_dir)
-        {
-            let restored_entries = entries.len();
-            tracing::info!(
-                "checkpoint v2 loaded: {} entries, {} interner strings, watermark segment {} offset {}, allocator {}",
-                restored_entries,
-                interner_strings.len(),
-                watermark.watermark_segment_id,
-                watermark.watermark_offset,
-                stored_allocator,
-            );
-            crate::store::checkpoint::restore_from_checkpoint(
-                index,
-                entries,
-                &interner_strings,
-                stored_allocator,
-            )?;
-            replay_tail_segments(index, reader, data_dir, &watermark)?;
-            restore_cancelled_visibility_ranges(index, data_dir);
-            let total_entries = index.len();
-            let tail_entries = total_entries - restored_entries.min(total_entries);
-            return Ok(OpenIndexReport {
-                path: OpenIndexPath::Checkpoint,
-                restored_entries,
-                tail_entries,
-                elapsed_us: t0.elapsed().as_micros() as u64,
-            });
-        }
-        tracing::debug!("no valid checkpoint, performing full index rebuild");
-    }
-    rebuild_from_segments(index, reader, data_dir)?;
+    index
+        .interner
+        .replace_from_full_snapshot(&plan.interner_strings);
+    index.restore_sorted_entries_with_routing(plan.entries, plan.allocator_hint, &plan.routing);
     restore_cancelled_visibility_ranges(index, data_dir);
+
     Ok(OpenIndexReport {
-        path: OpenIndexPath::Rebuild,
-        restored_entries: index.len(),
-        tail_entries: 0,
+        path: match plan.source {
+            RestoreSource::Mmap => OpenIndexPath::Mmap,
+            RestoreSource::Checkpoint => OpenIndexPath::Checkpoint,
+            RestoreSource::SealedSidxRebuild | RestoreSource::FrameScanFallback => {
+                OpenIndexPath::Rebuild
+            }
+        },
+        restored_entries: plan.restored_entries,
+        tail_entries: plan.tail_entries,
         elapsed_us: t0.elapsed().as_micros() as u64,
     })
 }
@@ -219,6 +297,12 @@ fn scanned_entries_from_sidx_footer(
     }
 }
 
+fn full_interner_snapshot(interner: &StringInterner) -> Vec<String> {
+    let mut snapshot = vec![String::new()];
+    snapshot.extend(interner.to_snapshot());
+    snapshot
+}
+
 #[cfg(test)]
 fn read_sealed_sidx_entries_sequential(
     sealed_segments: &[(u64, std::path::PathBuf)],
@@ -255,13 +339,13 @@ impl SequenceTracker {
 /// Build an `IndexEntry` from a `ScannedIndexEntry` and the chosen
 /// `global_sequence`.
 fn entry_from_scan(
-    index: &StoreIndex,
+    interner: &StringInterner,
     se: crate::store::reader::ScannedIndexEntry,
     global_sequence: u64,
 ) -> Result<IndexEntry, StoreError> {
     let coord = Coordinate::new(&se.entity, &se.scope)?;
-    let entity_id = index.interner.intern(&se.entity);
-    let scope_id = index.interner.intern(&se.scope);
+    let entity_id = interner.intern(&se.entity);
+    let scope_id = interner.intern(&se.scope);
     let clock = se.header.position.sequence;
     Ok(IndexEntry {
         event_id: se.header.event_id,
@@ -283,62 +367,125 @@ fn entry_from_scan(
     })
 }
 
-/// Replay only segments with ID > watermark, or frames at offset >= watermark_offset
-/// within the watermark segment itself.
-fn replay_tail_segments(
-    index: &StoreIndex,
+fn collect_tail_entries(
+    interner: &StringInterner,
     reader: &Reader,
     data_dir: &Path,
     watermark: &crate::store::checkpoint::WatermarkInfo,
-) -> Result<(), StoreError> {
+    allocator_floor: u64,
+) -> Result<Vec<IndexEntry>, StoreError> {
     let entries = segment_paths(data_dir)?;
-
-    // Cross-segment batch recovery state persists across segment scans.
     let mut batch_state = crate::store::reader::BatchRecoveryState::default();
+    let mut tracker = SequenceTracker {
+        max_seen: allocator_floor.saturating_sub(1),
+        inserted_any: allocator_floor > 0,
+    };
+    let mut rebuilt_entries = Vec::new();
 
-    let mut cursor = index.begin_replay();
-    // Tail replay continues from wherever the checkpoint restore left the
-    // allocator — pass the current value as the synthesis floor so any
-    // synthesized sequences advance from there.
-    let allocator_floor = index.global_sequence();
+    for (seg_id, path) in &entries {
+        if *seg_id < watermark.watermark_segment_id {
+            continue;
+        }
 
-    let scan_result = (|| -> Result<(), StoreError> {
-        for (seg_id, path) in &entries {
-            if *seg_id < watermark.watermark_segment_id {
-                continue; // Already in checkpoint
+        reader.scan_segment_index_into(path, Some(&mut batch_state), |se| {
+            if *seg_id == watermark.watermark_segment_id && se.offset < watermark.watermark_offset {
+                return Ok(());
             }
+            let global_sequence = se
+                .global_sequence
+                .unwrap_or_else(|| tracker.synthesize_next());
+            let entry = entry_from_scan(interner, se, global_sequence)?;
+            tracker.note_seen(global_sequence);
+            rebuilt_entries.push(entry);
+            Ok(())
+        })?;
+    }
 
-            reader.scan_segment_index_into(path, Some(&mut batch_state), |se| {
-                // Skip frames already in the checkpoint
-                if *seg_id == watermark.watermark_segment_id
-                    && se.offset < watermark.watermark_offset
-                {
-                    return Ok(());
-                }
+    Ok(rebuilt_entries)
+}
+
+// Complex return type justified: internal planner helper, not public API.
+#[allow(clippy::type_complexity)]
+fn collect_rebuild_entries(
+    reader: &Reader,
+    data_dir: &Path,
+) -> Result<(RestoreSource, Vec<IndexEntry>, Vec<String>, u64, usize), StoreError> {
+    let entries = segment_paths(data_dir)?;
+    let configured_active_segment = reader.active_segment_id();
+    let active_segment_id = (configured_active_segment != 0).then_some(configured_active_segment);
+    let interner = StringInterner::new();
+    let mut rebuilt_entries = Vec::new();
+    let mut tracker = SequenceTracker::default();
+
+    let sealed_segments: Vec<_> = entries
+        .iter()
+        .filter(|(segment_id, _)| active_segment_id.is_none_or(|active| *segment_id < active))
+        .cloned()
+        .collect();
+
+    let mut source = RestoreSource::SealedSidxRebuild;
+    let mut chunk_count = sealed_segments.len().max(1);
+
+    if !sealed_segments.is_empty() {
+        if let Some(scanned) = read_sealed_sidx_entries_parallel(&sealed_segments) {
+            for se in scanned {
                 let global_sequence = se
                     .global_sequence
-                    .unwrap_or_else(|| cursor.synthesize_next());
-                let entry = entry_from_scan(index, se, global_sequence)?;
-                cursor.insert(entry);
-                Ok(())
-            })?;
+                    .unwrap_or_else(|| tracker.synthesize_next());
+                let entry = entry_from_scan(&interner, se, global_sequence)?;
+                tracker.note_seen(global_sequence);
+                rebuilt_entries.push(entry);
+            }
+        } else {
+            source = RestoreSource::FrameScanFallback;
+            chunk_count = 1;
+            let mut batch_state = crate::store::reader::BatchRecoveryState::default();
+            for (_, path) in &sealed_segments {
+                reader.scan_segment_index_into(path, Some(&mut batch_state), |se| {
+                    let global_sequence = se
+                        .global_sequence
+                        .unwrap_or_else(|| tracker.synthesize_next());
+                    let entry = entry_from_scan(&interner, se, global_sequence)?;
+                    tracker.note_seen(global_sequence);
+                    rebuilt_entries.push(entry);
+                    Ok(())
+                })?;
+            }
         }
-        Ok(())
-    })();
-
-    match scan_result {
-        Ok(()) => {
-            // All tail entries are now in the index. Restore allocator (preserving
-            // both the checkpoint allocator floor and any sparse SIDX-preserved
-            // sequences) and publish atomically.
-            cursor.commit(allocator_floor);
-            Ok(())
-        }
-        Err(e) => {
-            cursor.abort();
-            Err(e)
-        }
+    } else {
+        source = RestoreSource::FrameScanFallback;
     }
+
+    let mut batch_state = crate::store::reader::BatchRecoveryState::default();
+    for (segment_id, path) in &entries {
+        if Some(*segment_id) != active_segment_id {
+            continue;
+        }
+        reader.scan_segment_index_into(path, Some(&mut batch_state), |se| {
+            let global_sequence = se
+                .global_sequence
+                .unwrap_or_else(|| tracker.synthesize_next());
+            let entry = entry_from_scan(&interner, se, global_sequence)?;
+            tracker.note_seen(global_sequence);
+            rebuilt_entries.push(entry);
+            Ok(())
+        })?;
+    }
+
+    rebuilt_entries.sort_by_key(|entry| entry.global_sequence);
+    let allocator_hint = if tracker.inserted_any {
+        tracker.max_seen.saturating_add(1)
+    } else {
+        0
+    };
+
+    Ok((
+        source,
+        rebuilt_entries,
+        full_interner_snapshot(&interner),
+        allocator_hint,
+        chunk_count,
+    ))
 }
 
 /// Scan all segment files in `data_dir`, rebuild the in-memory index from their contents.
@@ -349,72 +496,12 @@ pub(crate) fn rebuild_from_segments(
     reader: &Reader,
     data_dir: &Path,
 ) -> Result<(), StoreError> {
-    let entries = segment_paths(data_dir)?;
-    let configured_active_segment = reader.active_segment_id();
-    let active_segment_id = (configured_active_segment != 0).then_some(configured_active_segment);
-    index.clear();
-    index.interner.reset();
-    let mut rebuilt_entries = Vec::new();
-    let mut tracker = SequenceTracker::default();
-
-    let scan_result = (|| -> Result<(), StoreError> {
-        let sealed_segments: Vec<_> = entries
-            .iter()
-            .filter(|(segment_id, _)| active_segment_id.is_none_or(|active| *segment_id < active))
-            .cloned()
-            .collect();
-        if !sealed_segments.is_empty() {
-            if let Some(scanned) = read_sealed_sidx_entries_parallel(&sealed_segments) {
-                for se in scanned {
-                    let global_sequence = se
-                        .global_sequence
-                        .unwrap_or_else(|| tracker.synthesize_next());
-                    let entry = entry_from_scan(index, se, global_sequence)?;
-                    tracker.note_seen(global_sequence);
-                    rebuilt_entries.push(entry);
-                }
-            } else {
-                let mut batch_state = crate::store::reader::BatchRecoveryState::default();
-                for (_, path) in &sealed_segments {
-                    reader.scan_segment_index_into(path, Some(&mut batch_state), |se| {
-                        let global_sequence = se
-                            .global_sequence
-                            .unwrap_or_else(|| tracker.synthesize_next());
-                        let entry = entry_from_scan(index, se, global_sequence)?;
-                        tracker.note_seen(global_sequence);
-                        rebuilt_entries.push(entry);
-                        Ok(())
-                    })?;
-                }
-            }
-        }
-
-        let mut batch_state = crate::store::reader::BatchRecoveryState::default();
-        for (segment_id, path) in &entries {
-            if Some(*segment_id) != active_segment_id {
-                continue;
-            }
-            reader.scan_segment_index_into(path, Some(&mut batch_state), |se| {
-                let global_sequence = se
-                    .global_sequence
-                    .unwrap_or_else(|| tracker.synthesize_next());
-                let entry = entry_from_scan(index, se, global_sequence)?;
-                tracker.note_seen(global_sequence);
-                rebuilt_entries.push(entry);
-                Ok(())
-            })?;
-        }
-        Ok(())
-    })();
-
-    match scan_result {
-        Ok(()) => {
-            rebuilt_entries.sort_by_key(|entry| entry.global_sequence);
-            index.restore_sorted_entries(rebuilt_entries, 0);
-            Ok(())
-        }
-        Err(e) => Err(e),
-    }
+    let (_, entries, interner_strings, allocator_hint, chunk_count) =
+        collect_rebuild_entries(reader, data_dir)?;
+    index.interner.replace_from_full_snapshot(&interner_strings);
+    let routing = RoutingSummary::from_sorted_entries(&entries, chunk_count.max(1));
+    index.restore_sorted_entries_with_routing(entries, allocator_hint, &routing);
+    Ok(())
 }
 
 #[cfg(test)]

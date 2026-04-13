@@ -5,6 +5,7 @@ use crate::store::config::IndexConfig;
 use crate::store::interner::StringInterner;
 use dashmap::DashMap;
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::any::TypeId;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -341,6 +342,46 @@ pub(crate) struct ProjectionReplayPlan {
     pub(crate) items: Vec<ProjectionReplayItem>,
 }
 
+/// One contiguous run of entries for the same entity inside the
+/// restore-time entity-partitioned ordering.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct EntityRun {
+    pub(crate) entity: String,
+    pub(crate) start: u64,
+    pub(crate) len: u64,
+    pub(crate) first_sequence: u64,
+    pub(crate) last_sequence: u64,
+}
+
+/// One contiguous chunk of restore-time sequence-sorted entries.
+///
+/// Chunks are persisted into snapshot artifacts so decode work can be split
+/// deterministically without re-deriving ranges from scratch.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RestoreChunkSummary {
+    pub(crate) start: u64,
+    pub(crate) len: u64,
+    pub(crate) first_sequence: u64,
+    pub(crate) last_sequence: u64,
+}
+
+/// Restore-time routing summary shared across planner, rebuild, and
+/// view materialization. This is intentionally cheap and serializable so the
+/// same summary shape can later cross process boundaries without redesign.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RoutingSummary {
+    pub(crate) entry_count: u64,
+    pub(crate) chunk_count: u64,
+    pub(crate) chunks: Vec<RestoreChunkSummary>,
+    pub(crate) entity_runs: Vec<EntityRun>,
+}
+
+struct RestoreBase {
+    entries_by_sequence: Vec<Arc<IndexEntry>>,
+    entries_by_entity: Vec<Arc<IndexEntry>>,
+    routing: RoutingSummary,
+}
+
 impl Ord for ClockKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.wall_ms
@@ -371,6 +412,194 @@ impl IndexEntry {
     pub fn is_root_cause(&self) -> bool {
         self.causation_id.is_none()
     }
+}
+
+impl RestoreBase {
+    fn from_sorted_entries(
+        entries: Vec<IndexEntry>,
+        chunk_count: usize,
+        routing_hint: Option<&RoutingSummary>,
+    ) -> Self {
+        let entries_by_sequence: Vec<Arc<IndexEntry>> = entries.into_iter().map(Arc::new).collect();
+        let mut entries_by_entity = entries_by_sequence.clone();
+        entries_by_entity.sort_by(|left, right| {
+            left.coord
+                .entity()
+                .cmp(right.coord.entity())
+                .then(left.wall_ms.cmp(&right.wall_ms))
+                .then(left.clock.cmp(&right.clock))
+                .then(left.event_id.cmp(&right.event_id))
+        });
+
+        Self {
+            routing: routing_hint
+                .filter(|routing| routing.validate(&entries_by_sequence, &entries_by_entity))
+                .cloned()
+                .unwrap_or_else(|| {
+                    RoutingSummary::from_entries(
+                        &entries_by_sequence,
+                        &entries_by_entity,
+                        chunk_count,
+                    )
+                }),
+            entries_by_sequence,
+            entries_by_entity,
+        }
+    }
+}
+
+impl RoutingSummary {
+    pub(crate) fn from_sorted_entries(entries: &[IndexEntry], chunk_count: usize) -> Self {
+        let arcs: Vec<Arc<IndexEntry>> = entries.iter().cloned().map(Arc::new).collect();
+        let mut entity_sorted = arcs;
+        entity_sorted.sort_by(|left, right| {
+            left.coord
+                .entity()
+                .cmp(right.coord.entity())
+                .then(left.wall_ms.cmp(&right.wall_ms))
+                .then(left.clock.cmp(&right.clock))
+                .then(left.event_id.cmp(&right.event_id))
+        });
+        Self::from_entries(
+            &entries.iter().cloned().map(Arc::new).collect::<Vec<_>>(),
+            &entity_sorted,
+            chunk_count,
+        )
+    }
+
+    fn from_entries(
+        entries_by_sequence: &[Arc<IndexEntry>],
+        entries_by_entity: &[Arc<IndexEntry>],
+        chunk_count: usize,
+    ) -> Self {
+        let chunk_count = chunk_count.max(1);
+        let mut entity_runs = Vec::new();
+        let mut cursor = 0usize;
+        while cursor < entries_by_entity.len() {
+            let entity = entries_by_entity[cursor].coord.entity().to_owned();
+            let start = cursor;
+            let first_sequence = entries_by_entity[cursor].global_sequence;
+            while cursor < entries_by_entity.len()
+                && entries_by_entity[cursor].coord.entity() == entity.as_str()
+            {
+                cursor += 1;
+            }
+            let last_sequence = entries_by_entity[cursor - 1].global_sequence;
+            entity_runs.push(EntityRun {
+                entity,
+                start: start as u64,
+                len: (cursor - start) as u64,
+                first_sequence,
+                last_sequence,
+            });
+        }
+
+        let mut chunks = Vec::new();
+        if !entries_by_sequence.is_empty() {
+            let base = entries_by_sequence.len() / chunk_count;
+            let remainder = entries_by_sequence.len() % chunk_count;
+            let mut start = 0usize;
+            for chunk_index in 0..chunk_count {
+                let len = base + usize::from(chunk_index < remainder);
+                if len == 0 {
+                    continue;
+                }
+                let end = start + len;
+                let first_sequence = entries_by_sequence[start].global_sequence;
+                let last_sequence = entries_by_sequence[end - 1].global_sequence;
+                chunks.push(RestoreChunkSummary {
+                    start: start as u64,
+                    len: len as u64,
+                    first_sequence,
+                    last_sequence,
+                });
+                start = end;
+            }
+        }
+
+        Self {
+            entry_count: entries_by_entity.len() as u64,
+            chunk_count: chunks.len() as u64,
+            chunks,
+            entity_runs,
+        }
+    }
+
+    pub(crate) fn validate(
+        &self,
+        entries_by_sequence: &[Arc<IndexEntry>],
+        entries_by_entity: &[Arc<IndexEntry>],
+    ) -> bool {
+        if self.entry_count != entries_by_sequence.len() as u64
+            || self.entry_count != entries_by_entity.len() as u64
+        {
+            return false;
+        }
+
+        let mut chunk_total = 0usize;
+        for chunk in &self.chunks {
+            let start = match usize::try_from(chunk.start) {
+                Ok(start) => start,
+                Err(_) => return false,
+            };
+            let len = match usize::try_from(chunk.len) {
+                Ok(len) => len,
+                Err(_) => return false,
+            };
+            let end = match start.checked_add(len) {
+                Some(end) => end,
+                None => return false,
+            };
+            if len == 0 || end > entries_by_sequence.len() {
+                return false;
+            }
+            if entries_by_sequence[start].global_sequence != chunk.first_sequence
+                || entries_by_sequence[end - 1].global_sequence != chunk.last_sequence
+            {
+                return false;
+            }
+            chunk_total += len;
+        }
+        if chunk_total != entries_by_sequence.len() {
+            return false;
+        }
+
+        let mut run_total = 0usize;
+        for run in &self.entity_runs {
+            let start = match usize::try_from(run.start) {
+                Ok(start) => start,
+                Err(_) => return false,
+            };
+            let len = match usize::try_from(run.len) {
+                Ok(len) => len,
+                Err(_) => return false,
+            };
+            let end = match start.checked_add(len) {
+                Some(end) => end,
+                None => return false,
+            };
+            if len == 0 || end > entries_by_entity.len() {
+                return false;
+            }
+            let slice = &entries_by_entity[start..end];
+            if slice[0].coord.entity() != run.entity
+                || slice[end - start - 1].coord.entity() != run.entity
+                || slice[0].global_sequence != run.first_sequence
+                || slice[end - start - 1].global_sequence != run.last_sequence
+                || slice.iter().any(|entry| entry.coord.entity() != run.entity)
+            {
+                return false;
+            }
+            run_total += len;
+        }
+
+        run_total == entries_by_entity.len()
+    }
+}
+
+pub(crate) fn recommended_restore_chunk_count(entry_count: usize) -> usize {
+    let chunks = entry_count.div_ceil(65_536);
+    chunks.clamp(1, 32)
 }
 
 impl StoreIndex {
@@ -407,16 +636,6 @@ impl StoreIndex {
         self.insert_inner(entry);
         // Advance allocator (visibility is advanced separately by publish()).
         self.sequence.advance();
-    }
-
-    /// Replay-only insert. Identical to `insert()` except the allocator is
-    /// **not** advanced. The caller (a [`ReplayCursor`]) is responsible for
-    /// restoring the allocator to the correct value once all replay entries
-    /// have been inserted, so sparse `global_sequence` values from disk are
-    /// preserved verbatim.
-    pub(crate) fn insert_replay(&self, entry: IndexEntry) {
-        self.insert_inner(entry);
-        // Allocator advance intentionally omitted — see ReplayCursor::commit.
     }
 
     fn insert_inner(&self, entry: IndexEntry) {
@@ -505,10 +724,14 @@ impl StoreIndex {
     /// `entries` must be sorted ascending by `global_sequence`. The allocator is
     /// restored to `max(last_sequence + 1, allocator_hint)` and published only
     /// after every base map and overlay view has been rebuilt.
+    // Entity run indices are u64 for serialization portability; truncation is safe on 64-bit.
+    #[allow(clippy::cast_possible_truncation)]
     fn restore_sorted_entries_impl(
         &self,
         entries: Vec<IndexEntry>,
         allocator_hint: u64,
+        chunk_count: usize,
+        routing_hint: Option<&RoutingSummary>,
         before_publish: impl FnOnce(&Self),
     ) {
         self.streams.clear();
@@ -517,30 +740,45 @@ impl StoreIndex {
         self.latest.clear();
         self.sequence.clear();
 
-        let arc_entries: Vec<Arc<IndexEntry>> = entries.into_iter().map(Arc::new).collect();
-        let mut streams = HashMap::<Arc<str>, BTreeMap<ClockKey, Arc<IndexEntry>>>::new();
-        let mut by_id = HashMap::<u128, Arc<IndexEntry>>::with_capacity(arc_entries.len());
-        let mut latest = HashMap::<Arc<str>, Arc<IndexEntry>>::new();
+        let restored = RestoreBase::from_sorted_entries(entries, chunk_count, routing_hint);
+        let mut by_id =
+            HashMap::<u128, Arc<IndexEntry>>::with_capacity(restored.entries_by_sequence.len());
+        let mut latest =
+            HashMap::<Arc<str>, Arc<IndexEntry>>::with_capacity(restored.routing.entity_runs.len());
 
-        for entry in &arc_entries {
-            let entity = entry.coord.entity_arc();
-            let key = ClockKey {
-                wall_ms: entry.wall_ms,
-                clock: entry.clock,
-                uuid: entry.event_id,
-            };
-            streams
-                .entry(Arc::clone(&entity))
-                .or_default()
-                .insert(key, Arc::clone(entry));
-            by_id.insert(entry.event_id, Arc::clone(entry));
-            latest.insert(entity, Arc::clone(entry));
-        }
-
-        for (entity, stream) in streams {
+        for run in &restored.routing.entity_runs {
+            let start = run.start as usize;
+            let end = start + (run.len as usize);
+            let slice = &restored.entries_by_entity[start..end];
+            let entity = slice[0].coord.entity_arc();
+            let stream: BTreeMap<ClockKey, Arc<IndexEntry>> = slice
+                .iter()
+                .map(|entry| {
+                    (
+                        ClockKey {
+                            wall_ms: entry.wall_ms,
+                            clock: entry.clock,
+                            uuid: entry.event_id,
+                        },
+                        Arc::clone(entry),
+                    )
+                })
+                .collect();
+            latest.insert(
+                Arc::clone(&entity),
+                Arc::clone(slice.last().expect("run is non-empty")),
+            );
             self.streams.insert(entity, stream);
         }
-        self.scan.rebuild_from_entries(&arc_entries);
+
+        self.scan.rebuild_from_restore_base(
+            &restored.entries_by_sequence,
+            &restored.entries_by_entity,
+            &restored.routing,
+        );
+        for entry in &restored.entries_by_sequence {
+            by_id.insert(entry.event_id, Arc::clone(entry));
+        }
         for (event_id, entry) in by_id {
             self.by_id.insert(event_id, entry);
         }
@@ -548,10 +786,12 @@ impl StoreIndex {
             self.latest.insert(entity, entry);
         }
 
-        self.len.store(arc_entries.len(), Ordering::Relaxed);
+        self.len
+            .store(restored.entries_by_sequence.len(), Ordering::Relaxed);
         before_publish(self);
 
-        let next_sequence = arc_entries
+        let next_sequence = restored
+            .entries_by_sequence
             .last()
             .map(|entry| entry.global_sequence.saturating_add(1))
             .unwrap_or(allocator_hint)
@@ -560,8 +800,25 @@ impl StoreIndex {
         self.publish(next_sequence);
     }
 
+    #[cfg(test)]
     pub(crate) fn restore_sorted_entries(&self, entries: Vec<IndexEntry>, allocator_hint: u64) {
-        self.restore_sorted_entries_impl(entries, allocator_hint, |_| {});
+        self.restore_sorted_entries_impl(entries, allocator_hint, 1, None, |_| {});
+    }
+
+    pub(crate) fn restore_sorted_entries_with_routing(
+        &self,
+        entries: Vec<IndexEntry>,
+        allocator_hint: u64,
+        routing: &RoutingSummary,
+    ) {
+        let chunk_count = usize::try_from(routing.chunk_count).unwrap_or(1).max(1);
+        self.restore_sorted_entries_impl(
+            entries,
+            allocator_hint,
+            chunk_count,
+            Some(routing),
+            |_| {},
+        );
     }
 
     #[cfg(test)]
@@ -571,7 +828,7 @@ impl StoreIndex {
         allocator_hint: u64,
         before_publish: impl FnOnce(&Self),
     ) {
-        self.restore_sorted_entries_impl(entries, allocator_hint, before_publish);
+        self.restore_sorted_entries_impl(entries, allocator_hint, 1, None, before_publish);
     }
 
     pub(crate) fn get_by_id(&self, event_id: u128) -> Option<IndexEntry> {
@@ -812,15 +1069,6 @@ impl StoreIndex {
     /// and **must** be `commit()`-ed to publish entries and restore the
     /// allocator. Forgetting to commit leaves the index unpublished — the
     /// `Drop` impl emits a debug-mode panic to catch this in tests.
-    pub(crate) fn begin_replay(&self) -> ReplayCursor<'_> {
-        ReplayCursor {
-            index: self,
-            max_seen: 0,
-            inserted_any: false,
-            committed: false,
-        }
-    }
-
     pub(crate) fn layout_name(&self) -> &'static str {
         self.scan.layout_name()
     }
@@ -938,149 +1186,6 @@ impl StoreIndex {
 
     pub(crate) fn restore_cancelled_visibility_ranges(&self, ranges: Vec<(u64, u64)>) {
         self.sequence.restore_cancelled_ranges(ranges);
-    }
-}
-
-/// Type-safe replay session over a [`StoreIndex`].
-///
-/// `ReplayCursor` exists so the borrow checker enforces three things at the
-/// type level:
-///
-/// 1. Replay entries cannot escape the lifetime of the index they target
-///    (the cursor borrows `&'a StoreIndex`).
-/// 2. Sequence assignment, allocator restoration, and visibility publish
-///    are coupled — `commit()` consumes the cursor and performs all three
-///    in one shot, so callers cannot publish without restoring the allocator
-///    or vice versa.
-/// 3. Forgetting to call `commit()` is detected at debug time via `Drop`,
-///    which prevents silently leaving the index in an unpublished state.
-///
-/// **Sequence preservation policy:**
-/// - If `entry.global_sequence` is provided by the caller (e.g. from a SIDX
-///   footer or a checkpoint blob), it is preserved verbatim. The cursor
-///   tracks the maximum seen value.
-/// - The caller of [`Self::insert`] is responsible for setting
-///   `entry.global_sequence` before calling. For sources without a durable
-///   sequence, [`Self::synthesize_next`] returns the next free slot above
-///   the running max.
-pub(crate) struct ReplayCursor<'a> {
-    index: &'a StoreIndex,
-    /// Highest `global_sequence` observed so far across all inserted entries.
-    /// After `commit`, the allocator is set to `max_seen + 1` (or higher if
-    /// the caller passes a hint), but ONLY when at least one entry has been
-    /// inserted. See `inserted_any` for the empty-replay case.
-    max_seen: u64,
-    /// Whether `insert()` has been called at least once. Needed to distinguish
-    /// "no entries replayed" from "one entry with sequence 0 replayed" — both
-    /// leave `max_seen == 0`. For an empty replay (cold start of an empty
-    /// store), the allocator must be left at `hint` (typically 0), NOT at
-    /// `max_seen + 1 = 1`. Forgetting this distinction was the cause of a
-    /// real off-by-one bug in the rebuild path: every fresh store started
-    /// with `allocated = 1`, so the first append got `sequence = 1` instead
-    /// of `sequence = 0`.
-    inserted_any: bool,
-    committed: bool,
-}
-
-impl<'a> ReplayCursor<'a> {
-    /// Insert a fully-built entry whose `global_sequence` has already been
-    /// chosen by the caller (e.g. read from a SIDX footer or checkpoint blob).
-    ///
-    /// The cursor records the sequence in its running maximum so the
-    /// allocator can be restored correctly at commit time.
-    pub(crate) fn insert(&mut self, entry: IndexEntry) {
-        self.max_seen = self.max_seen.max(entry.global_sequence);
-        self.inserted_any = true;
-        self.index.insert_replay(entry);
-    }
-
-    /// Allocate the next sequence above the cursor's running maximum.
-    /// Used for replay sources that have no durable `global_sequence`
-    /// (e.g. slow-path scans of an active or footerless segment).
-    ///
-    /// Calling this method does not insert anything; the caller is expected
-    /// to use the returned value to populate `IndexEntry::global_sequence`
-    /// and then call [`Self::insert`] with the populated entry.
-    ///
-    /// **Empty-cursor handling:** the first call on a cursor with no inserts
-    /// returns `0`, not `1`. Earlier versions returned `max_seen + 1 = 1` on
-    /// the first call, which gave the first replayed entry sequence `1` and
-    /// shifted the entire stream by one. The bug was caught by the
-    /// `tests/replay_consistency.rs::snapshot_checkpoint_matches_source_projection`
-    /// test, which compares a live store to a snapshot rebuild and demands
-    /// they have identical `global_sequence` values.
-    pub(crate) fn synthesize_next(&mut self) -> u64 {
-        // Don't update max_seen here — insert() will, once the entry is built.
-        if self.inserted_any {
-            self.max_seen.saturating_add(1)
-        } else {
-            // No entries yet — the first synthesized sequence is 0.
-            0
-        }
-    }
-
-    /// Finish the replay session.
-    ///
-    /// Restores the allocator and publishes the visibility watermark so all
-    /// replayed entries become observable atomically.
-    ///
-    /// The post-commit allocator value is:
-    /// - `hint`, if no entries were inserted (empty replay / fresh store).
-    /// - `max(max_seen + 1, hint)` otherwise.
-    ///
-    /// **The empty-replay branch is critical.** Earlier versions used
-    /// `max_seen.saturating_add(1).max(hint)` unconditionally, which set
-    /// the allocator to `1` for an empty rebuild (because `max_seen = 0`
-    /// and `0 + 1 = 1`). The result was that every fresh store started
-    /// with `allocated = 1`, so the first append got `sequence = 1` instead
-    /// of `sequence = 0`. The bug was caught by the `Tier 1` test
-    /// `tests/atomic_batch.rs::batch_oversized_item_no_partial_visibility`,
-    /// which asserts that the first append after a failed batch occupies
-    /// sequence `0` on a fresh store.
-    ///
-    /// `hint` is used by checkpoint restore to preserve burned-slot
-    /// allocator positions: the checkpoint stores the original allocator
-    /// value, which may be greater than `max(entry.global_sequence)` because
-    /// some sequence slots were reserved for batches that later failed.
-    /// Pass `0` if there is no hint (i.e. segment rebuild).
-    pub(crate) fn commit(mut self, hint: u64) {
-        let next = if self.inserted_any {
-            self.max_seen.saturating_add(1).max(hint)
-        } else {
-            // Empty replay — leave the allocator at the hint (0 for a fresh
-            // segment rebuild, or the checkpoint's stored allocator value).
-            hint
-        };
-        self.index.sequence.restore_allocator(next);
-        self.index.publish(next);
-        self.committed = true;
-    }
-
-    /// Abandon the replay session without publishing.
-    ///
-    /// Use this on error paths where partial replay state should not become
-    /// visible to readers. The allocator and visibility watermark are left
-    /// untouched. Any entries already inserted via [`Self::insert`] remain
-    /// in the underlying index maps but are unreachable until a later
-    /// successful replay publishes a watermark covering them.
-    ///
-    /// This is the explicit "I'm bailing out" signal that suppresses the
-    /// `Drop` debug-assertion designed to catch forgotten `commit()` calls.
-    pub(crate) fn abort(mut self) {
-        self.committed = true;
-    }
-}
-
-impl<'a> Drop for ReplayCursor<'a> {
-    fn drop(&mut self) {
-        // In debug builds, catch programmer errors where the cursor is
-        // dropped without commit() being called. In release builds the
-        // index is left unpublished, which is the safest possible state
-        // (readers see nothing).
-        debug_assert!(
-            self.committed,
-            "ReplayCursor dropped without calling commit() — index is unpublished",
-        );
     }
 }
 

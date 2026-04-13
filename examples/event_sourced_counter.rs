@@ -42,7 +42,9 @@ struct CounterState {
 }
 
 // -- Step 4: Implement EventSourced to teach batpak how to fold events --
-impl EventSourced<serde_json::Value> for CounterState {
+impl EventSourced for CounterState {
+    type Input = batpak::prelude::ValueInput;
+
     fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
         if events.is_empty() {
             return None;

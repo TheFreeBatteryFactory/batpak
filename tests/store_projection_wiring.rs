@@ -68,7 +68,9 @@ fn project_calls_prefetch_only_when_supported() {
         count: u32,
     }
 
-    impl EventSourced<serde_json::Value> for Counter {
+    impl EventSourced for Counter {
+        type Input = batpak::prelude::ValueInput;
+
         fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
             Some(Counter {
                 count: u32::try_from(events.len()).expect("test uses < 2^32 events"),

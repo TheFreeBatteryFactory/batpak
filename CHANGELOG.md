@@ -6,6 +6,27 @@ All notable changes to this project will be documented in this file.
 
 _Nothing yet — next entries go here._
 
+## [0.5.0] - 2026-04-13
+
+### Changed
+- **`EventSourced` trait evolution**: replaced `EventSourced<P>` generic parameter with associated `Input` type. Existing impls add `type Input = ValueInput;` — same semantics, simpler surface
+- **Restore planner subsystem**: all cold-start sources (mmap, checkpoint, rebuild) now flow through one internal `RestorePlanner` producing entity-partitioned runs instead of per-entry ordered-map insertion
+- **Artifact format upgrades**: mmap index v2 and checkpoint v3 carry additive routing summaries (chunk directories, entity run tables). v1/v2 artifacts remain readable via fallback decoders
+
+### Added
+- `ProjectionInput` trait with `ValueInput` (serde_json::Value replay) and `RawMsgpackInput` (raw bytes replay) — projections choose their decode mode via one associated type
+- `ProjectionMode` enum for compile-time replay lane selection
+- `RoutingSummary` / `EntityRunTable` internal substrate consumed by restore, projection replay, and view materialization — one traversal, many products
+- Entity-partitioned bulk restore: mixed-entity workloads build per-entity streams from pre-grouped runs; single-entity corpora hit a dedicated fast path
+- Raw projection example (`examples/raw_projection_counter.rs`) and correctness tests (`tests/raw_projection_mode.rs`)
+- Raw vs value bench lanes in `benches/projection_latency.rs`
+- `close_only` cold-start bench lane in `benches/cold_start.rs`
+- Single-entity and mixed-entity restore perf gates in `tests/perf_gates.rs`
+- ADR-0008: Restore Planner and Projection Trait Evolution
+
+### Fixed
+- Restore scaling at 100k+ events: entity-partitioned runs replace repeated BTreeMap insertion, eliminating O(n log n) single-entity pathology
+
 ## [0.4.1] - 2026-04-13
 
 ### Fixed

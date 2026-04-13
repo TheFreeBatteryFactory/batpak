@@ -10,7 +10,10 @@ pub mod sourcing;
 pub use hash::HashChain;
 pub use header::EventHeader;
 pub use kind::EventKind;
-pub use sourcing::{EventSourced, Reactive};
+pub use sourcing::{
+    EventSourced, ProjectionEvent, ProjectionInput, ProjectionMode, ProjectionPayload,
+    RawMsgpackInput, Reactive, ValueInput,
+};
 
 use crate::coordinate::Coordinate;
 use serde::{Deserialize, Serialize};

@@ -1,5 +1,6 @@
-use crate::event::EventSourced;
+use crate::event::{Event, EventSourced, ProjectionInput, RawMsgpackInput, ValueInput};
 use crate::store::columnar::CachedProjectionSlot;
+use crate::store::index::DiskPos;
 use crate::store::index::ProjectionReplayPlan;
 use crate::store::{projection, Freshness, Store, StoreError};
 use std::any::TypeId;
@@ -67,9 +68,64 @@ fn compute_strategy(
     ProjectionStrategy::ExternalCacheThenReplay
 }
 
+pub(crate) trait ReplayInput: ProjectionInput {
+    fn read_batch(
+        reader: &crate::store::reader::Reader,
+        positions: &[&DiskPos],
+    ) -> Result<Vec<Event<Self::Payload>>, StoreError>;
+
+    fn read_one(
+        reader: &crate::store::reader::Reader,
+        pos: &DiskPos,
+    ) -> Result<Event<Self::Payload>, StoreError>;
+}
+
+impl ReplayInput for ValueInput {
+    fn read_batch(
+        reader: &crate::store::reader::Reader,
+        positions: &[&DiskPos],
+    ) -> Result<Vec<Event<Self::Payload>>, StoreError> {
+        reader.read_events_batch(positions)
+    }
+
+    fn read_one(
+        reader: &crate::store::reader::Reader,
+        pos: &DiskPos,
+    ) -> Result<Event<Self::Payload>, StoreError> {
+        reader.read_event_only(pos)
+    }
+}
+
+impl ReplayInput for RawMsgpackInput {
+    fn read_batch(
+        reader: &crate::store::reader::Reader,
+        positions: &[&DiskPos],
+    ) -> Result<Vec<Event<Self::Payload>>, StoreError> {
+        reader.read_raw_events_batch(positions)
+    }
+
+    fn read_one(
+        reader: &crate::store::reader::Reader,
+        pos: &DiskPos,
+    ) -> Result<Event<Self::Payload>, StoreError> {
+        reader.read_event_raw_only(pos)
+    }
+}
+
+pub(crate) fn read_projection_events<T>(
+    reader: &crate::store::reader::Reader,
+    positions: &[&DiskPos],
+) -> Result<Vec<Event<<T::Input as ProjectionInput>::Payload>>, StoreError>
+where
+    T: EventSourced,
+    T::Input: ReplayInput,
+{
+    <T::Input as ReplayInput>::read_batch(reader, positions)
+}
+
 pub(crate) fn projection_cache_key<T>(entity: &str) -> Vec<u8>
 where
-    T: EventSourced<serde_json::Value> + 'static,
+    T: EventSourced + 'static,
 {
     // Cache key: entity + \0 + type_id_hash(u64 LE) + schema_version(u64 LE)
     // TypeId ensures different EventSourced types never collide on the same entity.
@@ -94,9 +150,10 @@ pub(crate) fn project<T, State>(
     freshness: &Freshness,
 ) -> Result<Option<T>, StoreError>
 where
-    T: EventSourced<serde_json::Value> + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    T: EventSourced + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    T::Input: ReplayInput,
 {
-    project_inner(store, entity, freshness, None)
+    project_inner::<T, T::Input, State>(store, entity, freshness, None)
 }
 
 /// Same as `project()` but captures per-phase timings into `out`.
@@ -109,21 +166,23 @@ pub(crate) fn project_timed<T, State>(
     out: &mut ProjectionTimings,
 ) -> Result<Option<T>, StoreError>
 where
-    T: EventSourced<serde_json::Value> + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    T: EventSourced + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    T::Input: ReplayInput,
 {
-    project_inner(store, entity, freshness, Some(out))
+    project_inner::<T, T::Input, State>(store, entity, freshness, Some(out))
 }
 
 /// Shared projection executor. Optional timing sink gated behind `timings.is_some()`.
 #[allow(clippy::cast_possible_truncation)] // as_micros() -> u64: overflow at ~584,942 years
-fn project_inner<T, State>(
+fn project_inner<T, I, State>(
     store: &Store<State>,
     entity: &str,
     freshness: &Freshness,
     mut timings: Option<&mut ProjectionTimings>,
 ) -> Result<Option<T>, StoreError>
 where
-    T: EventSourced<serde_json::Value> + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    T: EventSourced + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    I: ReplayInput<Payload = <T::Input as ProjectionInput>::Payload>,
 {
     let t_start = std::time::Instant::now();
 
@@ -255,7 +314,7 @@ where
                     );
                     // Fallback: full replay (skip external cache since we already had a slot).
                     let plan = replay_plan.expect("GroupLocalHit requires a plan");
-                    execute_full_replay::<T, State>(
+                    execute_full_replay::<T, I, State>(
                         store,
                         entity,
                         &plan,
@@ -281,7 +340,7 @@ where
                         .iter()
                         .filter(|i| i.global_sequence > cached_watermark)
                     {
-                        let event = store.reader.read_event_only(&item.disk_pos)?;
+                        let event = I::read_one(&store.reader, &item.disk_pos)?;
                         cached_state.apply_event(&event);
                     }
                     // Store back to both caches.
@@ -311,7 +370,7 @@ where
                         entity,
                         "group-local incremental deser failed, falling back to full replay: {e}"
                     );
-                    execute_full_replay::<T, State>(
+                    execute_full_replay::<T, I, State>(
                         store,
                         entity,
                         &plan,
@@ -328,7 +387,7 @@ where
 
         ProjectionStrategy::ExternalCacheThenReplay => {
             let plan = replay_plan.expect("ExternalCacheThenReplay requires a plan");
-            execute_external_cache_path::<T, State>(
+            execute_external_cache_path::<T, I, State>(
                 store,
                 entity,
                 &plan,
@@ -344,7 +403,7 @@ where
 
         ProjectionStrategy::DirectReplay => {
             let plan = replay_plan.expect("DirectReplay requires a plan");
-            execute_full_replay::<T, State>(
+            execute_full_replay::<T, I, State>(
                 store,
                 entity,
                 &plan,
@@ -364,7 +423,7 @@ where
 #[inline(never)]
 // as_micros() -> u64 cannot overflow in practice; extracted helper needs all parent context
 #[allow(clippy::cast_possible_truncation, clippy::too_many_arguments)]
-fn execute_external_cache_path<T, State>(
+fn execute_external_cache_path<T, I, State>(
     store: &Store<State>,
     entity: &str,
     replay_plan: &ProjectionReplayPlan,
@@ -377,7 +436,8 @@ fn execute_external_cache_path<T, State>(
     timings: &mut Option<&mut ProjectionTimings>,
 ) -> Result<Option<T>, StoreError>
 where
-    T: EventSourced<serde_json::Value> + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    T: EventSourced + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    I: ReplayInput<Payload = <T::Input as ProjectionInput>::Payload>,
 {
     // Prefetch already fired in Phase 1c (before group-local check).
     // External cache probe
@@ -412,7 +472,7 @@ where
                     .collect();
                 if let Ok(mut cached_state) = serde_json::from_slice::<T>(&bytes) {
                     for de in &delta_entries {
-                        let event = store.reader.read_event_only(&de.disk_pos)?;
+                        let event = I::read_one(&store.reader, &de.disk_pos)?;
                         cached_state.apply_event(&event);
                     }
                     if let Ok(new_bytes) = serde_json::to_vec(&cached_state) {
@@ -477,7 +537,7 @@ where
     }
 
     // Fallback: full replay
-    execute_full_replay::<T, State>(
+    execute_full_replay::<T, I, State>(
         store,
         entity,
         replay_plan,
@@ -495,7 +555,7 @@ where
 #[inline(never)]
 // as_micros() -> u64 cannot overflow in practice; extracted helper needs all parent context
 #[allow(clippy::cast_possible_truncation, clippy::too_many_arguments)]
-fn execute_full_replay<T, State>(
+fn execute_full_replay<T, I, State>(
     store: &Store<State>,
     entity: &str,
     replay_plan: &ProjectionReplayPlan,
@@ -507,21 +567,22 @@ fn execute_full_replay<T, State>(
     timings: &mut Option<&mut ProjectionTimings>,
 ) -> Result<Option<T>, StoreError>
 where
-    T: EventSourced<serde_json::Value> + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    T: EventSourced + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    I: ReplayInput<Payload = <T::Input as ProjectionInput>::Payload>,
 {
     // Full replay -- batch-read filtered events from disk.
-    // Uses read_events_batch which skips Coordinate construction (pure waste
-    // for projection replay that only needs the event payload).
+    // Uses the projection's replay-input lane, which always skips Coordinate
+    // construction and may leave payloads as raw MessagePack bytes.
     let t_disk = std::time::Instant::now();
     let positions: Vec<&crate::store::DiskPos> = replay_plan
         .items
         .iter()
         .map(|item| &item.disk_pos)
         .collect();
-    let events = store.reader.read_events_batch(&positions)?;
+    let events = I::read_batch(&store.reader, &positions)?;
     if let Some(t) = timings.as_deref_mut() {
         t.disk_read_us = t_disk.elapsed().as_micros() as u64;
-        // No separate extraction step -- read_events_batch returns Event directly.
+        // No separate extraction step -- replay lanes return Event directly.
         t.event_extract_us = 0;
     }
 
@@ -577,7 +638,9 @@ mod tests {
     #[derive(Default, Debug, serde::Serialize, serde::Deserialize)]
     struct Counter;
 
-    impl EventSourced<serde_json::Value> for Counter {
+    impl EventSourced for Counter {
+        type Input = crate::event::ValueInput;
+
         fn apply_event(&mut self, _event: &Event<serde_json::Value>) {}
 
         fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {

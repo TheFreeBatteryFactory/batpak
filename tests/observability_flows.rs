@@ -16,7 +16,9 @@ struct Counter {
     count: u64,
 }
 
-impl EventSourced<serde_json::Value> for Counter {
+impl EventSourced for Counter {
+    type Input = batpak::prelude::ValueInput;
+
     fn apply_event(&mut self, _event: &Event<serde_json::Value>) {
         self.count += 1;
     }

@@ -608,7 +608,9 @@ struct Counter {
     count: u64,
 }
 
-impl EventSourced<serde_json::Value> for Counter {
+impl EventSourced for Counter {
+    type Input = batpak::prelude::ValueInput;
+
     fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
         if events.is_empty() {
             return None;
