@@ -30,6 +30,10 @@ const BATCH_MARKER_SCOPE: &str = "_system";
 /// All respond channels: flume::Sender — sync send from writer, async recv from caller.
 /// [SPEC:src/store/writer.rs]
 pub(crate) enum WriterCommand {
+    BeginVisibilityFence {
+        token: u64,
+        respond: Sender<Result<(), StoreError>>,
+    },
     Append {
         coord: Coordinate,
         event: Box<Event<Vec<u8>>>, // pre-serialized payload as msgpack bytes
@@ -37,9 +41,30 @@ pub(crate) enum WriterCommand {
         guards: AppendGuards,
         respond: Sender<Result<AppendReceipt, StoreError>>,
     },
+    FenceAppend {
+        token: u64,
+        coord: Coordinate,
+        event: Box<Event<Vec<u8>>>,
+        kind: EventKind,
+        guards: AppendGuards,
+        respond: Sender<Result<AppendReceipt, StoreError>>,
+    },
     AppendBatch {
         items: Vec<BatchAppendItem>,
         respond: Sender<Result<Vec<AppendReceipt>, StoreError>>,
+    },
+    FenceAppendBatch {
+        token: u64,
+        items: Vec<BatchAppendItem>,
+        respond: Sender<Result<Vec<AppendReceipt>, StoreError>>,
+    },
+    CommitVisibilityFence {
+        token: u64,
+        respond: Sender<Result<(), StoreError>>,
+    },
+    CancelVisibilityFence {
+        token: u64,
+        respond: Sender<Result<(), StoreError>>,
     },
     Sync {
         respond: Sender<Result<(), StoreError>>,
@@ -261,6 +286,27 @@ struct WriterState<'a> {
     /// Accumulates SIDX entries for the current active segment.
     /// Flushed as a footer on segment rotation and shutdown.
     sidx_collector: crate::store::sidx::SidxEntryCollector,
+    /// Currently active public visibility fence, if any.
+    active_fence: Option<ActiveVisibilityFence>,
+}
+
+enum PendingFenceResponse {
+    Single {
+        respond: Sender<Result<AppendReceipt, StoreError>>,
+        receipt: AppendReceipt,
+    },
+    Batch {
+        respond: Sender<Result<Vec<AppendReceipt>, StoreError>>,
+        receipts: Vec<AppendReceipt>,
+    },
+}
+
+struct ActiveVisibilityFence {
+    token: u64,
+    pending_publish_up_to: Option<u64>,
+    notifications: Vec<Notification>,
+    envelopes: Vec<CommittedEventEnvelope>,
+    responses: Vec<PendingFenceResponse>,
 }
 
 #[derive(Clone, Copy)]
@@ -361,6 +407,21 @@ fn writer_thread_main(
                     }
                 );
 
+                if let Some(token) = runtime.index.active_visibility_fence() {
+                    if runtime.index.cancel_visibility_fence(token).is_ok() {
+                        let ranges = runtime.index.cancelled_visibility_ranges();
+                        if let Err(error) = crate::store::visibility_ranges::write_cancelled_ranges(
+                            &runtime.config.data_dir,
+                            &ranges,
+                        ) {
+                            tracing::error!(
+                                error = %error,
+                                "failed to persist cancelled visibility ranges during writer restart"
+                            );
+                        }
+                    }
+                }
+
                 // Re-create segment: the previous one was dropped during unwind.
                 seg_id = find_latest_segment_id(&runtime.config.data_dir).unwrap_or(seg_id) + 1;
                 segment = match Segment::<Active>::create(&runtime.config.data_dir, seg_id) {
@@ -395,11 +456,15 @@ fn writer_loop(
         reactor_subscribers: runtime.reactor_subscribers,
         reader: Arc::clone(runtime.reader),
         sidx_collector: crate::store::sidx::SidxEntryCollector::new(),
+        active_fence: None,
     };
 
     // Main loop: recv commands, dispatch.
     for cmd in runtime.rx.iter() {
         match cmd {
+            WriterCommand::BeginVisibilityFence { token, respond } => {
+                let _ = respond.send(state.begin_visibility_fence(token));
+            }
             WriterCommand::Append {
                 coord,
                 event,
@@ -408,7 +473,7 @@ fn writer_loop(
                 respond,
             } => {
                 // Process first command in batch.
-                let result = state.handle_append(&coord, *event, kind, &guards);
+                let result = state.handle_append(&coord, *event, kind, &guards, None);
                 let _ = respond.send(result);
                 events_since_sync += 1;
 
@@ -437,17 +502,93 @@ fn writer_loop(
                             guards: g2,
                             respond: r2,
                         }) => {
-                            let res2 = state.handle_append(&c2, *ev2, k2, &g2);
+                            let res2 = state.handle_append(&c2, *ev2, k2, &g2, None);
                             let _ = r2.send(res2);
                             events_since_sync += 1;
                             drained += 1;
                         }
+                        Ok(WriterCommand::FenceAppend {
+                            token,
+                            coord,
+                            event,
+                            kind,
+                            guards,
+                            respond,
+                        }) => {
+                            let result =
+                                if state.active_fence.as_ref().map(|f| f.token) != Some(token) {
+                                    Err(StoreError::VisibilityFenceNotActive)
+                                } else {
+                                    let mut fence = state
+                                        .active_fence
+                                        .take()
+                                        .expect("token check guaranteed active fence");
+                                    let result = match state.handle_append(
+                                        &coord,
+                                        *event,
+                                        kind,
+                                        &guards,
+                                        Some(&mut fence),
+                                    ) {
+                                        Ok(receipt) => {
+                                            fence.responses.push(PendingFenceResponse::Single {
+                                                respond: respond.clone(),
+                                                receipt,
+                                            });
+                                            Ok(())
+                                        }
+                                        Err(error) => Err(error),
+                                    };
+                                    state.active_fence = Some(fence);
+                                    result
+                                };
+                            if let Err(error) = result {
+                                let _ = respond.send(Err(error));
+                            } else {
+                                events_since_sync += 1;
+                                drained += 1;
+                            }
+                        }
                         Ok(WriterCommand::AppendBatch { items, respond: r }) => {
                             // Batches are atomic — drain them as a single unit.
-                            let res = state.handle_append_batch(&items);
+                            let res = state.handle_append_batch(&items, None);
                             let _ = r.send(res);
                             events_since_sync += 1;
                             drained += 1;
+                        }
+                        Ok(WriterCommand::FenceAppendBatch {
+                            token,
+                            items,
+                            respond,
+                        }) => {
+                            let result =
+                                if state.active_fence.as_ref().map(|f| f.token) != Some(token) {
+                                    Err(StoreError::VisibilityFenceNotActive)
+                                } else {
+                                    let mut fence = state
+                                        .active_fence
+                                        .take()
+                                        .expect("token check guaranteed active fence");
+                                    let result =
+                                        match state.handle_append_batch(&items, Some(&mut fence)) {
+                                            Ok(receipts) => {
+                                                fence.responses.push(PendingFenceResponse::Batch {
+                                                    respond: respond.clone(),
+                                                    receipts,
+                                                });
+                                                Ok(())
+                                            }
+                                            Err(error) => Err(error),
+                                        };
+                                    state.active_fence = Some(fence);
+                                    result
+                                };
+                            if let Err(error) = result {
+                                let _ = respond.send(Err(error));
+                            } else {
+                                events_since_sync += 1;
+                                drained += 1;
+                            }
                         }
                         Ok(WriterCommand::Sync { respond: r }) => {
                             // Sync mid-batch: honor immediately, stop draining.
@@ -456,6 +597,30 @@ fn writer_loop(
                                 .sync_with_mode(&runtime.config.sync.mode);
                             let _ = r.send(sr);
                             events_since_sync = 0;
+                            break;
+                        }
+                        Ok(WriterCommand::BeginVisibilityFence { token, respond: r }) => {
+                            let sr = state
+                                .active_segment
+                                .sync_with_mode(&runtime.config.sync.mode);
+                            if sr.is_ok() {
+                                let _ = r.send(state.begin_visibility_fence(token));
+                            } else {
+                                let _ = r.send(sr.map(|_| ()));
+                            }
+                            events_since_sync = 0;
+                            break;
+                        }
+                        Ok(WriterCommand::CommitVisibilityFence { token, respond: r }) => {
+                            let sr = state
+                                .active_segment
+                                .sync_with_mode(&runtime.config.sync.mode);
+                            let _ = r.send(sr.and_then(|_| state.commit_visibility_fence(token)));
+                            events_since_sync = 0;
+                            break;
+                        }
+                        Ok(WriterCommand::CancelVisibilityFence { token, respond: r }) => {
+                            let _ = r.send(state.cancel_visibility_fence(token));
                             break;
                         }
                         Ok(WriterCommand::Shutdown { respond: r }) => {
@@ -500,8 +665,48 @@ fn writer_loop(
                     events_since_sync = 0;
                 }
             }
+            WriterCommand::FenceAppend {
+                token,
+                coord,
+                event,
+                kind,
+                guards,
+                respond,
+            } => {
+                let result = if state.active_fence.as_ref().map(|f| f.token) != Some(token) {
+                    Err(StoreError::VisibilityFenceNotActive)
+                } else {
+                    let mut fence = state
+                        .active_fence
+                        .take()
+                        .expect("token check guaranteed active fence");
+                    let result = match state.handle_append(
+                        &coord,
+                        *event,
+                        kind,
+                        &guards,
+                        Some(&mut fence),
+                    ) {
+                        Ok(receipt) => {
+                            fence.responses.push(PendingFenceResponse::Single {
+                                respond: respond.clone(),
+                                receipt,
+                            });
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    };
+                    state.active_fence = Some(fence);
+                    result
+                };
+                if let Err(error) = result {
+                    let _ = respond.send(Err(error));
+                } else {
+                    events_since_sync += 1;
+                }
+            }
             WriterCommand::AppendBatch { items, respond } => {
-                let result = state.handle_append_batch(&items);
+                let result = state.handle_append_batch(&items, None);
                 let _ = respond.send(result);
                 events_since_sync += 1; // Batch counts as one sync event
 
@@ -515,6 +720,48 @@ fn writer_loop(
                     }
                     events_since_sync = 0;
                 }
+            }
+            WriterCommand::FenceAppendBatch {
+                token,
+                items,
+                respond,
+            } => {
+                let result = if state.active_fence.as_ref().map(|f| f.token) != Some(token) {
+                    Err(StoreError::VisibilityFenceNotActive)
+                } else {
+                    let mut fence = state
+                        .active_fence
+                        .take()
+                        .expect("token check guaranteed active fence");
+                    let result = match state.handle_append_batch(&items, Some(&mut fence)) {
+                        Ok(receipts) => {
+                            fence.responses.push(PendingFenceResponse::Batch {
+                                respond: respond.clone(),
+                                receipts,
+                            });
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    };
+                    state.active_fence = Some(fence);
+                    result
+                };
+                if let Err(error) = result {
+                    let _ = respond.send(Err(error));
+                } else {
+                    events_since_sync += 1;
+                }
+            }
+            WriterCommand::CommitVisibilityFence { token, respond } => {
+                let sync_result = state
+                    .active_segment
+                    .sync_with_mode(&runtime.config.sync.mode);
+                let _ =
+                    respond.send(sync_result.and_then(|_| state.commit_visibility_fence(token)));
+                events_since_sync = 0;
+            }
+            WriterCommand::CancelVisibilityFence { token, respond } => {
+                let _ = respond.send(state.cancel_visibility_fence(token));
             }
             WriterCommand::Sync { respond } => {
                 let result = state
@@ -536,8 +783,45 @@ fn writer_loop(
                             guards,
                             respond: r,
                         }) => {
-                            let result = state.handle_append(&coord, *event, kind, &guards);
+                            let result = state.handle_append(&coord, *event, kind, &guards, None);
                             let _ = r.send(result);
+                            drained += 1;
+                        }
+                        Ok(WriterCommand::FenceAppend {
+                            token,
+                            coord,
+                            event,
+                            kind,
+                            guards,
+                            respond: r,
+                        }) => {
+                            if state.active_fence.as_ref().map(|f| f.token) != Some(token) {
+                                let _ = r.send(Err(StoreError::VisibilityFenceNotActive));
+                            } else {
+                                let mut fence = state
+                                    .active_fence
+                                    .take()
+                                    .expect("token check guaranteed active fence");
+                                let result = state.handle_append(
+                                    &coord,
+                                    *event,
+                                    kind,
+                                    &guards,
+                                    Some(&mut fence),
+                                );
+                                match result {
+                                    Ok(receipt) => {
+                                        fence.responses.push(PendingFenceResponse::Single {
+                                            respond: r.clone(),
+                                            receipt,
+                                        })
+                                    }
+                                    Err(error) => {
+                                        let _ = r.send(Err(error));
+                                    }
+                                }
+                                state.active_fence = Some(fence);
+                            }
                             drained += 1;
                         }
                         Ok(WriterCommand::Shutdown { respond: r }) => {
@@ -552,9 +836,46 @@ fn writer_loop(
                         }
                         Ok(WriterCommand::AppendBatch { items, respond: r }) => {
                             // Drain batches during shutdown.
-                            let res = state.handle_append_batch(&items);
+                            let res = state.handle_append_batch(&items, None);
                             let _ = r.send(res);
                             drained += 1;
+                        }
+                        Ok(WriterCommand::FenceAppendBatch {
+                            token,
+                            items,
+                            respond: r,
+                        }) => {
+                            if state.active_fence.as_ref().map(|f| f.token) != Some(token) {
+                                let _ = r.send(Err(StoreError::VisibilityFenceNotActive));
+                            } else {
+                                let mut fence = state
+                                    .active_fence
+                                    .take()
+                                    .expect("token check guaranteed active fence");
+                                let result = state.handle_append_batch(&items, Some(&mut fence));
+                                match result {
+                                    Ok(receipts) => {
+                                        fence.responses.push(PendingFenceResponse::Batch {
+                                            respond: r.clone(),
+                                            receipts,
+                                        })
+                                    }
+                                    Err(error) => {
+                                        let _ = r.send(Err(error));
+                                    }
+                                }
+                                state.active_fence = Some(fence);
+                            }
+                            drained += 1;
+                        }
+                        Ok(WriterCommand::BeginVisibilityFence { token, respond: r }) => {
+                            let _ = r.send(state.begin_visibility_fence(token));
+                        }
+                        Ok(WriterCommand::CommitVisibilityFence { token, respond: r }) => {
+                            let _ = r.send(state.commit_visibility_fence(token));
+                        }
+                        Ok(WriterCommand::CancelVisibilityFence { token, respond: r }) => {
+                            let _ = r.send(state.cancel_visibility_fence(token));
                         }
                         // test-only: discard PanicForTest during shutdown drain
                         #[cfg(feature = "dangerous-test-hooks")]
@@ -562,6 +883,30 @@ fn writer_loop(
                             let _ = r.send(Ok(())); // discard during drain
                         }
                         Err(_) => break, // channel empty
+                    }
+                }
+                // Cancel any active visibility fence so callers are not left
+                // blocking on ticket.wait() after the writer exits.
+                if let Some(fence) = state.active_fence.take() {
+                    tracing::warn!(
+                        token = fence.token,
+                        pending = fence.responses.len(),
+                        "auto-cancelling active visibility fence during shutdown"
+                    );
+                    let _ = state.index.cancel_visibility_fence(fence.token);
+                    let _ = crate::store::visibility_ranges::write_cancelled_ranges(
+                        &state.config.data_dir,
+                        &state.index.cancelled_visibility_ranges(),
+                    );
+                    for response in fence.responses {
+                        match response {
+                            PendingFenceResponse::Single { respond, .. } => {
+                                let _ = respond.send(Err(StoreError::VisibilityFenceCancelled));
+                            }
+                            PendingFenceResponse::Batch { respond, .. } => {
+                                let _ = respond.send(Err(StoreError::VisibilityFenceCancelled));
+                            }
+                        }
                     }
                 }
                 // Write SIDX footer on active segment before shutdown sync.
@@ -641,6 +986,80 @@ struct BatchItemComputed {
 }
 
 impl WriterState<'_> {
+    fn begin_visibility_fence(&mut self, token: u64) -> Result<(), StoreError> {
+        if self.active_fence.is_some() {
+            return Err(StoreError::VisibilityFenceActive);
+        }
+        if self.index.active_visibility_fence() != Some(token) {
+            return Err(StoreError::VisibilityFenceNotActive);
+        }
+        self.active_fence = Some(ActiveVisibilityFence {
+            token,
+            pending_publish_up_to: None,
+            notifications: Vec::new(),
+            envelopes: Vec::new(),
+            responses: Vec::new(),
+        });
+        Ok(())
+    }
+
+    fn commit_visibility_fence(&mut self, token: u64) -> Result<(), StoreError> {
+        let Some(fence) = self.active_fence.take() else {
+            return Err(StoreError::VisibilityFenceNotActive);
+        };
+        if fence.token != token {
+            self.active_fence = Some(fence);
+            return Err(StoreError::VisibilityFenceNotActive);
+        }
+
+        self.index
+            .finish_visibility_fence(token, fence.pending_publish_up_to)?;
+        for notification in &fence.notifications {
+            self.subscribers.broadcast(notification);
+        }
+        for envelope in &fence.envelopes {
+            self.reactor_subscribers.broadcast(envelope);
+        }
+        for response in fence.responses {
+            match response {
+                PendingFenceResponse::Single { respond, receipt } => {
+                    let _ = respond.send(Ok(receipt));
+                }
+                PendingFenceResponse::Batch { respond, receipts } => {
+                    let _ = respond.send(Ok(receipts));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn cancel_visibility_fence(&mut self, token: u64) -> Result<(), StoreError> {
+        let Some(fence) = self.active_fence.take() else {
+            return Err(StoreError::VisibilityFenceNotActive);
+        };
+        if fence.token != token {
+            self.active_fence = Some(fence);
+            return Err(StoreError::VisibilityFenceNotActive);
+        }
+
+        self.index.cancel_visibility_fence(token)?;
+        crate::store::visibility_ranges::write_cancelled_ranges(
+            &self.config.data_dir,
+            &self.index.cancelled_visibility_ranges(),
+        )?;
+        for response in fence.responses {
+            match response {
+                PendingFenceResponse::Single { respond, .. } => {
+                    let _ = respond.send(Err(StoreError::VisibilityFenceCancelled));
+                }
+                PendingFenceResponse::Batch { respond, .. } => {
+                    let _ = respond.send(Err(StoreError::VisibilityFenceCancelled));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Check whether the active segment needs rotation, and if so, seal it,
     /// write its SIDX footer, sync, and create a new active segment.
     ///
@@ -938,6 +1357,7 @@ impl WriterState<'_> {
         mut event: Event<Vec<u8>>,
         kind: EventKind,
         guards: &AppendGuards,
+        fence: Option<&mut ActiveVisibilityFence>,
     ) -> Result<AppendReceipt, StoreError> {
         let correlation_id = guards.correlation_id;
         let causation_id = guards.causation_id;
@@ -1053,11 +1473,6 @@ impl WriterState<'_> {
         };
         self.index.insert(entry);
 
-        // Publish: make this entry visible to concurrent readers.
-        // Explicit boundary: the entry has global_sequence == global_seq,
-        // so visible_sequence must advance to global_seq + 1.
-        self.index.publish(global_seq + 1);
-
         // Record SIDX entry for the segment footer (written on rotation/shutdown).
         let hash_chain_ref = event.hash_chain.as_ref();
         let sidx_entry = crate::store::sidx::SidxEntry {
@@ -1081,16 +1496,44 @@ impl WriterState<'_> {
         debug!(event_id = %event.header.event_id, clock = clock, "append committed");
 
         // STEP 10: Broadcast notification to subscribers.
-        self.subscribers.broadcast(&Notification {
+        let notification = Notification {
             event_id: event.header.event_id,
             correlation_id,
             causation_id,
             coord: coord.clone(),
             kind,
             sequence: global_seq,
-        });
-        if let Ok(envelope) = self.single_event_envelope(coord.clone(), &event, global_seq) {
-            self.reactor_subscribers.broadcast(&envelope);
+        };
+        let envelope = self
+            .single_event_envelope(coord.clone(), &event, global_seq)
+            .ok();
+        if let Some(fence) = fence {
+            self.index
+                .note_visibility_fence_progress(
+                    fence.token,
+                    global_seq,
+                    global_seq.saturating_add(1),
+                )
+                .expect("active fence token verified before fenced append");
+            fence.pending_publish_up_to = Some(
+                fence
+                    .pending_publish_up_to
+                    .unwrap_or(0)
+                    .max(global_seq.saturating_add(1)),
+            );
+            fence.notifications.push(notification);
+            if let Some(envelope) = envelope {
+                fence.envelopes.push(envelope);
+            }
+        } else {
+            // Publish: make this entry visible to concurrent readers.
+            // Explicit boundary: the entry has global_sequence == global_seq,
+            // so visible_sequence must advance to global_seq + 1.
+            self.index.publish(global_seq + 1);
+            self.subscribers.broadcast(&notification);
+            if let Some(envelope) = envelope {
+                self.reactor_subscribers.broadcast(&envelope);
+            }
         }
 
         Ok(AppendReceipt {
@@ -1105,6 +1548,7 @@ impl WriterState<'_> {
     fn handle_append_batch(
         &mut self,
         items: &[BatchAppendItem],
+        fence: Option<&mut ActiveVisibilityFence>,
     ) -> Result<Vec<AppendReceipt>, StoreError> {
         // STEPs 1-2: Validate size, bytes, and reject CAS.
         self.validate_batch(items)?;
@@ -1225,11 +1669,21 @@ impl WriterState<'_> {
         // atomically. Entries occupy [first_seq, first_seq + items.len()).
         self.index.insert_batch(staged_entries);
         #[allow(clippy::cast_possible_truncation)] // items.len() bounded by batch_max_size (u32)
-        self.index.publish(first_seq + items.len() as u64);
+        let publish_up_to = first_seq + items.len() as u64;
 
-        // STEP 14: Broadcast notifications. A subscriber that reacts by calling
-        // query/get will now see the full batch (publish happened first).
-        self.broadcast_batch_notifications(items, &computed)?;
+        if let Some(fence) = fence {
+            self.index
+                .note_visibility_fence_progress(fence.token, first_seq, publish_up_to)
+                .expect("active fence token verified before fenced batch append");
+            fence.pending_publish_up_to =
+                Some(fence.pending_publish_up_to.unwrap_or(0).max(publish_up_to));
+            self.collect_batch_notifications(items, &computed, fence)?;
+        } else {
+            self.index.publish(publish_up_to);
+            // STEP 14: Broadcast notifications. A subscriber that reacts by calling
+            // query/get will now see the full batch (publish happened first).
+            self.broadcast_batch_notifications(items, &computed)?;
+        }
 
         debug!(batch_id, count = items.len(), "batch committed");
         Ok(receipts)
@@ -1458,6 +1912,37 @@ impl WriterState<'_> {
             });
             if let Ok(envelope) = self.batch_event_envelope(item, c, global_seq) {
                 self.reactor_subscribers.broadcast(&envelope);
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_batch_notifications(
+        &self,
+        items: &[BatchAppendItem],
+        computed: &[BatchItemComputed],
+        fence: &mut ActiveVisibilityFence,
+    ) -> Result<(), StoreError> {
+        for (idx, item) in items.iter().enumerate() {
+            let c = &computed[idx];
+            let global_seq = c.global_seq;
+            let event_id = c.event_id;
+            let causation_id = c.causation_id;
+            let entity: Arc<str> = Arc::from(item.coord.entity());
+            let scope: Arc<str> = Arc::from(item.coord.scope());
+            let coord =
+                Coordinate::new(entity.as_ref(), scope.as_ref()).map_err(StoreError::Coordinate)?;
+
+            fence.notifications.push(Notification {
+                event_id,
+                correlation_id: item.options.correlation_id.unwrap_or(event_id),
+                causation_id,
+                coord,
+                kind: item.kind,
+                sequence: global_seq,
+            });
+            if let Ok(envelope) = self.batch_event_envelope(item, c, global_seq) {
+                fence.envelopes.push(envelope);
             }
         }
         Ok(())

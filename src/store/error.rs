@@ -59,6 +59,12 @@ pub enum StoreError {
     Configuration(String),
     /// Group commit (batch > 1) requires an idempotency key on every append.
     IdempotencyRequired,
+    /// A visibility fence is already active on this store.
+    VisibilityFenceActive,
+    /// No matching visibility fence is currently active.
+    VisibilityFenceNotActive,
+    /// The visibility fence was cancelled before it published its writes.
+    VisibilityFenceCancelled,
     /// Batch append failed at a specific item.
     BatchFailed {
         /// Index of the item that failed (0-based).
@@ -101,6 +107,13 @@ impl std::fmt::Display for StoreError {
                 f,
                 "group commit (batch > 1) requires an idempotency key on every append"
             ),
+            Self::VisibilityFenceActive => write!(f, "a visibility fence is already active"),
+            Self::VisibilityFenceNotActive => {
+                write!(f, "no matching visibility fence is currently active")
+            }
+            Self::VisibilityFenceCancelled => {
+                write!(f, "visibility fence was cancelled before publish")
+            }
             Self::BatchFailed {
                 item_index,
                 stage,
@@ -130,6 +143,9 @@ impl std::error::Error for StoreError {
             | Self::WriterCrashed
             | Self::Configuration(_)
             | Self::IdempotencyRequired
+            | Self::VisibilityFenceActive
+            | Self::VisibilityFenceNotActive
+            | Self::VisibilityFenceCancelled
             | Self::BatchFailed { .. } => None,
             #[cfg(feature = "dangerous-test-hooks")]
             Self::FaultInjected(_) => None,

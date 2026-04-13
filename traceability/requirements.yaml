@@ -49,3 +49,10 @@
   artifacts:
     - ART-XTASK
     - ART-DX-DOCS
+- id: REQ-CONTROL-PLANE-ADDITIVE
+  summary: Advanced store control features must remain additive so the blocking append/query onboarding surface stays source-compatible.
+  artifacts:
+    - ART-STORE-MOD
+    - ART-STORE-CONFIG
+    - ART-CONTROL-PLANE-TESTS
+    - ART-ADR-CONTROL-PLANE

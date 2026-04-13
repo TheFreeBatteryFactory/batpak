@@ -1,8 +1,31 @@
 use crate::event::EventSourced;
 use crate::store::{projection, Freshness, Store, StoreError};
+use std::any::TypeId;
+use std::hash::{Hash, Hasher};
 
-pub(crate) fn project<T>(
-    store: &Store,
+pub(crate) fn projection_cache_key<T>(entity: &str) -> Vec<u8>
+where
+    T: EventSourced<serde_json::Value> + 'static,
+{
+    // Cache key: entity + \0 + type_id_hash(u64 LE) + schema_version(u64 LE)
+    // TypeId ensures different EventSourced types never collide on the same entity.
+    // Vec pre-allocated to exact size: entity.len() + 1 + 8 + 8 = entity.len() + 17.
+    let schema_v = T::schema_version();
+    let type_disc = {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        TypeId::of::<T>().hash(&mut h);
+        h.finish()
+    };
+    let mut cache_key = Vec::with_capacity(entity.len() + 17);
+    cache_key.extend_from_slice(entity.as_bytes());
+    cache_key.push(0);
+    cache_key.extend_from_slice(&type_disc.to_le_bytes());
+    cache_key.extend_from_slice(&schema_v.to_le_bytes());
+    cache_key
+}
+
+pub(crate) fn project<T, State>(
+    store: &Store<State>,
     entity: &str,
     freshness: &Freshness,
 ) -> Result<Option<T>, StoreError>
@@ -39,27 +62,39 @@ where
     }
 
     let watermark = entries.last().map(|e| e.global_sequence).unwrap_or(0);
+    let entity_generation = store.index.entity_generation(entity).unwrap_or(0);
+    let cached_at_us = store.config.now_us();
+    let type_id = TypeId::of::<T>();
+    let cache_key = projection_cache_key::<T>(entity);
 
-    // Cache key: entity + \0 + type_id_hash(u64 LE) + schema_version(u64 LE)
-    // TypeId ensures different EventSourced types never collide on the same entity.
-    // Vec pre-allocated to exact size: entity.len() + 1 + 8 + 8 = entity.len() + 17.
-    let schema_v = T::schema_version();
-    let type_disc = {
-        use std::any::TypeId;
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        TypeId::of::<T>().hash(&mut h);
-        h.finish()
-    };
-    let mut cache_key = Vec::with_capacity(entity.len() + 17);
-    cache_key.extend_from_slice(entity.as_bytes());
-    cache_key.push(0);
-    cache_key.extend_from_slice(&type_disc.to_le_bytes());
-    cache_key.extend_from_slice(&schema_v.to_le_bytes());
+    if let Some(slot) = store.index.cached_projection(entity, type_id) {
+        let is_fresh = match freshness {
+            Freshness::Consistent => {
+                slot.watermark == watermark && slot.generation == entity_generation
+            }
+            Freshness::MaybeStale { max_stale_ms } => {
+                let age_us = cached_at_us.saturating_sub(slot.cached_at_us).max(0);
+                age_us < (*max_stale_ms as i64) * 1000
+                    && slot.generation == entity_generation
+                    && slot.watermark <= watermark
+            }
+        };
+        if is_fresh {
+            match serde_json::from_slice::<T>(&slot.bytes) {
+                Ok(value) => return Ok(Some(value)),
+                Err(e) => {
+                    tracing::warn!(
+                        entity,
+                        "group-local projection cache deserialize failed (falling back): {e}"
+                    );
+                }
+            }
+        }
+    }
 
     let predicted_meta = projection::CacheMeta {
         watermark,
-        cached_at_us: store.config.now_us(),
+        cached_at_us,
     };
     if store.cache.capabilities().supports_prefetch {
         if let Err(error) = store.cache.prefetch(&cache_key, predicted_meta) {
@@ -103,11 +138,18 @@ where
                     if let Ok(new_bytes) = serde_json::to_vec(&cached_state) {
                         let new_meta = projection::CacheMeta {
                             watermark,
-                            cached_at_us: store.config.now_us(),
+                            cached_at_us,
                         };
                         if let Err(e) = store.cache.put(&cache_key, &new_bytes, new_meta) {
                             tracing::warn!("incremental cache put failed: {e}");
                         }
+                        let _ = store.index.store_cached_projection(
+                            entity,
+                            type_id,
+                            new_bytes,
+                            watermark,
+                            cached_at_us,
+                        );
                     }
                     return Ok(Some(cached_state));
                 }
@@ -120,7 +162,16 @@ where
 
             if is_fresh {
                 match serde_json::from_slice::<T>(&bytes) {
-                    Ok(value) => return Ok(Some(value)),
+                    Ok(value) => {
+                        let _ = store.index.store_cached_projection(
+                            entity,
+                            type_id,
+                            bytes,
+                            meta.watermark,
+                            meta.cached_at_us,
+                        );
+                        return Ok(Some(value));
+                    }
                     Err(e) => {
                         tracing::warn!("cache deserialize failed (falling back to replay): {e}");
                     }
@@ -151,11 +202,18 @@ where
         if let Ok(bytes) = serde_json::to_vec(value) {
             let meta = projection::CacheMeta {
                 watermark,
-                cached_at_us: store.config.now_us(),
+                cached_at_us,
             };
             if let Err(error) = store.cache.put(&cache_key, &bytes, meta) {
                 tracing::warn!("cache put failed (non-fatal): {error}");
             }
+            let _ = store.index.store_cached_projection(
+                entity,
+                type_id,
+                bytes,
+                watermark,
+                cached_at_us,
+            );
         }
     }
 

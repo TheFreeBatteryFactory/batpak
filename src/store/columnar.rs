@@ -1,14 +1,10 @@
 //! Columnar (SoA / AoSoA) secondary query index.
 //!
-//! This module provides [`ScanIndex`], which dispatches between two strategies
-//! for the `by_fact` and `scope_entities` dimensions of the event index:
-//!
-//! - **Maps** (`IndexLayout::AoS`): the classic `DashMap`-based path.  The
-//!   caller keeps the original `DashMap`s and this module is not involved
-//!   beyond constructing the right variant.
-//! - **Columnar** (`IndexLayout::SoA`, `AoSoA8`, `AoSoA16`, `AoSoA64`):
-//!   replaces both DashMaps with cache-friendly parallel arrays (SoA) or
-//!   tiled parallel arrays (AoSoA).
+//! This module provides the columnar overlay indexes and the [`ScanIndex`]
+//! fanout struct that maintains a mandatory AoS base view plus optional
+//! SoA, SoAoS, and AoSoA64 overlays.  All active views are populated on
+//! every insert; queries route to the most efficient view for each access
+//! pattern.
 //!
 //! ## Memory layout quick-reference
 //!
@@ -23,9 +19,9 @@
 //!
 //! `ColumnarIndex` wraps its mutable state in a single `parking_lot::RwLock`.
 //! Multiple readers may query simultaneously; the writer thread takes an
-//! exclusive write lock only during `insert`.  Because the writer serialises
-//! all appends already (it owns the entity lock before calling `StoreIndex::insert`),
-//! write contention on this lock is effectively nil.
+//! exclusive write lock only during `insert`.  Because the writer already
+//! serialises all appends before calling `StoreIndex::insert`, write
+//! contention on this lock is effectively nil.
 //!
 //! ## Append ordering
 //!
@@ -39,6 +35,7 @@ use crate::event::EventKind;
 use crate::store::index::{ClockKey, IndexEntry};
 use dashmap::DashMap;
 use parking_lot::RwLock;
+use std::any::TypeId;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
@@ -298,10 +295,20 @@ impl<const N: usize> AoSoAInner<N> {
 // ── SoAoS: hybrid AoS-outer, SoA-inner ──────────────────────────────────────
 
 /// One entity's events stored as parallel arrays (SoA within an entity group).
+#[derive(Clone)]
+pub(crate) struct CachedProjectionSlot {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) watermark: u64,
+    pub(crate) generation: u64,
+    pub(crate) cached_at_us: i64,
+}
+
 struct EntityGroup {
     kinds: Vec<EventKind>,
     sequences: Vec<u64>,
     entries: Vec<Arc<IndexEntry>>,
+    generation: u64,
+    cached_projections: std::collections::HashMap<TypeId, CachedProjectionSlot>,
 }
 
 /// Hybrid layout: entities looked up by HashMap (AoS outer), events within each
@@ -329,10 +336,13 @@ impl SoAoSInner {
                 kinds: Vec::new(),
                 sequences: Vec::new(),
                 entries: Vec::new(),
+                generation: 0,
+                cached_projections: std::collections::HashMap::new(),
             });
         group.kinds.push(entry.kind);
         group.sequences.push(entry.global_sequence);
         group.entries.push(Arc::clone(entry));
+        group.generation = group.generation.saturating_add(1);
         self.scope_entities.entry(scope).or_default().insert(entity);
     }
 
@@ -372,6 +382,39 @@ impl SoAoSInner {
         out
     }
 
+    fn entity_generation(&self, entity: &str) -> Option<u64> {
+        self.groups.get(entity).map(|group| group.generation)
+    }
+
+    fn cached_projection(&self, entity: &str, type_id: TypeId) -> Option<CachedProjectionSlot> {
+        self.groups
+            .get(entity)
+            .and_then(|group| group.cached_projections.get(&type_id).cloned())
+    }
+
+    fn store_cached_projection(
+        &mut self,
+        entity: &str,
+        type_id: TypeId,
+        bytes: Vec<u8>,
+        watermark: u64,
+        cached_at_us: i64,
+    ) -> bool {
+        let Some(group) = self.groups.get_mut(entity) else {
+            return false;
+        };
+        group.cached_projections.insert(
+            type_id,
+            CachedProjectionSlot {
+                bytes,
+                watermark,
+                generation: group.generation,
+                cached_at_us,
+            },
+        );
+        true
+    }
+
     fn clear(&mut self) {
         self.groups.clear();
         self.scope_entities.clear();
@@ -387,8 +430,10 @@ impl SoAoSInner {
 enum ColumnarVariant {
     /// Flat parallel arrays; best for sequential scans.
     SoA(RwLock<SoAInner>),
+    #[cfg(test)]
     /// 8-element tiles; each tile fills one AVX register (256-bit).
     AoSoA8(RwLock<AoSoAInner<8>>),
+    #[cfg(test)]
     /// 16-element tiles; fits AVX-512 or Apple M-series 128-byte cache line.
     AoSoA16(RwLock<AoSoAInner<16>>),
     /// 64-element tiles; fills a full x86 cache line of `u64`s.
@@ -401,15 +446,15 @@ enum ColumnarVariant {
 // ColumnarIndex — public API
 // ---------------------------------------------------------------------------
 
-/// Cache-friendly secondary query index that replaces the `by_fact` and
-/// `scope_entities` `DashMap`s when a non-AoS [`IndexLayout`] is selected.
+/// Cache-friendly secondary query index that supplements the `by_fact` and
+/// `scope_entities` `DashMap`s with an optional columnar overlay.
 ///
 /// ## Thread safety
 ///
 /// All methods take `&self`; internal state is protected by a
 /// `parking_lot::RwLock`.  Writers hold an exclusive lock for the duration of
 /// [`insert`]; readers share a read lock.  Because the writer thread
-/// serialises appends via the per-entity mutex, write contention is negligible.
+/// serialises all appends, write contention is negligible.
 ///
 /// [`insert`]: ColumnarIndex::insert
 pub(crate) struct ColumnarIndex {
@@ -424,6 +469,7 @@ impl ColumnarIndex {
         }
     }
 
+    #[cfg(test)]
     /// Create a new AoSoA index with 8-element tiles.
     pub(crate) fn new_aosoa8() -> Self {
         Self {
@@ -431,6 +477,7 @@ impl ColumnarIndex {
         }
     }
 
+    #[cfg(test)]
     /// Create a new AoSoA index with 16-element tiles.
     pub(crate) fn new_aosoa16() -> Self {
         Self {
@@ -460,7 +507,9 @@ impl ColumnarIndex {
     pub(crate) fn insert(&self, entry: &Arc<IndexEntry>) {
         match &self.inner {
             ColumnarVariant::SoA(lock) => lock.write().push(entry),
+            #[cfg(test)]
             ColumnarVariant::AoSoA8(lock) => lock.write().push(entry),
+            #[cfg(test)]
             ColumnarVariant::AoSoA16(lock) => lock.write().push(entry),
             ColumnarVariant::AoSoA64(lock) => lock.write().push(entry),
             ColumnarVariant::SoAoS(lock) => lock.write().push(entry),
@@ -477,7 +526,9 @@ impl ColumnarIndex {
     pub(crate) fn query_by_kind(&self, target: EventKind) -> Vec<Arc<IndexEntry>> {
         let mut results = match &self.inner {
             ColumnarVariant::SoA(lock) => lock.read().query_by_kind(target),
+            #[cfg(test)]
             ColumnarVariant::AoSoA8(lock) => lock.read().query_by_kind(target),
+            #[cfg(test)]
             ColumnarVariant::AoSoA16(lock) => lock.read().query_by_kind(target),
             ColumnarVariant::AoSoA64(lock) => lock.read().query_by_kind(target),
             ColumnarVariant::SoAoS(lock) => lock.read().query_by_kind(target),
@@ -491,7 +542,9 @@ impl ColumnarIndex {
     pub(crate) fn query_by_category(&self, category: u8) -> Vec<Arc<IndexEntry>> {
         let mut results = match &self.inner {
             ColumnarVariant::SoA(lock) => lock.read().query_by_category(category),
+            #[cfg(test)]
             ColumnarVariant::AoSoA8(lock) => lock.read().query_by_category(category),
+            #[cfg(test)]
             ColumnarVariant::AoSoA16(lock) => lock.read().query_by_category(category),
             ColumnarVariant::AoSoA64(lock) => lock.read().query_by_category(category),
             ColumnarVariant::SoAoS(lock) => lock.read().query_by_category(category),
@@ -505,7 +558,9 @@ impl ColumnarIndex {
     pub(crate) fn query_by_scope(&self, scope: &str) -> Vec<Arc<IndexEntry>> {
         let mut results = match &self.inner {
             ColumnarVariant::SoA(lock) => lock.read().query_by_scope(scope),
+            #[cfg(test)]
             ColumnarVariant::AoSoA8(lock) => lock.read().query_by_scope(scope),
+            #[cfg(test)]
             ColumnarVariant::AoSoA16(lock) => lock.read().query_by_scope(scope),
             ColumnarVariant::AoSoA64(lock) => lock.read().query_by_scope(scope),
             ColumnarVariant::SoAoS(lock) => lock.read().query_by_scope(scope),
@@ -525,25 +580,29 @@ impl ColumnarIndex {
     /// Caller contract violation — not recoverable.
     /// Invoke `f` with an immutable reference to the `Tile<8>` at `idx`.
     /// Returns `None` if `self` is not an `AoSoA8` variant.
+    #[cfg(test)]
     fn with_tile8<R>(&self, idx: usize, f: impl FnOnce(&Tile<8>) -> R) -> Option<R> {
         match &self.inner {
             ColumnarVariant::AoSoA8(lock) => lock.read().with_tile(idx, f),
-            ColumnarVariant::SoA(_)
-            | ColumnarVariant::AoSoA16(_)
-            | ColumnarVariant::AoSoA64(_)
-            | ColumnarVariant::SoAoS(_) => None,
+            ColumnarVariant::SoA(_) | ColumnarVariant::AoSoA64(_) | ColumnarVariant::SoAoS(_) => {
+                None
+            }
+            #[cfg(test)]
+            ColumnarVariant::AoSoA16(_) => None,
         }
     }
 
     /// Invoke `f` with an immutable reference to the `Tile<16>` at `idx`.
     /// Returns `None` if `self` is not an `AoSoA16` variant or idx is out of range.
+    #[cfg(test)]
     fn with_tile16<R>(&self, idx: usize, f: impl FnOnce(&Tile<16>) -> R) -> Option<R> {
         match &self.inner {
             ColumnarVariant::AoSoA16(lock) => lock.read().with_tile(idx, f),
-            ColumnarVariant::SoA(_)
-            | ColumnarVariant::AoSoA8(_)
-            | ColumnarVariant::AoSoA64(_)
-            | ColumnarVariant::SoAoS(_) => None,
+            ColumnarVariant::SoA(_) | ColumnarVariant::AoSoA64(_) | ColumnarVariant::SoAoS(_) => {
+                None
+            }
+            #[cfg(test)]
+            ColumnarVariant::AoSoA8(_) => None,
         }
     }
 
@@ -552,10 +611,9 @@ impl ColumnarIndex {
     fn with_tile64<R>(&self, idx: usize, f: impl FnOnce(&Tile<64>) -> R) -> Option<R> {
         match &self.inner {
             ColumnarVariant::AoSoA64(lock) => lock.read().with_tile(idx, f),
-            ColumnarVariant::SoA(_)
-            | ColumnarVariant::AoSoA8(_)
-            | ColumnarVariant::AoSoA16(_)
-            | ColumnarVariant::SoAoS(_) => None,
+            ColumnarVariant::SoA(_) | ColumnarVariant::SoAoS(_) => None,
+            #[cfg(test)]
+            ColumnarVariant::AoSoA8(_) | ColumnarVariant::AoSoA16(_) => None,
         }
     }
 
@@ -563,27 +621,18 @@ impl ColumnarIndex {
     pub(crate) fn clear(&self) {
         match &self.inner {
             ColumnarVariant::SoA(lock) => lock.write().clear(),
+            #[cfg(test)]
             ColumnarVariant::AoSoA8(lock) => lock.write().clear(),
+            #[cfg(test)]
             ColumnarVariant::AoSoA16(lock) => lock.write().clear(),
             ColumnarVariant::AoSoA64(lock) => lock.write().clear(),
             ColumnarVariant::SoAoS(lock) => lock.write().clear(),
         }
     }
 
-    /// Return the number of tiles for AoSoA layouts, or 0 for SoA/SoAoS.
-    /// Probes through the public `with_tile*` dispatch to ensure those methods
-    /// have at least one production caller (not just tests).
+    /// Return the number of tiles for the production tiled overlay, or 0 for
+    /// non-tiled layouts.
     pub(crate) fn tile_count(&self) -> usize {
-        if self.with_tile8(0, |_| ()).is_some() {
-            if let ColumnarVariant::AoSoA8(lock) = &self.inner {
-                return lock.read().tiles.len();
-            }
-        }
-        if self.with_tile16(0, |_| ()).is_some() {
-            if let ColumnarVariant::AoSoA16(lock) = &self.inner {
-                return lock.read().tiles.len();
-            }
-        }
         if self.with_tile64(0, |_| ()).is_some() {
             if let ColumnarVariant::AoSoA64(lock) = &self.inner {
                 return lock.read().tiles.len();
@@ -592,14 +641,47 @@ impl ColumnarIndex {
         0
     }
 
-    /// Return the layout name as a static string for diagnostics.
-    pub(crate) fn layout_name(&self) -> &'static str {
+    pub(crate) fn entity_generation(&self, entity: &str) -> Option<u64> {
         match &self.inner {
-            ColumnarVariant::SoA(_) => "SoA",
-            ColumnarVariant::AoSoA8(_) => "AoSoA8",
-            ColumnarVariant::AoSoA16(_) => "AoSoA16",
-            ColumnarVariant::AoSoA64(_) => "AoSoA64",
-            ColumnarVariant::SoAoS(_) => "SoAoS",
+            ColumnarVariant::SoAoS(lock) => lock.read().entity_generation(entity),
+            ColumnarVariant::SoA(_) | ColumnarVariant::AoSoA64(_) => None,
+            #[cfg(test)]
+            ColumnarVariant::AoSoA8(_) | ColumnarVariant::AoSoA16(_) => None,
+        }
+    }
+
+    pub(crate) fn cached_projection(
+        &self,
+        entity: &str,
+        type_id: TypeId,
+    ) -> Option<CachedProjectionSlot> {
+        match &self.inner {
+            ColumnarVariant::SoAoS(lock) => lock.read().cached_projection(entity, type_id),
+            ColumnarVariant::SoA(_) | ColumnarVariant::AoSoA64(_) => None,
+            #[cfg(test)]
+            ColumnarVariant::AoSoA8(_) | ColumnarVariant::AoSoA16(_) => None,
+        }
+    }
+
+    pub(crate) fn store_cached_projection(
+        &self,
+        entity: &str,
+        type_id: TypeId,
+        bytes: Vec<u8>,
+        watermark: u64,
+        cached_at_us: i64,
+    ) -> bool {
+        match &self.inner {
+            ColumnarVariant::SoAoS(lock) => lock.write().store_cached_projection(
+                entity,
+                type_id,
+                bytes,
+                watermark,
+                cached_at_us,
+            ),
+            ColumnarVariant::SoA(_) | ColumnarVariant::AoSoA64(_) => false,
+            #[cfg(test)]
+            ColumnarVariant::AoSoA8(_) | ColumnarVariant::AoSoA16(_) => false,
         }
     }
 }
@@ -608,45 +690,91 @@ impl ColumnarIndex {
 // ScanIndex — top-level dispatcher
 // ---------------------------------------------------------------------------
 
-/// Dispatches scan queries (`by_fact`, `by_scope`) to either the classic
-/// `DashMap`-based indexes or a [`ColumnarIndex`].
-///
-/// The variant is selected once at store-open time based on
-/// [`IndexLayout`][crate::store::IndexLayout] and never changes afterwards.
-///
-/// `IndexLayout::AoS` produces `ScanIndex::Maps`; all other layouts produce
-/// `ScanIndex::Columnar`.
-pub(crate) enum ScanIndex {
-    /// Classic hash-map-based secondary indexes.  Both maps are publicly
-    /// visible within the crate so that [`StoreIndex`] can insert directly.
-    Maps {
-        /// Event-kind → ordered event entries.
-        by_fact: DashMap<EventKind, BTreeMap<ClockKey, Arc<IndexEntry>>>,
-        /// Scope string → set of entity strings active in that scope.
-        scope_entities: DashMap<Arc<str>, HashSet<Arc<str>>>,
-    },
-    /// Cache-friendly columnar index (SoA or AoSoA).
-    Columnar(ColumnarIndex),
+/// Base AoS indexes plus optional multi-view overlays.
+pub(crate) struct ScanIndex {
+    /// Event-kind → ordered event entries.
+    by_fact: DashMap<EventKind, BTreeMap<ClockKey, Arc<IndexEntry>>>,
+    /// Scope string → set of entity strings active in that scope.
+    scope_entities: DashMap<Arc<str>, HashSet<Arc<str>>>,
+    /// Broad-scan overlay.
+    soa: Option<ColumnarIndex>,
+    /// Entity-group overlay.
+    entity_groups: Option<ColumnarIndex>,
+    /// Tiled replay/scanning overlay.
+    tiles64: Option<ColumnarIndex>,
 }
 
 impl ScanIndex {
-    /// Construct the appropriate `ScanIndex` for the given layout.
-    ///
-    /// `IndexLayout::AoS` returns `ScanIndex::Maps` (no columnar index).
-    /// All other layouts return `ScanIndex::Columnar`.
-    pub(crate) fn for_layout(layout: &crate::store::IndexLayout) -> Self {
+    /// Construct base AoS maps plus the configured optional overlays.
+    pub(crate) fn for_config(config: &crate::store::IndexConfig) -> Self {
         use crate::store::IndexLayout;
-        match layout {
-            IndexLayout::AoS => Self::Maps {
-                by_fact: DashMap::new(),
-                scope_entities: DashMap::new(),
-            },
-            IndexLayout::SoA => Self::Columnar(ColumnarIndex::new_soa()),
-            IndexLayout::AoSoA8 => Self::Columnar(ColumnarIndex::new_aosoa8()),
-            IndexLayout::AoSoA16 => Self::Columnar(ColumnarIndex::new_aosoa16()),
-            IndexLayout::AoSoA64 => Self::Columnar(ColumnarIndex::new_aosoa64()),
-            IndexLayout::SoAoS => Self::Columnar(ColumnarIndex::new_soaos()),
+        let mut soa = config.views.soa;
+        let mut entity_groups = config.views.entity_groups;
+        let mut tiles64 = config.views.tiles64;
+
+        match config.layout {
+            IndexLayout::AoS => {}
+            IndexLayout::SoA => soa = true,
+            IndexLayout::AoSoA8 | IndexLayout::AoSoA16 | IndexLayout::AoSoA64 => tiles64 = true,
+            IndexLayout::SoAoS => entity_groups = true,
         }
+
+        Self {
+            by_fact: DashMap::new(),
+            scope_entities: DashMap::new(),
+            soa: soa.then(ColumnarIndex::new_soa),
+            entity_groups: entity_groups.then(ColumnarIndex::new_soaos),
+            tiles64: tiles64.then(ColumnarIndex::new_aosoa64),
+        }
+    }
+
+    fn insert_base(&self, entry: &Arc<IndexEntry>) {
+        let key = ClockKey {
+            wall_ms: entry.wall_ms,
+            clock: entry.clock,
+            uuid: entry.event_id,
+        };
+        self.by_fact
+            .entry(entry.kind)
+            .or_default()
+            .insert(key, Arc::clone(entry));
+        self.scope_entities
+            .entry(entry.coord.scope_arc())
+            .or_default()
+            .insert(entry.coord.entity_arc());
+    }
+
+    fn query_base_by_kind(&self, kind: EventKind) -> Vec<Arc<IndexEntry>> {
+        let mut results: Vec<Arc<IndexEntry>> = self
+            .by_fact
+            .get(&kind)
+            .map(|r| r.value().values().map(Arc::clone).collect())
+            .unwrap_or_default();
+        results.sort_by_key(|e| e.global_sequence);
+        results
+    }
+
+    fn query_base_by_category(&self, category: u8) -> Vec<Arc<IndexEntry>> {
+        let mut results: Vec<Arc<IndexEntry>> = self
+            .by_fact
+            .iter()
+            .filter(|r| r.key().category() == category)
+            .flat_map(|r| r.value().values().map(Arc::clone).collect::<Vec<_>>())
+            .collect();
+        results.sort_by_key(|e| e.global_sequence);
+        results
+    }
+
+    pub(crate) fn layout_name(&self) -> &'static str {
+        if self.soa.is_none() && self.entity_groups.is_none() && self.tiles64.is_none() {
+            "AoS"
+        } else {
+            "MultiView"
+        }
+    }
+
+    pub(crate) fn tile_count(&self) -> usize {
+        self.tiles64.as_ref().map_or(0, ColumnarIndex::tile_count)
     }
 
     /// Insert an entry into whichever secondary index is active.
@@ -656,26 +784,15 @@ impl ScanIndex {
     ///
     /// For `Columnar`, this delegates to [`ColumnarIndex::insert`].
     pub(crate) fn insert(&self, entry: &Arc<IndexEntry>) {
-        match self {
-            Self::Maps {
-                by_fact,
-                scope_entities,
-            } => {
-                let key = ClockKey {
-                    wall_ms: entry.wall_ms,
-                    clock: entry.clock,
-                    uuid: entry.event_id,
-                };
-                by_fact
-                    .entry(entry.kind)
-                    .or_default()
-                    .insert(key, Arc::clone(entry));
-                scope_entities
-                    .entry(entry.coord.scope_arc())
-                    .or_default()
-                    .insert(entry.coord.entity_arc());
-            }
-            Self::Columnar(idx) => idx.insert(entry),
+        self.insert_base(entry);
+        if let Some(idx) = &self.soa {
+            idx.insert(entry);
+        }
+        if let Some(idx) = &self.entity_groups {
+            idx.insert(entry);
+        }
+        if let Some(idx) = &self.tiles64 {
+            idx.insert(entry);
         }
     }
 
@@ -688,17 +805,16 @@ impl ScanIndex {
     ///
     /// For `Columnar`, delegates to [`ColumnarIndex::query_by_kind`].
     pub(crate) fn query_by_kind(&self, kind: EventKind) -> Vec<Arc<IndexEntry>> {
-        match self {
-            Self::Maps { by_fact, .. } => {
-                let mut results: Vec<Arc<IndexEntry>> = by_fact
-                    .get(&kind)
-                    .map(|r| r.value().values().map(Arc::clone).collect())
-                    .unwrap_or_default();
-                results.sort_by_key(|e| e.global_sequence);
-                results
-            }
-            Self::Columnar(idx) => idx.query_by_kind(kind),
+        if let Some(idx) = &self.soa {
+            return idx.query_by_kind(kind);
         }
+        if let Some(idx) = &self.tiles64 {
+            return idx.query_by_kind(kind);
+        }
+        if let Some(idx) = &self.entity_groups {
+            return idx.query_by_kind(kind);
+        }
+        self.query_base_by_kind(kind)
     }
 
     /// Return all entries whose coordinate scope matches `scope`, sorted by
@@ -711,19 +827,16 @@ impl ScanIndex {
     ///
     /// For `Columnar`, delegates to [`ColumnarIndex::query_by_scope`].
     pub(crate) fn query_by_scope(&self, scope: &str) -> Vec<Arc<IndexEntry>> {
-        match self {
-            Self::Maps { scope_entities, .. } => {
-                // In the Maps variant the full entry data lives in
-                // `StoreIndex::streams`; `scope_entities` only tracks entity
-                // membership.  Returning an empty vec here is correct: callers
-                // that need scope queries against Maps go through
-                // `StoreIndex::query`, which uses `scope_entities` directly.
-                // This method is primarily meaningful for the Columnar variant.
-                let _ = scope_entities; // acknowledged: Maps callers use StoreIndex::query
-                Vec::new()
-            }
-            Self::Columnar(idx) => idx.query_by_scope(scope),
+        if let Some(idx) = &self.entity_groups {
+            return idx.query_by_scope(scope);
         }
+        if let Some(idx) = &self.soa {
+            return idx.query_by_scope(scope);
+        }
+        if let Some(idx) = &self.tiles64 {
+            return idx.query_by_scope(scope);
+        }
+        Vec::new()
     }
 
     /// Return all entries whose kind falls in `category` (upper 4 bits),
@@ -733,18 +846,16 @@ impl ScanIndex {
     /// the category. For `Columnar`, delegates to
     /// [`ColumnarIndex::query_by_category`].
     pub(crate) fn query_by_category(&self, category: u8) -> Vec<Arc<IndexEntry>> {
-        match self {
-            Self::Maps { by_fact, .. } => {
-                let mut results: Vec<Arc<IndexEntry>> = by_fact
-                    .iter()
-                    .filter(|r| r.key().category() == category)
-                    .flat_map(|r| r.value().values().map(Arc::clone).collect::<Vec<_>>())
-                    .collect();
-                results.sort_by_key(|e| e.global_sequence);
-                results
-            }
-            Self::Columnar(idx) => idx.query_by_category(category),
+        if let Some(idx) = &self.soa {
+            return idx.query_by_category(category);
         }
+        if let Some(idx) = &self.tiles64 {
+            return idx.query_by_category(category);
+        }
+        if let Some(idx) = &self.entity_groups {
+            return idx.query_by_category(category);
+        }
+        self.query_base_by_category(category)
     }
 
     /// Return the set of entity strings registered under `scope` (Maps variant only).
@@ -754,26 +865,51 @@ impl ScanIndex {
     ///
     /// [`query_by_scope`]: ScanIndex::query_by_scope
     pub(crate) fn scope_entity_set(&self, scope: &str) -> Option<HashSet<Arc<str>>> {
-        match self {
-            Self::Maps { scope_entities, .. } => {
-                scope_entities.get(scope).map(|r| r.value().clone())
-            }
-            Self::Columnar(_) => None,
-        }
+        self.scope_entities.get(scope).map(|r| r.value().clone())
     }
 
     /// Discard all entries.  Called during index rebuild.
     pub(crate) fn clear(&self) {
-        match self {
-            Self::Maps {
-                by_fact,
-                scope_entities,
-            } => {
-                by_fact.clear();
-                scope_entities.clear();
-            }
-            Self::Columnar(idx) => idx.clear(),
+        self.by_fact.clear();
+        self.scope_entities.clear();
+        if let Some(idx) = &self.soa {
+            idx.clear();
         }
+        if let Some(idx) = &self.entity_groups {
+            idx.clear();
+        }
+        if let Some(idx) = &self.tiles64 {
+            idx.clear();
+        }
+    }
+
+    pub(crate) fn entity_generation(&self, entity: &str) -> Option<u64> {
+        self.entity_groups
+            .as_ref()
+            .and_then(|idx| idx.entity_generation(entity))
+    }
+
+    pub(crate) fn cached_projection(
+        &self,
+        entity: &str,
+        type_id: TypeId,
+    ) -> Option<CachedProjectionSlot> {
+        self.entity_groups
+            .as_ref()
+            .and_then(|idx| idx.cached_projection(entity, type_id))
+    }
+
+    pub(crate) fn store_cached_projection(
+        &self,
+        entity: &str,
+        type_id: TypeId,
+        bytes: Vec<u8>,
+        watermark: u64,
+        cached_at_us: i64,
+    ) -> bool {
+        self.entity_groups.as_ref().is_some_and(|idx| {
+            idx.store_cached_projection(entity, type_id, bytes, watermark, cached_at_us)
+        })
     }
 }
 
@@ -1006,8 +1142,13 @@ mod tests {
 
     #[test]
     fn scan_index_maps_variant_insert_and_query() {
-        use crate::store::IndexLayout;
-        let si = ScanIndex::for_layout(&IndexLayout::AoS);
+        let si = ScanIndex::for_config(&crate::store::IndexConfig {
+            layout: crate::store::IndexLayout::AoS,
+            views: crate::store::ViewConfig::none(),
+            incremental_projection: false,
+            enable_checkpoint: true,
+            enable_mmap_index: true,
+        });
         for i in 0u64..7 {
             si.insert(&make_entry(KIND_A, i, "e1", "s1"));
         }
@@ -1017,8 +1158,13 @@ mod tests {
 
     #[test]
     fn scan_index_soa_variant_insert_and_query() {
-        use crate::store::IndexLayout;
-        let si = ScanIndex::for_layout(&IndexLayout::SoA);
+        let si = ScanIndex::for_config(&crate::store::IndexConfig {
+            layout: crate::store::IndexLayout::SoA,
+            views: crate::store::ViewConfig::none(),
+            incremental_projection: false,
+            enable_checkpoint: true,
+            enable_mmap_index: true,
+        });
         for i in 0u64..12 {
             si.insert(&make_entry(KIND_A, i, "e1", "s2"));
         }
@@ -1028,8 +1174,13 @@ mod tests {
 
     #[test]
     fn scan_index_aosoa8_variant() {
-        use crate::store::IndexLayout;
-        let si = ScanIndex::for_layout(&IndexLayout::AoSoA8);
+        let si = ScanIndex::for_config(&crate::store::IndexConfig {
+            layout: crate::store::IndexLayout::AoSoA8,
+            views: crate::store::ViewConfig::none(),
+            incremental_projection: false,
+            enable_checkpoint: true,
+            enable_mmap_index: true,
+        });
         for i in 0u64..20 {
             si.insert(&make_entry(KIND_A, i, "e1", "s1"));
         }
@@ -1039,8 +1190,13 @@ mod tests {
 
     #[test]
     fn scan_index_maps_scope_entity_set() {
-        use crate::store::IndexLayout;
-        let si = ScanIndex::for_layout(&IndexLayout::AoS);
+        let si = ScanIndex::for_config(&crate::store::IndexConfig {
+            layout: crate::store::IndexLayout::AoS,
+            views: crate::store::ViewConfig::none(),
+            incremental_projection: false,
+            enable_checkpoint: true,
+            enable_mmap_index: true,
+        });
         si.insert(&make_entry(KIND_A, 0, "ent-1", "my-scope"));
         si.insert(&make_entry(KIND_A, 1, "ent-2", "my-scope"));
         let set = si
@@ -1051,17 +1207,30 @@ mod tests {
     }
 
     #[test]
-    fn scan_index_columnar_scope_entity_set_returns_none() {
-        use crate::store::IndexLayout;
-        let si = ScanIndex::for_layout(&IndexLayout::SoA);
+    fn scan_index_columnar_scope_entity_set_uses_base_aos_view() {
+        let si = ScanIndex::for_config(&crate::store::IndexConfig {
+            layout: crate::store::IndexLayout::SoA,
+            views: crate::store::ViewConfig::none(),
+            incremental_projection: false,
+            enable_checkpoint: true,
+            enable_mmap_index: true,
+        });
         si.insert(&make_entry(KIND_A, 0, "ent-1", "my-scope"));
-        assert!(si.scope_entity_set("my-scope").is_none());
+        let set = si
+            .scope_entity_set("my-scope")
+            .expect("base AoS scope-entity map stays active across layouts");
+        assert!(set.contains("ent-1" as &str));
     }
 
     #[test]
     fn scan_index_clear() {
-        use crate::store::IndexLayout;
-        let si = ScanIndex::for_layout(&IndexLayout::SoA);
+        let si = ScanIndex::for_config(&crate::store::IndexConfig {
+            layout: crate::store::IndexLayout::SoA,
+            views: crate::store::ViewConfig::none(),
+            incremental_projection: false,
+            enable_checkpoint: true,
+            enable_mmap_index: true,
+        });
         for i in 0u64..5 {
             si.insert(&make_entry(KIND_A, i, "e1", "s1"));
         }
@@ -1071,8 +1240,13 @@ mod tests {
 
     #[test]
     fn scan_index_soaos_variant() {
-        use crate::store::IndexLayout;
-        let si = ScanIndex::for_layout(&IndexLayout::SoAoS);
+        let si = ScanIndex::for_config(&crate::store::IndexConfig {
+            layout: crate::store::IndexLayout::SoAoS,
+            views: crate::store::ViewConfig::none(),
+            incremental_projection: false,
+            enable_checkpoint: true,
+            enable_mmap_index: true,
+        });
         for i in 0u64..10 {
             si.insert(&make_entry(KIND_A, i, "e1", "s1"));
         }

@@ -15,7 +15,7 @@
 
 use batpak::prelude::*;
 use batpak::store::{
-    BatchConfig, IndexConfig, Store, StoreConfig, SyncConfig, SyncMode, WriterConfig,
+    BatchConfig, IndexConfig, Store, StoreConfig, SyncConfig, SyncMode, ViewConfig, WriterConfig,
 };
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -400,6 +400,7 @@ fn store_config_all_fields_overridable() {
         },
         writer: WriterConfig {
             channel_capacity: 128,             // non-default
+            pressure_retry_threshold_pct: 60,  // non-default
             stack_size: Some(4 * 1024 * 1024), // 4MB (non-default)
             restart_policy: batpak::store::RestartPolicy::Bounded {
                 max_restarts: 3,
@@ -414,8 +415,13 @@ fn store_config_all_fields_overridable() {
         },
         index: IndexConfig {
             layout: IndexLayout::default(), // default
-            incremental_projection: false,  // default
-            enable_checkpoint: false,       // disabled for this test
+            views: ViewConfig::none()
+                .with_soa(true)
+                .with_entity_groups(false)
+                .with_tiles64(true),
+            incremental_projection: false, // default
+            enable_checkpoint: false,      // disabled for this test
+            enable_mmap_index: false,      // non-default
         },
         clock: Some(clock_fn), // custom clock
         #[cfg(feature = "dangerous-test-hooks")]
@@ -464,6 +470,7 @@ fn store_config_debug_lists_all_integrity_relevant_fields() {
         },
         writer: WriterConfig {
             channel_capacity: 17,
+            pressure_retry_threshold_pct: 61,
             stack_size: Some(31 * 1024),
             restart_policy: batpak::store::RestartPolicy::Bounded {
                 max_restarts: 2,
@@ -478,8 +485,13 @@ fn store_config_debug_lists_all_integrity_relevant_fields() {
         },
         index: IndexConfig {
             layout: IndexLayout::default(),
+            views: ViewConfig::none()
+                .with_soa(true)
+                .with_entity_groups(false)
+                .with_tiles64(true),
             incremental_projection: false,
             enable_checkpoint: true,
+            enable_mmap_index: false,
         },
         clock: Some(clock_fn),
         #[cfg(feature = "dangerous-test-hooks")]
@@ -500,6 +512,7 @@ fn store_config_debug_lists_all_integrity_relevant_fields() {
         "every_n_events: 7",
         "WriterConfig",
         "channel_capacity: 17",
+        "pressure_retry_threshold_pct: 61",
         "stack_size: Some(31744)",
         "restart_policy: Bounded",
         "max_restarts: 2",
@@ -509,6 +522,9 @@ fn store_config_debug_lists_all_integrity_relevant_fields() {
         "max_size: 333",
         "max_bytes: 44444",
         "IndexConfig",
+        "views: ViewConfig { soa: true, entity_groups: false, tiles64: true }",
+        "enable_checkpoint: true",
+        "enable_mmap_index: false",
         "clock: Some(\"<fn>\")",
     ] {
         assert!(

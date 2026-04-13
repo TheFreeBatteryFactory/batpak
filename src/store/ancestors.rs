@@ -8,8 +8,8 @@ mod ancestors_clock;
 #[path = "ancestors_hash.rs"]
 mod ancestors_hash;
 
-pub(crate) fn walk_ancestors(
-    store: &Store,
+pub(crate) fn walk_ancestors<State>(
+    store: &Store<State>,
     event_id: u128,
     limit: usize,
 ) -> Vec<StoredEvent<serde_json::Value>> {

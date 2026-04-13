@@ -97,6 +97,23 @@
   artifacts:
     - ART-STORE-COLUMNAR
     - ART-STORE-CONFIG
+- id: INV-MULTI-VIEW-PUBLISH-AFTER-FANOUT
+  statement: Writer publish happens only after every active index view has been populated; readers must observe either all view updates for a sequence range or none of them.
+  artifacts:
+    - ART-STORE-INDEX
+    - ART-STORE-WRITER
+    - ART-CONTROL-PLANE-TESTS
+    - ART-ADR-CONTROL-PLANE
+- id: INV-FENCE-CANCELLED-STAYS-HIDDEN
+  statement: Cancelling a public visibility fence leaves its writes durable but hidden, and that hidden-range state survives reopen, snapshot export, and fast-start restore.
+  artifacts:
+    - ART-STORE-INDEX
+    - ART-STORE-WRITER
+    - ART-STORE-VISIBILITY-RANGES
+    - ART-STORE-MAINTENANCE
+    - ART-STORE-REBUILD
+    - ART-CONTROL-PLANE-TESTS
+    - ART-ADR-CONTROL-PLANE
 - id: INV-SCHEMA-VERSION-ISOLATION
   statement: Cached projections are keyed by entity + schema_version. Different versions get separate cache slots, preventing stale cached values from being served to new code.
   artifacts:

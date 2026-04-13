@@ -1,8 +1,8 @@
 use crate::event::StoredEvent;
 use crate::store::Store;
 
-pub(crate) fn walk_ancestors_by_clock(
-    store: &Store,
+pub(crate) fn walk_ancestors_by_clock<State>(
+    store: &Store<State>,
     event_id: u128,
     limit: usize,
 ) -> Vec<StoredEvent<serde_json::Value>> {

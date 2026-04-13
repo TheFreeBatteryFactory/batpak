@@ -97,6 +97,24 @@ impl SubscriptionOps {
         self
     }
 
+    /// Fold the lossy subscription stream into a derived live state.
+    ///
+    /// This is best suited to dashboards and approximate live views. Because
+    /// the underlying subscription is lossy, a slow subscriber may skip
+    /// notifications and therefore skip state transitions. Use `Cursor` when
+    /// the fold must observe every event.
+    pub fn scan<S, F>(self, initial: S, f: F) -> ScanSubscriptionOps<S, F>
+    where
+        S: Clone + Send + 'static,
+        F: FnMut(&mut S, &Notification) -> Option<S> + Send + 'static,
+    {
+        ScanSubscriptionOps {
+            ops: self,
+            state: initial,
+            fold: f,
+        }
+    }
+
     /// Blocking receive with all filters applied. Returns None when channel closes or limit reached.
     pub fn recv(&mut self) -> Option<Notification> {
         if let Some(limit) = self.limit {
@@ -116,6 +134,30 @@ impl SubscriptionOps {
                     self.count += 1;
                     return Some(n);
                 }
+            }
+        }
+    }
+}
+
+/// Stateful lossy subscription fold.
+pub struct ScanSubscriptionOps<S, F> {
+    ops: SubscriptionOps,
+    state: S,
+    fold: F,
+}
+
+impl<S, F> ScanSubscriptionOps<S, F>
+where
+    S: Clone + Send + 'static,
+    F: FnMut(&mut S, &Notification) -> Option<S> + Send + 'static,
+{
+    /// Receive the next folded state value.
+    pub fn recv(&mut self) -> Option<S> {
+        loop {
+            let notif = self.ops.recv()?;
+            if let Some(next) = (self.fold)(&mut self.state, &notif) {
+                self.state = next.clone();
+                return Some(next);
             }
         }
     }

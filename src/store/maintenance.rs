@@ -4,7 +4,7 @@ use crate::store::reader;
 use crate::store::segment::{self, Active, FramePayload};
 use crate::store::{
     Closed, CompactionConfig, CompactionStrategy, Open, Store, StoreDiagnostics, StoreError,
-    StoreStats,
+    StoreStats, WriterPressure,
 };
 
 pub(crate) fn sync(store: &Store<Open>) -> Result<(), StoreError> {
@@ -12,6 +12,8 @@ pub(crate) fn sync(store: &Store<Open>) -> Result<(), StoreError> {
     let (tx, rx) = flume::bounded(1);
     store
         .writer
+        .as_ref()
+        .expect("open store has writer")
         .tx
         .send(crate::store::writer::WriterCommand::Sync { respond: tx })
         .map_err(|_| StoreError::WriterCrashed)?;
@@ -30,11 +32,15 @@ pub(crate) fn snapshot(store: &Store<Open>, dest: &std::path::Path) -> Result<()
     let entries = std::fs::read_dir(&store.config.data_dir).map_err(StoreError::Io)?;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path
+        let is_segment = path
             .extension()
             .map(|ext| ext == segment::SEGMENT_EXTENSION)
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        let is_visibility_metadata = path
+            .file_name()
+            .map(|name| name == crate::store::visibility_ranges::VISIBILITY_RANGES_FILENAME)
+            .unwrap_or(false);
+        if is_segment || is_visibility_metadata {
             let dest_path = dest.join(entry.file_name());
             reject_symlink_leaf(&dest_path)?;
             std::fs::copy(&path, &dest_path).map_err(StoreError::Io)?;
@@ -188,12 +194,15 @@ pub(crate) fn compact(
         &store.reader,
         &store.config.data_dir,
     )?;
+    crate::store::index_rebuild::restore_cancelled_visibility_ranges(
+        &store.index,
+        &store.config.data_dir,
+    );
 
-    // Write checkpoint after post-compact rebuild so next open is fast.
-    if store.config.index.enable_checkpoint {
-        if let Err(e) = write_checkpoint_on_close(store) {
-            tracing::warn!("post-compaction checkpoint write failed: {e}");
-        }
+    // Refresh cold-start artifacts after post-compact rebuild so the next open
+    // can take the fast path.
+    if let Err(e) = write_cold_start_artifacts_on_close(store) {
+        tracing::warn!("post-compaction cold-start artifact write failed: {e}");
     }
 
     Ok(segment::CompactionResult {
@@ -207,6 +216,8 @@ pub(crate) fn close(mut store: Store<Open>) -> Result<Closed, StoreError> {
     let (tx, rx) = flume::bounded(1);
     store
         .writer
+        .as_ref()
+        .expect("open store has writer")
         .tx
         .send(crate::store::writer::WriterCommand::Shutdown { respond: tx })
         .map_err(|_| StoreError::WriterCrashed)?;
@@ -214,22 +225,36 @@ pub(crate) fn close(mut store: Store<Open>) -> Result<Closed, StoreError> {
 
     result?;
 
-    // Write index checkpoint after writer shutdown (all data fsynced).
-    // Explicit close() is the honest durable path, so checkpoint write
-    // failures must surface to the caller instead of being downgraded to
-    // a warning.
-    if store.config.index.enable_checkpoint {
-        write_checkpoint_on_close(&store)?;
-    }
+    // Write cold-start artifacts after writer shutdown (all data fsynced).
+    // Explicit close() is the honest durable path, so artifact write failures
+    // must surface to the caller instead of being downgraded to a warning.
+    write_cold_start_artifacts_on_close(&store)?;
 
     store.should_shutdown_on_drop = false;
     Ok(Closed)
 }
 
-/// Determine watermark from the latest segment file and write checkpoint.
-fn write_checkpoint_on_close(store: &Store<Open>) -> Result<(), StoreError> {
+/// Determine watermark from the latest segment file and write all enabled
+/// fast-start artifacts.
+fn write_cold_start_artifacts_on_close(store: &Store<Open>) -> Result<(), StoreError> {
     let (seg_id, offset) = find_latest_segment_watermark(&store.config.data_dir)?;
-    crate::store::checkpoint::write_checkpoint(&store.index, &store.config.data_dir, seg_id, offset)
+    if store.config.index.enable_checkpoint {
+        crate::store::checkpoint::write_checkpoint(
+            &store.index,
+            &store.config.data_dir,
+            seg_id,
+            offset,
+        )?;
+    }
+    if store.config.index.enable_mmap_index {
+        crate::store::mmap_index::write_mmap_index(
+            &store.index,
+            &store.config.data_dir,
+            seg_id,
+            offset,
+        )?;
+    }
+    Ok(())
 }
 
 /// Scan data_dir for the highest-numbered .fbat file and return (segment_id, file_size).
@@ -264,19 +289,14 @@ fn find_latest_segment_watermark(data_dir: &std::path::Path) -> Result<(u64, u64
     }
 }
 
-pub(crate) fn stats(store: &Store<Open>) -> StoreStats {
+pub(crate) fn stats<State>(store: &Store<State>) -> StoreStats {
     StoreStats {
         event_count: store.index.len(),
         global_sequence: store.index.global_sequence(),
     }
 }
 
-pub(crate) fn diagnostics(store: &Store<Open>) -> StoreDiagnostics {
-    // Extract tile stats from columnar index (0 for non-columnar layouts).
-    let (index_layout, tile_count) = match &store.index.scan {
-        crate::store::columnar::ScanIndex::Maps { .. } => ("AoS", 0),
-        crate::store::columnar::ScanIndex::Columnar(ci) => (ci.layout_name(), ci.tile_count()),
-    };
+pub(crate) fn diagnostics<State>(store: &Store<State>) -> StoreDiagnostics {
     StoreDiagnostics {
         event_count: store.index.len(),
         global_sequence: store.index.global_sequence(),
@@ -285,8 +305,19 @@ pub(crate) fn diagnostics(store: &Store<Open>) -> StoreDiagnostics {
         segment_max_bytes: store.config.segment_max_bytes,
         fd_budget: store.config.fd_budget,
         restart_policy: store.config.writer.restart_policy.clone(),
-        index_layout,
-        tile_count,
+        writer_pressure: store
+            .writer
+            .as_ref()
+            .map(|writer| WriterPressure {
+                queue_len: writer.tx.len(),
+                capacity: store.config.writer.channel_capacity,
+            })
+            .unwrap_or(WriterPressure {
+                queue_len: 0,
+                capacity: 0,
+            }),
+        index_layout: store.index.layout_name(),
+        tile_count: store.index.tile_count(),
     }
 }
 

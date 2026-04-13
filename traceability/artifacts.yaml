@@ -108,6 +108,18 @@
   kind: source
   paths:
     - src/store/writer.rs
+- id: ART-STORE-REBUILD
+  kind: source
+  paths:
+    - src/store/index_rebuild.rs
+- id: ART-STORE-MMAP-INDEX
+  kind: source
+  paths:
+    - src/store/mmap_index.rs
+- id: ART-STORE-VISIBILITY-RANGES
+  kind: source
+  paths:
+    - src/store/visibility_ranges.rs
 - id: ART-STORE-SEGMENT
   kind: source
   paths:
@@ -163,6 +175,10 @@
   kind: adr
   paths:
     - docs/adr/ADR-0004-compaction-concurrency.md
+- id: ART-ADR-CONTROL-PLANE
+  kind: adr
+  paths:
+    - docs/adr/ADR-0007-control-plane-and-fast-start.md
 - id: ART-STORE-INTERNER
   kind: source
   paths:
@@ -187,6 +203,11 @@
   kind: tests
   paths:
     - tests/unified_red.rs
+- id: ART-CONTROL-PLANE-TESTS
+  kind: tests
+  paths:
+    - tests/control_plane_surface.rs
+    - tests/mmap_cold_start.rs
 - id: ART-GROUP-COMMIT-TESTS
   kind: tests
   paths:
@@ -207,4 +228,6 @@
     - AGENTS.md
     - guide/book.toml
     - guide/src/SUMMARY.md
+    - guide/src/control-plane.md
+    - guide/src/subscriptions.md
     - templates/minimal-app/Cargo.toml

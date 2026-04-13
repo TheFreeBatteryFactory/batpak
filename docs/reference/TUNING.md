@@ -26,9 +26,14 @@ hand unless you want struct-literal initialization.
 | `batch.group_commit_max_batch` | 1 | count | 0 = unbounded drain (batch all pending). >1 = batch N appends per fsync. **Requires idempotency keys** on every append when >1. |
 | `batch.max_size` | 256 | count | Maximum items per `append_batch` call. |
 | `batch.max_bytes` | 1 MB | bytes | Maximum total payload bytes per `append_batch` call. |
-| `index.layout` | `AoS` | enum | `SoA` for scan-heavy, `AoSoA8/16/64` for SIMD, `SoAoS` for entity-local. Replaces DashMap scan indexes. |
+| `index.layout` | `AoS` | enum | Compatibility hint for scan routing. `SoA` favors broad scans, `SoAoS` favors entity-local access, and `AoSoA8/16/64` all enable the tiled overlay in the multi-view store. |
 | `index.incremental_projection` | `false` | bool | Enable for types with `supports_incremental_apply()=true`. Applies only delta events to cached state. |
 | `index.enable_checkpoint` | `true` | bool | Writes `index.ckpt` on close for fast cold start. Disable for ephemeral test stores. |
+| `index.enable_mmap_index` | `true` | bool | Enables mmap-first cold-start via `index.fbati`. Disable on filesystems that don't support mmap. |
+| `index.views.soa` | `true` | bool | Enables SoA overlay for kind/scope scans. |
+| `index.views.entity_groups` | `true` | bool | Enables SoAoS overlay for entity-local projections. |
+| `index.views.tiles64` | `true` | bool | Enables AoSoA64 overlay for vectorized replay. |
+| `writer.pressure_retry_threshold_pct` | `75` | u8 | Percentage of channel capacity at which `try_submit` returns `Outcome::Retry`. |
 
 ## Tradeoff Matrix
 
@@ -75,6 +80,10 @@ let config = StoreConfig::new("/data/events")
     .with_index_layout(IndexLayout::AoSoA16)
     .with_incremental_projection(true);
 ```
+
+`AoSoA8` and `AoSoA16` remain valid so older configs keep compiling, but the
+multi-view runtime now services all tiled presets through the unified AoSoA64
+overlay.
 
 ## Projection Cache Backends
 

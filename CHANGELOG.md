@@ -6,6 +6,48 @@ All notable changes to this project will be documented in this file.
 
 _Nothing yet — next entries go here._
 
+## [0.4.0] - 2026-04-12
+
+### Added
+- Nonblocking submission: `submit()`, `submit_batch()`, `submit_reaction()`
+  return `AppendTicket` / `BatchAppendTicket` with `wait()`, `try_check()`,
+  and `receiver()` for async interop.
+- Pressure-aware submission: `try_submit()`, `try_submit_batch()`,
+  `try_submit_reaction()` return `Outcome<...Ticket>` with `Retry` when
+  writer mailbox exceeds configurable threshold.
+- `WriterPressure` struct and `Store::writer_pressure()` for mailbox queue
+  depth inspection.
+- `Outbox` staging buffer: `stage()` validates eagerly, `flush()` /
+  `submit_flush()` commits as batch.
+- `VisibilityFence`: writes are durable but invisible until `commit()`;
+  auto-cancels on `Drop`.
+- `Store<ReadOnly>` typestate: opens without writer thread, compile-time
+  prevents writes, supports all read/query/project/cursor APIs.
+- Multi-view index: base AoS + simultaneous SoA, SoAoS, and AoSoA64
+  overlays; queries auto-route by access pattern.
+- `ViewConfig` for per-overlay control; defaults to all enabled.
+- Per-entity generation counters via `entity_generation()` and
+  `project_if_changed()`.
+- `scan()` combinator on `SubscriptionOps` for live lossy folds.
+- `cursor_worker()` with supervised restart from last committed position.
+- mmap-first cold-start via `index.fbati` artifact with parallel SIDX
+  fallback.
+- `cursor_guaranteed()` now available on both `Store<Open>` and
+  `Store<ReadOnly>`.
+
+### Changed
+- Existing `append()` / `append_batch()` are now wrappers over
+  `submit().wait()` (source-compatible).
+- Cancelled visibility fence ranges use `Arc`-backed immutable snapshots
+  (readers pay refcount bump, not vec copy).
+- Writer shutdown drain now explicitly cancels any active visibility fence
+  and unblocks pending tickets.
+- Default `IndexConfig` enables all view overlays and mmap index.
+
+### Fixed
+- Writer shutdown with active visibility fence no longer leaks deferred
+  ticket responses.
+
 ## [0.3.0] - 2026-04-12
 
 ### Changed (breaking — red team hardening pass)

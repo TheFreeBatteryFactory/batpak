@@ -12,6 +12,36 @@ pub struct StoreStats {
     pub global_sequence: u64,
 }
 
+/// Snapshot of writer mailbox pressure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub struct WriterPressure {
+    /// Number of queued commands currently waiting in the writer mailbox.
+    pub queue_len: usize,
+    /// Configured bounded capacity of the writer mailbox.
+    pub capacity: usize,
+}
+
+impl WriterPressure {
+    /// Fraction of mailbox capacity currently in use.
+    pub fn utilization(&self) -> f64 {
+        if self.capacity == 0 {
+            return 0.0;
+        }
+        self.queue_len as f64 / self.capacity as f64
+    }
+
+    /// Number of free command slots remaining before the mailbox is full.
+    pub fn headroom(&self) -> usize {
+        self.capacity.saturating_sub(self.queue_len)
+    }
+
+    /// True when the mailbox has no queued commands.
+    pub fn is_idle(&self) -> bool {
+        self.queue_len == 0
+    }
+}
+
 /// Detailed diagnostic snapshot of the store's internal configuration and state.
 #[derive(Clone, Debug)]
 #[must_use]
@@ -31,7 +61,9 @@ pub struct StoreDiagnostics {
     pub fd_budget: usize,
     /// Writer thread restart policy used on panic.
     pub restart_policy: RestartPolicy,
-    /// Active index layout name (AoS, SoA, AoSoA8, AoSoA16, AoSoA64, SoAoS).
+    /// Current writer mailbox pressure snapshot.
+    pub writer_pressure: WriterPressure,
+    /// Active scan topology name (`AoS` or `MultiView`).
     pub index_layout: &'static str,
     /// Number of tiles in the columnar index (0 for non-tiled layouts).
     pub tile_count: usize,

@@ -8,7 +8,7 @@ fn test_store_with_writer(tx: flume::Sender<writer::WriterCommand>) -> (Store, T
         index: Arc::new(index::StoreIndex::new()),
         reader: Arc::new(reader::Reader::new(dir.path().to_path_buf(), 4)),
         cache: Box::new(NoCache),
-        writer: writer::WriterHandle::from_parts_for_test(tx, subscribers),
+        writer: Some(writer::WriterHandle::from_parts_for_test(tx, subscribers)),
         config: Arc::new(StoreConfig::new(dir.path().to_path_buf())),
         should_shutdown_on_drop: true,
         _state: std::marker::PhantomData,

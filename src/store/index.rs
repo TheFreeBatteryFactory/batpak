@@ -1,9 +1,11 @@
 use crate::coordinate::Coordinate;
 use crate::event::{EventKind, HashChain};
-use crate::store::columnar::ScanIndex;
-use crate::store::config::IndexLayout;
+use crate::store::columnar::{CachedProjectionSlot, ScanIndex};
+use crate::store::config::IndexConfig;
 use crate::store::interner::StringInterner;
 use dashmap::DashMap;
+use parking_lot::RwLock;
+use std::any::TypeId;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -21,13 +23,69 @@ pub(crate) struct SequenceGate {
     /// Exclusive upper bound for reader visibility. Entries with
     /// `global_sequence < visible` are returned by read methods.
     visible: AtomicU64,
+    /// Currently active visibility fence token, or 0 when no fence is active.
+    active_fence: AtomicU64,
+    /// Lowest sequence staged into the active fence, or `u64::MAX` if the
+    /// fence has not yet staged any entries.
+    active_fence_start: AtomicU64,
+    /// Exclusive upper bound of the highest sequence staged into the active fence.
+    active_fence_end: AtomicU64,
+    /// Monotonic token allocator for visibility fences.
+    next_fence_token: AtomicU64,
+    /// Permanently hidden fence ranges cancelled in the current runtime.
+    /// Stored as an immutable `Arc` snapshot so that readers pay only a
+    /// refcount bump instead of cloning the whole vec on every query.
+    cancelled_ranges: RwLock<Arc<Vec<(u64, u64)>>>,
+}
+
+#[derive(Clone, Debug)]
+struct VisibilitySnapshot {
+    visible: u64,
+    cancelled_ranges: Arc<Vec<(u64, u64)>>,
+}
+
+impl VisibilitySnapshot {
+    fn is_visible(&self, sequence: u64) -> bool {
+        if sequence >= self.visible {
+            return false;
+        }
+        !self
+            .cancelled_ranges
+            .iter()
+            .any(|(start, end)| sequence >= *start && sequence < *end)
+    }
 }
 
 impl SequenceGate {
+    fn insert_cancelled_range(ranges: &mut Vec<(u64, u64)>, start: u64, end: u64) {
+        if start >= end {
+            return;
+        }
+        ranges.push((start, end));
+        ranges.sort_by_key(|(range_start, _)| *range_start);
+
+        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+        for (range_start, range_end) in ranges.drain(..) {
+            if let Some((_, merged_end)) = merged.last_mut() {
+                if range_start <= *merged_end {
+                    *merged_end = (*merged_end).max(range_end);
+                    continue;
+                }
+            }
+            merged.push((range_start, range_end));
+        }
+        *ranges = merged;
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             allocated: AtomicU64::new(0),
             visible: AtomicU64::new(0),
+            active_fence: AtomicU64::new(0),
+            active_fence_start: AtomicU64::new(u64::MAX),
+            active_fence_end: AtomicU64::new(0),
+            next_fence_token: AtomicU64::new(1),
+            cancelled_ranges: RwLock::new(Arc::new(Vec::new())),
         }
     }
 
@@ -86,6 +144,107 @@ impl SequenceGate {
     pub(crate) fn clear(&self) {
         self.allocated.store(0, Ordering::Release);
         self.visible.store(0, Ordering::Release);
+        self.active_fence.store(0, Ordering::Release);
+        self.active_fence_start.store(u64::MAX, Ordering::Release);
+        self.active_fence_end.store(0, Ordering::Release);
+        self.next_fence_token.store(1, Ordering::Release);
+        *self.cancelled_ranges.write() = Arc::new(Vec::new());
+    }
+
+    pub(crate) fn begin_fence(&self) -> Result<u64, crate::store::StoreError> {
+        let token = self.next_fence_token.fetch_add(1, Ordering::AcqRel);
+        match self
+            .active_fence
+            .compare_exchange(0, token, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => {
+                self.active_fence_start.store(u64::MAX, Ordering::Release);
+                self.active_fence_end.store(0, Ordering::Release);
+                Ok(token)
+            }
+            Err(_) => Err(crate::store::StoreError::VisibilityFenceActive),
+        }
+    }
+
+    pub(crate) fn active_fence_token(&self) -> Option<u64> {
+        let token = self.active_fence.load(Ordering::Acquire);
+        (token != 0).then_some(token)
+    }
+
+    pub(crate) fn note_fence_progress(
+        &self,
+        token: u64,
+        start: u64,
+        end: u64,
+    ) -> Result<(), crate::store::StoreError> {
+        if self.active_fence.load(Ordering::Acquire) != token {
+            return Err(crate::store::StoreError::VisibilityFenceNotActive);
+        }
+        let _ =
+            self.active_fence_start
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    Some(current.min(start))
+                });
+        let _ =
+            self.active_fence_end
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    Some(current.max(end))
+                });
+        Ok(())
+    }
+
+    pub(crate) fn finish_fence(
+        &self,
+        token: u64,
+        publish_to: Option<u64>,
+    ) -> Result<(), crate::store::StoreError> {
+        if self.active_fence.load(Ordering::Acquire) != token {
+            return Err(crate::store::StoreError::VisibilityFenceNotActive);
+        }
+        if let Some(up_to) = publish_to {
+            self.publish(up_to);
+        }
+        self.active_fence.store(0, Ordering::Release);
+        self.active_fence_start.store(u64::MAX, Ordering::Release);
+        self.active_fence_end.store(0, Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) fn cancel_fence(&self, token: u64) -> Result<(), crate::store::StoreError> {
+        if self.active_fence.load(Ordering::Acquire) != token {
+            return Err(crate::store::StoreError::VisibilityFenceNotActive);
+        }
+        let start = self.active_fence_start.load(Ordering::Acquire);
+        let end = self.active_fence_end.load(Ordering::Acquire);
+        if start != u64::MAX && start < end {
+            let mut guard = self.cancelled_ranges.write();
+            let mut ranges = (**guard).clone();
+            Self::insert_cancelled_range(&mut ranges, start, end);
+            *guard = Arc::new(ranges);
+        }
+        self.active_fence.store(0, Ordering::Release);
+        self.active_fence_start.store(u64::MAX, Ordering::Release);
+        self.active_fence_end.store(0, Ordering::Release);
+        Ok(())
+    }
+
+    fn snapshot(&self) -> VisibilitySnapshot {
+        VisibilitySnapshot {
+            visible: self.visible.load(Ordering::Acquire),
+            cancelled_ranges: Arc::clone(&self.cancelled_ranges.read()),
+        }
+    }
+
+    pub(crate) fn cancelled_ranges_snapshot(&self) -> Vec<(u64, u64)> {
+        self.cancelled_ranges.read().as_ref().clone()
+    }
+
+    pub(crate) fn restore_cancelled_ranges(&self, ranges: Vec<(u64, u64)>) {
+        let mut built = Vec::new();
+        for (start, end) in ranges {
+            Self::insert_cancelled_range(&mut built, start, end);
+        }
+        *self.cancelled_ranges.write() = Arc::new(built);
     }
 }
 
@@ -204,14 +363,14 @@ impl IndexEntry {
 impl StoreIndex {
     #[cfg(test)]
     pub(crate) fn new() -> Self {
-        Self::with_layout(&IndexLayout::default())
+        Self::with_config(&IndexConfig::default())
     }
 
-    /// Create a StoreIndex with the specified scan index layout.
-    pub(crate) fn with_layout(layout: &IndexLayout) -> Self {
+    /// Create a StoreIndex with the specified index configuration.
+    pub(crate) fn with_config(config: &IndexConfig) -> Self {
         Self {
             streams: DashMap::new(),
-            scan: ScanIndex::for_layout(layout),
+            scan: ScanIndex::for_config(config),
             by_id: DashMap::new(),
             latest: DashMap::new(),
             sequence: SequenceGate::new(),
@@ -329,11 +488,11 @@ impl StoreIndex {
     }
 
     pub(crate) fn get_by_id(&self, event_id: u128) -> Option<IndexEntry> {
-        let vis = self.sequence.visible();
+        let visibility = self.sequence.snapshot();
         self.by_id
             .get(&event_id)
             .map(|r| r.value().as_ref().clone())
-            .filter(|e| e.global_sequence < vis)
+            .filter(|e| visibility.is_visible(e.global_sequence))
     }
 
     /// Returns the latest entry for `entity`, filtered by visibility.
@@ -346,21 +505,21 @@ impl StoreIndex {
     /// the next instruction). The writer calls this only BEFORE `insert_batch()`,
     /// so it always sees previously-published state.
     pub(crate) fn get_latest(&self, entity: &str) -> Option<IndexEntry> {
-        let vis = self.sequence.visible();
+        let visibility = self.sequence.snapshot();
         self.latest
             .get(entity)
             .map(|r| r.value().as_ref().clone())
-            .filter(|e| e.global_sequence < vis)
+            .filter(|e| visibility.is_visible(e.global_sequence))
     }
 
     pub(crate) fn stream(&self, entity: &str) -> Vec<IndexEntry> {
-        let vis = self.sequence.visible();
+        let visibility = self.sequence.snapshot();
         self.streams
             .get(entity)
             .map(|r| {
                 r.value()
                     .values()
-                    .filter(|arc| arc.global_sequence < vis)
+                    .filter(|arc| visibility.is_visible(arc.global_sequence))
                     .map(|arc| arc.as_ref().clone())
                     .collect()
             })
@@ -368,13 +527,14 @@ impl StoreIndex {
     }
 
     pub(crate) fn stream_since(&self, entity: &str, watermark: u64) -> Vec<IndexEntry> {
-        let vis = self.sequence.visible();
+        let visibility = self.sequence.snapshot();
         self.streams
             .get(entity)
             .map(|r| {
                 r.value()
                     .values()
-                    .filter(|arc| arc.global_sequence < vis && arc.global_sequence > watermark)
+                    .filter(|arc| arc.global_sequence > watermark)
+                    .filter(|arc| visibility.is_visible(arc.global_sequence))
                     .map(|arc| arc.as_ref().clone())
                     .collect()
             })
@@ -382,14 +542,13 @@ impl StoreIndex {
     }
 
     pub(crate) fn query(&self, region: &crate::coordinate::Region) -> Vec<IndexEntry> {
+        let visibility = self.sequence.snapshot();
         // Region query strategy:
         // 1. Determine candidate set based on most selective filter
         // 2. Apply remaining filters to narrow results
         // 3. Filter by visibility watermark
         // 4. Apply clock_range last (it's per-entity, cheap)
         use crate::coordinate::KindFilter;
-        let vis = self.sequence.visible();
-
         let mut candidates: Vec<IndexEntry> = if let Some(ref prefix) = region.entity_prefix {
             // Entity prefix → scan streams map for matching keys
             self.streams
@@ -498,7 +657,7 @@ impl StoreIndex {
         }
 
         // Visibility watermark: exclude entries not yet published.
-        candidates.retain(|e| e.global_sequence < vis);
+        candidates.retain(|e| visibility.is_visible(e.global_sequence));
 
         // Clock range filter (always per-entity clock, not global_sequence)
         if let Some((min, max)) = region.clock_range {
@@ -573,6 +732,82 @@ impl StoreIndex {
             inserted_any: false,
             committed: false,
         }
+    }
+
+    pub(crate) fn layout_name(&self) -> &'static str {
+        self.scan.layout_name()
+    }
+
+    pub(crate) fn tile_count(&self) -> usize {
+        self.scan.tile_count()
+    }
+
+    pub(crate) fn entity_generation(&self, entity: &str) -> Option<u64> {
+        self.scan.entity_generation(entity).or_else(|| {
+            self.streams
+                .get(entity)
+                .map(|entries| entries.value().len() as u64)
+        })
+    }
+
+    pub(crate) fn cached_projection(
+        &self,
+        entity: &str,
+        type_id: TypeId,
+    ) -> Option<CachedProjectionSlot> {
+        self.scan.cached_projection(entity, type_id)
+    }
+
+    pub(crate) fn store_cached_projection(
+        &self,
+        entity: &str,
+        type_id: TypeId,
+        bytes: Vec<u8>,
+        watermark: u64,
+        cached_at_us: i64,
+    ) -> bool {
+        self.scan
+            .store_cached_projection(entity, type_id, bytes, watermark, cached_at_us)
+    }
+
+    pub(crate) fn begin_visibility_fence(&self) -> Result<u64, crate::store::StoreError> {
+        self.sequence.begin_fence()
+    }
+
+    pub(crate) fn active_visibility_fence(&self) -> Option<u64> {
+        self.sequence.active_fence_token()
+    }
+
+    pub(crate) fn finish_visibility_fence(
+        &self,
+        token: u64,
+        publish_to: Option<u64>,
+    ) -> Result<(), crate::store::StoreError> {
+        self.sequence.finish_fence(token, publish_to)
+    }
+
+    pub(crate) fn note_visibility_fence_progress(
+        &self,
+        token: u64,
+        start: u64,
+        end: u64,
+    ) -> Result<(), crate::store::StoreError> {
+        self.sequence.note_fence_progress(token, start, end)
+    }
+
+    pub(crate) fn cancel_visibility_fence(
+        &self,
+        token: u64,
+    ) -> Result<(), crate::store::StoreError> {
+        self.sequence.cancel_fence(token)
+    }
+
+    pub(crate) fn cancelled_visibility_ranges(&self) -> Vec<(u64, u64)> {
+        self.sequence.cancelled_ranges_snapshot()
+    }
+
+    pub(crate) fn restore_cancelled_visibility_ranges(&self, ranges: Vec<(u64, u64)>) {
+        self.sequence.restore_cancelled_ranges(ranges);
     }
 }
 

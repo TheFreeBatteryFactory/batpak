@@ -128,6 +128,11 @@ impl Reader {
         self.active_segment_id.store(id, Ordering::Release);
     }
 
+    /// Return the currently configured active segment ID.
+    pub(crate) fn active_segment_id(&self) -> u64 {
+        self.active_segment_id.load(Ordering::Acquire)
+    }
+
     /// Check if a segment is sealed (not the active segment).
     fn is_sealed(&self, segment_id: u64) -> bool {
         segment_id < self.active_segment_id.load(Ordering::Acquire)

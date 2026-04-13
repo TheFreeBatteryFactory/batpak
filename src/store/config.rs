@@ -22,10 +22,9 @@ pub enum SyncMode {
 /// - `SoA`: Parallel sorted arrays per field. Replaces `by_fact` and `scope_entities`
 ///   DashMaps. Best for scan queries (`by_fact`, `by_scope`). Up to 10x faster for
 ///   analytical workloads.
-/// - `AoSoA8/16/64`: Tiled SoA with cache-line-aligned tiles. Replaces scan DashMaps.
-///   Best for SIMD compute and projection replay. Tile size determines vectorization width:
-///   8 fills AVX (256-bit), 16 fills AVX-512 or Apple M-series cache line, 64 fills
-///   a full x86 cache line of u64s. Const-generic — compiler fully monomorphizes each variant.
+/// - `AoSoA8/16/64`: Legacy tiled-layout selectors preserved for compatibility.
+///   In the multi-view store they act as hints that enable the tiled overlay while the
+///   runtime maintains the unified AoSoA64 replay/scanning view.
 #[derive(Clone, Debug, Default)]
 pub enum IndexLayout {
     /// Struct-per-entry in DashMap. Current behavior.
@@ -33,11 +32,11 @@ pub enum IndexLayout {
     AoS,
     /// Parallel sorted arrays. Replaces by_fact + scope_entities DashMaps.
     SoA,
-    /// 8-element tiles. Fits AVX register (256-bit).
+    /// Compatibility selector for the tiled overlay.
     AoSoA8,
-    /// 16-element tiles. Fits AVX-512 or Apple M-series cache line (128 bytes).
+    /// Compatibility selector for the tiled overlay.
     AoSoA16,
-    /// 64-element tiles. Fits full x86 cache line of u64s.
+    /// Preferred tiled overlay selector.
     AoSoA64,
     /// Hybrid: AoS outer (entity groups via HashMap), SoA inner (events within
     /// each entity stored as parallel arrays). Best for entity-local queries
@@ -45,6 +44,61 @@ pub enum IndexLayout {
     /// Matches the ECS archetype pattern: entity lookup is O(1) hash,
     /// event scan within entity is columnar.
     SoAoS,
+}
+
+/// Independently activatable in-memory index overlays.
+#[derive(Clone, Debug)]
+pub struct ViewConfig {
+    /// Enable the SoA overlay for broad kind/scope scans.
+    pub soa: bool,
+    /// Enable the SoAoS entity-group overlay for entity-local queries.
+    pub entity_groups: bool,
+    /// Enable the AoSoA64 tiled overlay for replay/scanning hot loops.
+    pub tiles64: bool,
+}
+
+impl ViewConfig {
+    /// Enable all currently supported overlays.
+    pub fn all() -> Self {
+        Self {
+            soa: true,
+            entity_groups: true,
+            tiles64: true,
+        }
+    }
+
+    /// Disable all optional overlays, leaving the base AoS maps only.
+    pub fn none() -> Self {
+        Self {
+            soa: false,
+            entity_groups: false,
+            tiles64: false,
+        }
+    }
+
+    /// Enable or disable the SoA overlay.
+    pub fn with_soa(mut self, enabled: bool) -> Self {
+        self.soa = enabled;
+        self
+    }
+
+    /// Enable or disable the SoAoS entity-group overlay.
+    pub fn with_entity_groups(mut self, enabled: bool) -> Self {
+        self.entity_groups = enabled;
+        self
+    }
+
+    /// Enable or disable the AoSoA64 tiled overlay.
+    pub fn with_tiles64(mut self, enabled: bool) -> Self {
+        self.tiles64 = enabled;
+        self
+    }
+}
+
+impl Default for ViewConfig {
+    fn default() -> Self {
+        Self::all()
+    }
 }
 
 /// Batch append limits and group-commit behavior.
@@ -76,6 +130,10 @@ impl Default for BatchConfig {
 pub struct WriterConfig {
     /// Capacity of the flume channel between callers and the writer thread.
     pub channel_capacity: usize,
+    /// Soft-pressure threshold, expressed as a percentage of channel capacity.
+    /// `try_submit*` returns `Outcome::Retry` once the queued command count
+    /// reaches this fraction of the mailbox.
+    pub pressure_retry_threshold_pct: u8,
     /// Optional writer thread stack size. None = OS default.
     pub stack_size: Option<usize>,
     /// Writer auto-restart policy on panic.
@@ -88,6 +146,7 @@ impl Default for WriterConfig {
     fn default() -> Self {
         Self {
             channel_capacity: 4096,
+            pressure_retry_threshold_pct: 75,
             stack_size: None,
             restart_policy: RestartPolicy::default(),
             shutdown_drain_limit: 1024,
@@ -118,18 +177,24 @@ impl Default for SyncConfig {
 pub struct IndexConfig {
     /// Memory layout for the secondary query index.
     pub layout: IndexLayout,
+    /// Optional overlay views that are maintained alongside the AoS base view.
+    pub views: ViewConfig,
     /// Enable incremental projection apply (delta replay from cached watermark).
     pub incremental_projection: bool,
     /// Write an index checkpoint on close (and after compact) for fast cold start.
     pub enable_checkpoint: bool,
+    /// Prefer the mmap index artifact on open before checkpoint / segment replay.
+    pub enable_mmap_index: bool,
 }
 
 impl Default for IndexConfig {
     fn default() -> Self {
         Self {
             layout: IndexLayout::default(),
+            views: ViewConfig::default(),
             incremental_projection: false,
             enable_checkpoint: true,
+            enable_mmap_index: true,
         }
     }
 }
@@ -202,6 +267,13 @@ impl StoreConfig {
                 "writer.channel_capacity must be > 0 (0 creates a rendezvous channel that deadlocks)".into(),
             ));
         }
+        if self.writer.pressure_retry_threshold_pct == 0
+            || self.writer.pressure_retry_threshold_pct > 100
+        {
+            return Err(crate::store::StoreError::Configuration(
+                "writer.pressure_retry_threshold_pct must be 1..=100".into(),
+            ));
+        }
         if self.fd_budget == 0 {
             return Err(crate::store::StoreError::Configuration(
                 "fd_budget must be > 0".into(),
@@ -227,6 +299,10 @@ impl StoreConfig {
                 "batch.max_bytes must be 1..=16MB".into(),
             ));
         }
+        // group_commit_max_batch: 0 = unbounded drain (writer drains all pending
+        // appends before syncing); 1 = per-event sync (default, backward compatible);
+        // N > 1 = drain up to N-1 additional appends before syncing.
+        // All values are valid; no range check needed.
         Ok(())
     }
 
@@ -251,6 +327,21 @@ impl StoreConfig {
     /// Set the capacity of the writer command channel.
     pub fn with_writer_channel_capacity(mut self, writer_channel_capacity: usize) -> Self {
         self.writer.channel_capacity = writer_channel_capacity;
+        self
+    }
+
+    /// Set the soft-pressure threshold used by `try_submit*`.
+    pub fn with_writer_pressure_retry_threshold_pct(
+        mut self,
+        pressure_retry_threshold_pct: u8,
+    ) -> Self {
+        self.writer.pressure_retry_threshold_pct = pressure_retry_threshold_pct;
+        self
+    }
+
+    /// Set the optional multi-view overlay configuration.
+    pub fn with_views(mut self, views: ViewConfig) -> Self {
+        self.index.views = views;
         self
     }
 
@@ -319,6 +410,12 @@ impl StoreConfig {
     /// Enable or disable index checkpoint on close.
     pub fn with_enable_checkpoint(mut self, enable_checkpoint: bool) -> Self {
         self.index.enable_checkpoint = enable_checkpoint;
+        self
+    }
+
+    /// Enable or disable the mmap-first index artifact on close/open.
+    pub fn with_enable_mmap_index(mut self, enable_mmap_index: bool) -> Self {
+        self.index.enable_mmap_index = enable_mmap_index;
         self
     }
 
