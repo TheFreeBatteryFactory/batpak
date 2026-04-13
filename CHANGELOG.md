@@ -6,6 +6,26 @@ All notable changes to this project will be documented in this file.
 
 _Nothing yet — next entries go here._
 
+## [0.4.1] - 2026-04-13
+
+### Fixed
+- `close()` no longer writes both mmap and checkpoint artifacts — when mmap is enabled (default), checkpoint is skipped, cutting close-path cost roughly in half at high event counts
+- Projection bench (`projection_first_pass`) no longer includes `close()` in measured routine, eliminating a benchmark-shape artifact that inflated the reported regression
+
+### Added
+- `ProjectionStrategy` enum (`pub(crate)`) with `compute_strategy()` pure function — replaces cascading if/else in `project()` with flat enum dispatch for code clarity and testability
+- `read_events_batch()` / `read_event_only()` on `Reader` — projection-specific batch reader that skips `Coordinate::new()` and `StoredEvent` wrapping, returning `Vec<Event<Value>>` directly
+- `ProjectionTimings` with per-phase timing breakdown (plan build, group-local lookup, cache key, prefetch, external cache probe, disk read, event extract, replay fold, cache store)
+- `OpenIndexReport` diagnostics (path taken, restored/tail entry counts, elapsed time) exposed via `store.diagnostics().open_report`
+- `CacheCapabilities.is_noop` field for honest `NoCache` detection in projection strategy
+- Bench lane splits: `reopen_open_only` (open without close), `projection_first_pass_with_close` (lifecycle), `cold_nocache` / `cold_native_cache` (strategy-specific)
+- `ProjectionColdPathGate` perf gate (50ms threshold for 1k events, observed 8.4ms)
+- Prefetch moved to Phase 1c (before group-local check) for I/O overlap on cold path
+- `GroupLocalIncremental` strategy — incremental apply from group-local cache baseline
+
+### Changed
+- Cancelled visibility fence ranges now use `Arc`-backed immutable snapshots (readers pay refcount bump, not vec copy)
+
 ## [0.4.0] - 2026-04-12
 
 ### Added
