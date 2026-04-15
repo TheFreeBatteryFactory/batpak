@@ -185,7 +185,7 @@ jobs:
       - uses: ./.github/actions/setup-devcontainer
       - name: Build root docs site + rustdoc
         run: bash ./scripts/run-in-devcontainer.sh 'cargo xtask docs'
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: target/site
       - id: deploy
