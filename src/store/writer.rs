@@ -5,17 +5,22 @@
 compile_error!(
     "Red flag: only Once and Bounded restart policies. \
      Exponential backoff belongs in the product's supervisor, not here. \
-     See: SPEC.md ## RED FLAGS."
+     See: REFERENCE.md."
 );
 
 use crate::coordinate::{Coordinate, DagPosition};
-use crate::event::{Event, EventHeader, EventKind, HashChain, StoredEvent};
+use crate::event::{Event, EventHeader, EventKind, HashChain};
 use crate::store::contracts::{BatchAppendItem, CausationRef};
+pub use crate::store::fanout::Notification;
+use crate::store::fanout::{CommittedEventEnvelope, ReactorSubscriberList, SubscriberList};
 use crate::store::index::{DiskPos, IndexEntry, StoreIndex};
 use crate::store::segment::{self, Active, FramePayloadRef, Segment};
+use crate::store::staging::{
+    PreparedBatch, PreparedBatchInternedIds, PreparedBatchItem, StagedCommitMeta,
+    StagedCommitTiming, StagedCommittedEvent,
+};
 use crate::store::{AppendReceipt, BatchStage, StoreConfig, StoreError};
-use flume::{Receiver, Sender, TrySendError};
-use parking_lot::Mutex;
+use flume::{Receiver, Sender};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Instant;
@@ -27,8 +32,7 @@ const BATCH_MARKER_ENTITY: &str = "_batch";
 const BATCH_MARKER_SCOPE: &str = "_system";
 
 /// WriterCommand: messages sent to the background writer thread via flume.
-/// All respond channels: flume::Sender — sync send from writer, async recv from caller.
-/// [SPEC:src/store/writer.rs]
+/// All respond channels use `flume::Sender`: sync send from the writer, async recv from callers.
 pub(crate) enum WriterCommand {
     BeginVisibilityFence {
         token: u64,
@@ -88,46 +92,8 @@ pub(crate) struct WriterHandle {
     _thread: Option<std::thread::JoinHandle<()>>,
 }
 
-/// SubscriberList: push-based notification fanout via flume channels.
-/// [SPEC:src/store/writer.rs — try_send pattern]
-pub(crate) struct SubscriberList {
-    senders: Mutex<Vec<Sender<Notification>>>,
-}
-
-/// Private richer event envelope used by internal reactor consumers so they do
-/// not need to re-read the just-committed event from disk.
-#[derive(Clone, Debug)]
-pub(crate) struct CommittedEventEnvelope {
-    pub notification: Notification,
-    pub stored: StoredEvent<serde_json::Value>,
-}
-
-pub(crate) struct ReactorSubscriberList {
-    senders: Mutex<Vec<Sender<CommittedEventEnvelope>>>,
-}
-
-/// Notification: lightweight event summary pushed to subscribers.
-/// Must derive Clone (used in try_send broadcast loop).
-/// [SPEC:src/store/writer.rs — Notification struct]
-#[derive(Clone, Debug)]
-pub struct Notification {
-    /// Unique ID of the event that was appended.
-    pub event_id: u128,
-    /// Correlation ID linking this event to a causal chain.
-    pub correlation_id: u128,
-    /// ID of the event that caused this one; `None` for root-cause events.
-    pub causation_id: Option<u128>,
-    /// Entity and scope coordinates for the event.
-    pub coord: Coordinate,
-    /// Event kind (type discriminant).
-    pub kind: EventKind,
-    /// Global sequence number assigned to this event at commit time.
-    pub sequence: u64,
-}
-
 /// RestartPolicy: how the writer recovers from panics.
-/// [SPEC:src/store/writer.rs — RestartPolicy]
-/// EXACTLY two variants. Adding a third violates the RED FLAGS.
+/// Keep this surface intentionally small: exactly two variants.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub enum RestartPolicy {
@@ -143,60 +109,8 @@ pub enum RestartPolicy {
     },
 }
 
-impl SubscriberList {
-    pub(crate) fn new() -> Self {
-        Self {
-            senders: Mutex::new(Vec::new()),
-        }
-    }
-
-    /// Subscribe: create a new bounded channel, store the sender, return the receiver.
-    pub(crate) fn subscribe(&self, capacity: usize) -> Receiver<Notification> {
-        let (tx, rx) = flume::bounded(capacity);
-        self.senders.lock().push(tx);
-        rx
-    }
-
-    /// Broadcast: try_send to all, retain on Ok or Full, prune on Disconnected.
-    /// NEVER use blocking send() — one slow subscriber must not block the writer.
-    /// [DEP:flume::Sender::try_send] → Result<(), TrySendError<T>>
-    /// [DEP:flume::TrySendError::Full] / [DEP:flume::TrySendError::Disconnected]
-    pub(crate) fn broadcast(&self, notif: &Notification) {
-        let mut guard = self.senders.lock();
-        guard.retain(|tx| match tx.try_send(notif.clone()) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) => true,
-            Err(TrySendError::Disconnected(_)) => false,
-        });
-    }
-}
-
-impl ReactorSubscriberList {
-    pub(crate) fn new() -> Self {
-        Self {
-            senders: Mutex::new(Vec::new()),
-        }
-    }
-
-    pub(crate) fn subscribe(&self, capacity: usize) -> Receiver<CommittedEventEnvelope> {
-        let (tx, rx) = flume::bounded(capacity);
-        self.senders.lock().push(tx);
-        rx
-    }
-
-    pub(crate) fn broadcast(&self, envelope: &CommittedEventEnvelope) {
-        let mut guard = self.senders.lock();
-        guard.retain(|tx| match tx.try_send(envelope.clone()) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) => true,
-            Err(TrySendError::Disconnected(_)) => false,
-        });
-    }
-}
-
 impl WriterHandle {
     /// Spawn the background writer thread.
-    /// [SPEC:src/store/writer.rs — "batpak-writer-{hash}" thread]
     pub(crate) fn spawn(
         config: &Arc<StoreConfig>,
         index: &Arc<StoreIndex>,
@@ -270,7 +184,7 @@ impl WriterHandle {
     // NOTE: No send_append() method here. Store::append() and Store::append_reaction()
     // in store/mod.rs create one-shot flume channels and send WriterCommands directly
     // via self.writer.tx.send(). This avoids an unnecessary abstraction layer.
-    // WriterHandle.tx is pub(crate) for direct access. [SPEC:INVARIANTS item 4]
+    // `WriterHandle::tx` is `pub(crate)` so store control paths can talk to the writer directly.
 }
 
 /// Writer's mutable runtime state, grouped to reduce handle_append param count.
@@ -287,7 +201,7 @@ struct WriterState<'a> {
     /// Flushed as a footer on segment rotation and shutdown.
     sidx_collector: crate::store::sidx::SidxEntryCollector,
     /// Currently active public visibility fence, if any.
-    active_fence: Option<ActiveVisibilityFence>,
+    fence_ledger: Option<FenceLedger>,
 }
 
 enum PendingFenceResponse {
@@ -301,12 +215,229 @@ enum PendingFenceResponse {
     },
 }
 
-struct ActiveVisibilityFence {
+impl PendingFenceResponse {
+    fn complete_cancelled(self) {
+        match self {
+            Self::Single { respond, .. } => {
+                let _ = respond.send(Err(StoreError::VisibilityFenceCancelled));
+            }
+            Self::Batch { respond, .. } => {
+                let _ = respond.send(Err(StoreError::VisibilityFenceCancelled));
+            }
+        }
+    }
+
+    fn complete_ok(self) {
+        match self {
+            Self::Single { respond, receipt } => {
+                let _ = respond.send(Ok(receipt));
+            }
+            Self::Batch { respond, receipts } => {
+                let _ = respond.send(Ok(receipts));
+            }
+        }
+    }
+}
+
+struct FenceLedger {
     token: u64,
-    pending_publish_up_to: Option<u64>,
+    publish_up_to: Option<u64>,
     notifications: Vec<Notification>,
     envelopes: Vec<CommittedEventEnvelope>,
     responses: Vec<PendingFenceResponse>,
+}
+
+impl FenceLedger {
+    fn new(token: u64) -> Self {
+        Self {
+            token,
+            publish_up_to: None,
+            notifications: Vec::new(),
+            envelopes: Vec::new(),
+            responses: Vec::new(),
+        }
+    }
+
+    fn record_publish_up_to(&mut self, publish_up_to: u64) {
+        self.publish_up_to = Some(self.publish_up_to.unwrap_or(0).max(publish_up_to));
+    }
+
+    fn extend_artifacts(
+        &mut self,
+        notifications: Vec<Notification>,
+        envelopes: Vec<CommittedEventEnvelope>,
+    ) {
+        self.notifications.extend(notifications);
+        self.envelopes.extend(envelopes);
+    }
+
+    fn push_response(&mut self, response: PendingFenceResponse) {
+        self.responses.push(response);
+    }
+
+    fn complete_ok(
+        self,
+        subscribers: &SubscriberList,
+        reactor_subscribers: &ReactorSubscriberList,
+    ) {
+        for notification in &self.notifications {
+            subscribers.broadcast(notification);
+        }
+        for envelope in &self.envelopes {
+            reactor_subscribers.broadcast(envelope);
+        }
+        for response in self.responses {
+            response.complete_ok();
+        }
+    }
+
+    fn complete_cancelled(self) {
+        for response in self.responses {
+            response.complete_cancelled();
+        }
+    }
+}
+
+struct SidxRecord {
+    entry: crate::store::sidx::SidxEntry,
+    coord: Coordinate,
+}
+
+impl SidxRecord {
+    fn record(self, collector: &mut crate::store::sidx::SidxEntryCollector) {
+        collector.record(self.entry, self.coord.entity(), self.coord.scope());
+    }
+}
+
+struct CommitArtifacts {
+    index_entry: IndexEntry,
+    sidx_record: SidxRecord,
+    notification: Notification,
+    envelope: Option<CommittedEventEnvelope>,
+}
+
+struct BatchCommitArtifacts {
+    entries: Vec<IndexEntry>,
+    sidx_records: Vec<SidxRecord>,
+    notifications: Vec<Notification>,
+    envelopes: Vec<CommittedEventEnvelope>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WriterLoopPhase {
+    Main,
+    GroupCommitDrain,
+    ShutdownDrain,
+}
+
+#[derive(Debug)]
+enum DeferredReply {
+    None,
+    Sync {
+        respond: Sender<Result<(), StoreError>>,
+    },
+    BeginVisibilityFence {
+        token: u64,
+        respond: Sender<Result<(), StoreError>>,
+    },
+    CommitVisibilityFence {
+        token: u64,
+        respond: Sender<Result<(), StoreError>>,
+    },
+    Shutdown {
+        respond: Sender<Result<(), StoreError>>,
+    },
+}
+
+impl DeferredReply {
+    fn send(
+        self,
+        state: &mut WriterState<'_>,
+        sync_result: Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::None => Ok(()),
+            Self::Sync { respond } => {
+                let _ = respond.send(sync_result);
+                Ok(())
+            }
+            Self::BeginVisibilityFence { token, respond } => {
+                let result = sync_result.and_then(|_| state.begin_visibility_fence(token));
+                let _ = respond.send(result);
+                Ok(())
+            }
+            Self::CommitVisibilityFence { token, respond } => {
+                let result = sync_result.and_then(|_| state.commit_visibility_fence(token));
+                let _ = respond.send(result);
+                Ok(())
+            }
+            Self::Shutdown { respond } => {
+                let _ = respond.send(sync_result);
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CommandResult {
+    sync_event_delta: u32,
+    break_after_reply: bool,
+    must_sync_before_continue: bool,
+    exit_writer: bool,
+    deferred_reply: DeferredReply,
+    enter_shutdown_drain: bool,
+    enter_group_commit_drain: bool,
+}
+
+impl CommandResult {
+    fn immediate(sync_event_delta: u32) -> Self {
+        Self {
+            sync_event_delta,
+            break_after_reply: false,
+            must_sync_before_continue: false,
+            exit_writer: false,
+            deferred_reply: DeferredReply::None,
+            enter_shutdown_drain: false,
+            enter_group_commit_drain: false,
+        }
+    }
+
+    fn break_after_reply(mut self) -> Self {
+        self.break_after_reply = true;
+        self
+    }
+
+    fn break_after_reply_if(self, condition: bool) -> Self {
+        if condition {
+            self.break_after_reply()
+        } else {
+            self
+        }
+    }
+
+    fn with_sync(mut self, deferred_reply: DeferredReply) -> Self {
+        self.must_sync_before_continue = true;
+        self.deferred_reply = deferred_reply;
+        self
+    }
+
+    fn exit_writer(mut self) -> Self {
+        self.exit_writer = true;
+        self
+    }
+
+    fn enter_shutdown_drain(mut self, deferred_reply: DeferredReply) -> Self {
+        self.exit_writer = true;
+        self.enter_shutdown_drain = true;
+        self.deferred_reply = deferred_reply;
+        self
+    }
+
+    fn enter_group_commit_drain(mut self) -> Self {
+        self.enter_group_commit_drain = true;
+        self
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -324,7 +455,6 @@ struct WriterRuntime<'a> {
 /// The rx (command receiver) survives across restarts because it lives
 /// outside catch_unwind. Segments are re-created on restart since the
 /// previous one is dropped during unwind.
-/// [SPEC:src/store/writer.rs — RestartPolicy enforcement]
 fn writer_thread_main(
     runtime: WriterRuntime<'_>,
     initial_segment: Segment<Active>,
@@ -456,487 +586,130 @@ fn writer_loop(
         reactor_subscribers: runtime.reactor_subscribers,
         reader: Arc::clone(runtime.reader),
         sidx_collector: crate::store::sidx::SidxEntryCollector::new(),
-        active_fence: None,
+        fence_ledger: None,
     };
 
-    // Main loop: recv commands, dispatch.
     for cmd in runtime.rx.iter() {
-        match cmd {
-            WriterCommand::BeginVisibilityFence { token, respond } => {
-                let _ = respond.send(state.begin_visibility_fence(token));
-            }
-            WriterCommand::Append {
-                coord,
-                event,
-                kind,
-                guards,
-                respond,
-            } => {
-                // Process first command in batch.
-                let result = state.handle_append(&coord, *event, kind, &guards, None);
-                let _ = respond.send(result);
-                events_since_sync += 1;
+        let result = state.execute_command(WriterLoopPhase::Main, cmd);
+        if result.enter_shutdown_drain {
+            let DeferredReply::Shutdown { respond } = result.deferred_reply else {
+                unreachable!("shutdown drain must carry a shutdown reply sender");
+            };
+            let shutdown_result = drain_shutdown_queue(
+                &mut state,
+                runtime.rx,
+                runtime.config.writer.shutdown_drain_limit,
+            );
+            let _ = respond.send(shutdown_result);
+            return;
+        }
 
-                // Group commit: drain additional pending Append commands before syncing.
-                // group_commit_max_batch == 0 means unbounded drain (drain all pending).
-                // group_commit_max_batch == 1 means no draining (backward compat, per-event).
-                // group_commit_max_batch > 1 means drain up to (batch - 1) more.
-                let extra_budget = if runtime.config.batch.group_commit_max_batch == 0 {
-                    u32::MAX
-                } else if runtime.config.batch.group_commit_max_batch == 1 {
-                    0u32
-                } else {
-                    runtime
-                        .config
-                        .batch
-                        .group_commit_max_batch
-                        .saturating_sub(1)
-                };
-                let mut drained = 0u32;
-                while drained < extra_budget {
-                    match runtime.rx.try_recv() {
-                        Ok(WriterCommand::Append {
-                            coord: c2,
-                            event: ev2,
-                            kind: k2,
-                            guards: g2,
-                            respond: r2,
-                        }) => {
-                            let res2 = state.handle_append(&c2, *ev2, k2, &g2, None);
-                            let _ = r2.send(res2);
-                            events_since_sync += 1;
-                            drained += 1;
-                        }
-                        Ok(WriterCommand::FenceAppend {
-                            token,
-                            coord,
-                            event,
-                            kind,
-                            guards,
-                            respond,
-                        }) => {
-                            let result =
-                                if state.active_fence.as_ref().map(|f| f.token) != Some(token) {
-                                    Err(StoreError::VisibilityFenceNotActive)
-                                } else {
-                                    let mut fence = state
-                                        .active_fence
-                                        .take()
-                                        .expect("token check guaranteed active fence");
-                                    let result = match state.handle_append(
-                                        &coord,
-                                        *event,
-                                        kind,
-                                        &guards,
-                                        Some(&mut fence),
-                                    ) {
-                                        Ok(receipt) => {
-                                            fence.responses.push(PendingFenceResponse::Single {
-                                                respond: respond.clone(),
-                                                receipt,
-                                            });
-                                            Ok(())
-                                        }
-                                        Err(error) => Err(error),
-                                    };
-                                    state.active_fence = Some(fence);
-                                    result
-                                };
-                            if let Err(error) = result {
-                                let _ = respond.send(Err(error));
-                            } else {
-                                events_since_sync += 1;
-                                drained += 1;
-                            }
-                        }
-                        Ok(WriterCommand::AppendBatch { items, respond: r }) => {
-                            // Batches are atomic — drain them as a single unit.
-                            let res = state.handle_append_batch(&items, None);
-                            let _ = r.send(res);
-                            events_since_sync += 1;
-                            drained += 1;
-                        }
-                        Ok(WriterCommand::FenceAppendBatch {
-                            token,
-                            items,
-                            respond,
-                        }) => {
-                            let result =
-                                if state.active_fence.as_ref().map(|f| f.token) != Some(token) {
-                                    Err(StoreError::VisibilityFenceNotActive)
-                                } else {
-                                    let mut fence = state
-                                        .active_fence
-                                        .take()
-                                        .expect("token check guaranteed active fence");
-                                    let result =
-                                        match state.handle_append_batch(&items, Some(&mut fence)) {
-                                            Ok(receipts) => {
-                                                fence.responses.push(PendingFenceResponse::Batch {
-                                                    respond: respond.clone(),
-                                                    receipts,
-                                                });
-                                                Ok(())
-                                            }
-                                            Err(error) => Err(error),
-                                        };
-                                    state.active_fence = Some(fence);
-                                    result
-                                };
-                            if let Err(error) = result {
-                                let _ = respond.send(Err(error));
-                            } else {
-                                events_since_sync += 1;
-                                drained += 1;
-                            }
-                        }
-                        Ok(WriterCommand::Sync { respond: r }) => {
-                            // Sync mid-batch: honor immediately, stop draining.
-                            let sr = state
-                                .active_segment
-                                .sync_with_mode(&runtime.config.sync.mode);
-                            let _ = r.send(sr);
-                            events_since_sync = 0;
-                            break;
-                        }
-                        Ok(WriterCommand::BeginVisibilityFence { token, respond: r }) => {
-                            let sr = state
-                                .active_segment
-                                .sync_with_mode(&runtime.config.sync.mode);
-                            if sr.is_ok() {
-                                let _ = r.send(state.begin_visibility_fence(token));
-                            } else {
-                                let _ = r.send(sr.map(|_| ()));
-                            }
-                            events_since_sync = 0;
-                            break;
-                        }
-                        Ok(WriterCommand::CommitVisibilityFence { token, respond: r }) => {
-                            let sr = state
-                                .active_segment
-                                .sync_with_mode(&runtime.config.sync.mode);
-                            let _ = r.send(sr.and_then(|_| state.commit_visibility_fence(token)));
-                            events_since_sync = 0;
-                            break;
-                        }
-                        Ok(WriterCommand::CancelVisibilityFence { token, respond: r }) => {
-                            let _ = r.send(state.cancel_visibility_fence(token));
-                            break;
-                        }
-                        Ok(WriterCommand::Shutdown { respond: r }) => {
-                            // Shutdown mid-batch: sync current batch, then exit.
-                            // Propagate sync errors honestly — lifecycle honesty invariant.
-                            let shutdown_result = if events_since_sync > 0 {
-                                let sr = state
-                                    .active_segment
-                                    .sync_with_mode(&runtime.config.sync.mode);
-                                if let Err(ref e) = sr {
-                                    tracing::error!("group commit pre-shutdown sync: {e}");
-                                }
-                                sr
-                            } else {
-                                Ok(())
-                            };
-                            let _ = r.send(shutdown_result);
-                            return;
-                        }
-                        #[cfg(feature = "dangerous-test-hooks")]
-                        Ok(WriterCommand::PanicForTest { respond: r }) => {
-                            // Don't panic mid-drain — acknowledge and stop draining.
-                            // The test should send PanicForTest as a standalone command
-                            // (through the main loop) not mid-batch. Panicking mid-drain
-                            // would leave the batch partially synced with some callers
-                            // never receiving their receipt.
-                            let _ = r.send(Ok(()));
-                            break;
-                        }
-                        Err(_) => break, // channel empty — batch complete
-                    }
-                }
+        let outcome = settle_command_result(&mut state, &mut events_since_sync, result);
+        if outcome.exit_writer {
+            return;
+        }
 
-                // Single fsync for the entire batch.
-                if events_since_sync >= runtime.config.sync.every_n_events {
-                    if let Err(e) = state
-                        .active_segment
-                        .sync_with_mode(&runtime.config.sync.mode)
-                    {
-                        tracing::error!("periodic sync failed: {e}");
-                    }
-                    events_since_sync = 0;
-                }
-            }
-            WriterCommand::FenceAppend {
-                token,
-                coord,
-                event,
-                kind,
-                guards,
-                respond,
-            } => {
-                let result = if state.active_fence.as_ref().map(|f| f.token) != Some(token) {
-                    Err(StoreError::VisibilityFenceNotActive)
-                } else {
-                    let mut fence = state
-                        .active_fence
-                        .take()
-                        .expect("token check guaranteed active fence");
-                    let result = match state.handle_append(
-                        &coord,
-                        *event,
-                        kind,
-                        &guards,
-                        Some(&mut fence),
-                    ) {
-                        Ok(receipt) => {
-                            fence.responses.push(PendingFenceResponse::Single {
-                                respond: respond.clone(),
-                                receipt,
-                            });
-                            Ok(())
-                        }
-                        Err(error) => Err(error),
-                    };
-                    state.active_fence = Some(fence);
-                    result
+        if outcome.enter_group_commit_drain {
+            let extra_budget =
+                group_commit_drain_budget(runtime.config.batch.group_commit_max_batch);
+            let mut drained = 0u32;
+            while drained < extra_budget {
+                let Ok(next_cmd) = runtime.rx.try_recv() else {
+                    break;
                 };
-                if let Err(error) = result {
-                    let _ = respond.send(Err(error));
-                } else {
-                    events_since_sync += 1;
+                let drain_result =
+                    state.execute_command(WriterLoopPhase::GroupCommitDrain, next_cmd);
+                let drain_outcome =
+                    settle_command_result(&mut state, &mut events_since_sync, drain_result);
+                drained = drained.saturating_add(drain_outcome.sync_event_delta);
+                if drain_outcome.exit_writer {
+                    return;
                 }
-            }
-            WriterCommand::AppendBatch { items, respond } => {
-                let result = state.handle_append_batch(&items, None);
-                let _ = respond.send(result);
-                events_since_sync += 1; // Batch counts as one sync event
-
-                // Sync after batch if needed.
-                if events_since_sync >= runtime.config.sync.every_n_events {
-                    if let Err(e) = state
-                        .active_segment
-                        .sync_with_mode(&runtime.config.sync.mode)
-                    {
-                        tracing::error!("post-batch sync failed: {e}");
-                    }
-                    events_since_sync = 0;
+                if drain_outcome.break_loop {
+                    break;
                 }
-            }
-            WriterCommand::FenceAppendBatch {
-                token,
-                items,
-                respond,
-            } => {
-                let result = if state.active_fence.as_ref().map(|f| f.token) != Some(token) {
-                    Err(StoreError::VisibilityFenceNotActive)
-                } else {
-                    let mut fence = state
-                        .active_fence
-                        .take()
-                        .expect("token check guaranteed active fence");
-                    let result = match state.handle_append_batch(&items, Some(&mut fence)) {
-                        Ok(receipts) => {
-                            fence.responses.push(PendingFenceResponse::Batch {
-                                respond: respond.clone(),
-                                receipts,
-                            });
-                            Ok(())
-                        }
-                        Err(error) => Err(error),
-                    };
-                    state.active_fence = Some(fence);
-                    result
-                };
-                if let Err(error) = result {
-                    let _ = respond.send(Err(error));
-                } else {
-                    events_since_sync += 1;
-                }
-            }
-            WriterCommand::CommitVisibilityFence { token, respond } => {
-                let sync_result = state
-                    .active_segment
-                    .sync_with_mode(&runtime.config.sync.mode);
-                let _ =
-                    respond.send(sync_result.and_then(|_| state.commit_visibility_fence(token)));
-                events_since_sync = 0;
-            }
-            WriterCommand::CancelVisibilityFence { token, respond } => {
-                let _ = respond.send(state.cancel_visibility_fence(token));
-            }
-            WriterCommand::Sync { respond } => {
-                let result = state
-                    .active_segment
-                    .sync_with_mode(&runtime.config.sync.mode);
-                let _ = respond.send(result);
-                events_since_sync = 0;
-            }
-            WriterCommand::Shutdown { respond } => {
-                // Drain up to shutdown_drain_limit queued commands.
-                // [SPEC:src/store/writer.rs — Shutdown drain semantics]
-                let mut drained = 0;
-                while drained < runtime.config.writer.shutdown_drain_limit {
-                    match runtime.rx.try_recv() {
-                        Ok(WriterCommand::Append {
-                            coord,
-                            event,
-                            kind,
-                            guards,
-                            respond: r,
-                        }) => {
-                            let result = state.handle_append(&coord, *event, kind, &guards, None);
-                            let _ = r.send(result);
-                            drained += 1;
-                        }
-                        Ok(WriterCommand::FenceAppend {
-                            token,
-                            coord,
-                            event,
-                            kind,
-                            guards,
-                            respond: r,
-                        }) => {
-                            if state.active_fence.as_ref().map(|f| f.token) != Some(token) {
-                                let _ = r.send(Err(StoreError::VisibilityFenceNotActive));
-                            } else {
-                                let mut fence = state
-                                    .active_fence
-                                    .take()
-                                    .expect("token check guaranteed active fence");
-                                let result = state.handle_append(
-                                    &coord,
-                                    *event,
-                                    kind,
-                                    &guards,
-                                    Some(&mut fence),
-                                );
-                                match result {
-                                    Ok(receipt) => {
-                                        fence.responses.push(PendingFenceResponse::Single {
-                                            respond: r.clone(),
-                                            receipt,
-                                        })
-                                    }
-                                    Err(error) => {
-                                        let _ = r.send(Err(error));
-                                    }
-                                }
-                                state.active_fence = Some(fence);
-                            }
-                            drained += 1;
-                        }
-                        Ok(WriterCommand::Shutdown { respond: r }) => {
-                            let _ = r.send(Ok(()));
-                        }
-                        Ok(WriterCommand::Sync { respond: r }) => {
-                            let _ = r.send(
-                                state
-                                    .active_segment
-                                    .sync_with_mode(&runtime.config.sync.mode),
-                            );
-                        }
-                        Ok(WriterCommand::AppendBatch { items, respond: r }) => {
-                            // Drain batches during shutdown.
-                            let res = state.handle_append_batch(&items, None);
-                            let _ = r.send(res);
-                            drained += 1;
-                        }
-                        Ok(WriterCommand::FenceAppendBatch {
-                            token,
-                            items,
-                            respond: r,
-                        }) => {
-                            if state.active_fence.as_ref().map(|f| f.token) != Some(token) {
-                                let _ = r.send(Err(StoreError::VisibilityFenceNotActive));
-                            } else {
-                                let mut fence = state
-                                    .active_fence
-                                    .take()
-                                    .expect("token check guaranteed active fence");
-                                let result = state.handle_append_batch(&items, Some(&mut fence));
-                                match result {
-                                    Ok(receipts) => {
-                                        fence.responses.push(PendingFenceResponse::Batch {
-                                            respond: r.clone(),
-                                            receipts,
-                                        })
-                                    }
-                                    Err(error) => {
-                                        let _ = r.send(Err(error));
-                                    }
-                                }
-                                state.active_fence = Some(fence);
-                            }
-                            drained += 1;
-                        }
-                        Ok(WriterCommand::BeginVisibilityFence { token, respond: r }) => {
-                            let _ = r.send(state.begin_visibility_fence(token));
-                        }
-                        Ok(WriterCommand::CommitVisibilityFence { token, respond: r }) => {
-                            let _ = r.send(state.commit_visibility_fence(token));
-                        }
-                        Ok(WriterCommand::CancelVisibilityFence { token, respond: r }) => {
-                            let _ = r.send(state.cancel_visibility_fence(token));
-                        }
-                        // test-only: discard PanicForTest during shutdown drain
-                        #[cfg(feature = "dangerous-test-hooks")]
-                        Ok(WriterCommand::PanicForTest { respond: r }) => {
-                            let _ = r.send(Ok(())); // discard during drain
-                        }
-                        Err(_) => break, // channel empty
-                    }
-                }
-                // Cancel any active visibility fence so callers are not left
-                // blocking on ticket.wait() after the writer exits.
-                if let Some(fence) = state.active_fence.take() {
-                    tracing::warn!(
-                        token = fence.token,
-                        pending = fence.responses.len(),
-                        "auto-cancelling active visibility fence during shutdown"
-                    );
-                    let _ = state.index.cancel_visibility_fence(fence.token);
-                    let _ = crate::store::visibility_ranges::write_cancelled_ranges(
-                        &state.config.data_dir,
-                        &state.index.cancelled_visibility_ranges(),
-                    );
-                    for response in fence.responses {
-                        match response {
-                            PendingFenceResponse::Single { respond, .. } => {
-                                let _ = respond.send(Err(StoreError::VisibilityFenceCancelled));
-                            }
-                            PendingFenceResponse::Batch { respond, .. } => {
-                                let _ = respond.send(Err(StoreError::VisibilityFenceCancelled));
-                            }
-                        }
-                    }
-                }
-                // Write SIDX footer on active segment before shutdown sync.
-                if let Err(e) = state
-                    .active_segment
-                    .write_sidx_footer(&state.sidx_collector)
-                {
-                    tracing::warn!("shutdown SIDX footer write failed (non-fatal): {e}");
-                }
-                let sync_result = state
-                    .active_segment
-                    .sync_with_mode(&runtime.config.sync.mode);
-                if let Err(ref e) = sync_result {
-                    tracing::error!("shutdown sync failed: {e}");
-                }
-                let _ = respond.send(sync_result);
-                return; // exit writer loop
-            }
-            // test-only: intentional panic to exercise restart_policy
-            #[cfg(feature = "dangerous-test-hooks")]
-            // intentional: this panic IS the test - it exercises catch_unwind in writer_thread_main
-            #[allow(clippy::panic)]
-            // intentional: this panic IS the test — it exercises catch_unwind in writer_thread_main
-            WriterCommand::PanicForTest { respond } => {
-                // Acknowledge receipt before panicking so the test knows the command was processed.
-                let _ = respond.send(Ok(()));
-                panic!("PanicForTest: intentional writer panic for restart_policy testing");
             }
         }
+
+        if events_since_sync >= runtime.config.sync.every_n_events {
+            if let Err(error) = state.sync_active_segment() {
+                tracing::error!("periodic sync failed: {error}");
+            }
+            events_since_sync = 0;
+        }
     }
+}
+
+#[derive(Debug)]
+struct LoopOutcome {
+    break_loop: bool,
+    exit_writer: bool,
+    sync_event_delta: u32,
+    enter_group_commit_drain: bool,
+}
+
+fn settle_command_result(
+    state: &mut WriterState<'_>,
+    events_since_sync: &mut u32,
+    result: CommandResult,
+) -> LoopOutcome {
+    *events_since_sync = events_since_sync.saturating_add(result.sync_event_delta);
+
+    if result.must_sync_before_continue {
+        let sync_result = state.sync_active_segment();
+        if let Err(error) = &sync_result {
+            tracing::error!("writer sync barrier failed: {error}");
+        }
+        let _ = result.deferred_reply.send(state, sync_result);
+        *events_since_sync = 0;
+    }
+
+    LoopOutcome {
+        break_loop: result.break_after_reply,
+        exit_writer: result.exit_writer && !result.enter_shutdown_drain,
+        sync_event_delta: result.sync_event_delta,
+        enter_group_commit_drain: result.enter_group_commit_drain,
+    }
+}
+
+fn group_commit_drain_budget(group_commit_max_batch: u32) -> u32 {
+    if group_commit_max_batch == 0 {
+        u32::MAX
+    } else if group_commit_max_batch == 1 {
+        0
+    } else {
+        group_commit_max_batch.saturating_sub(1)
+    }
+}
+
+fn drain_shutdown_queue(
+    state: &mut WriterState<'_>,
+    rx: &Receiver<WriterCommand>,
+    shutdown_drain_limit: usize,
+) -> Result<(), StoreError> {
+    let mut drained = 0usize;
+    let mut shutdown_sync_count = 0u32;
+    while drained < shutdown_drain_limit {
+        let Ok(cmd) = rx.try_recv() else {
+            break;
+        };
+        let result = state.execute_command(WriterLoopPhase::ShutdownDrain, cmd);
+        let _ = settle_command_result(state, &mut shutdown_sync_count, result);
+        drained += 1;
+    }
+
+    state.auto_cancel_fence_on_shutdown();
+    if let Err(error) = state
+        .active_segment
+        .write_sidx_footer(&state.sidx_collector)
+    {
+        tracing::warn!("shutdown SIDX footer write failed (non-fatal): {error}");
+    }
+    let sync_result = state.sync_active_segment();
+    if let Err(error) = &sync_result {
+        tracing::error!("shutdown sync failed: {error}");
+    }
+    sync_result
 }
 
 /// Options and guards for an append operation, passed through the channel.
@@ -949,115 +722,248 @@ pub(crate) struct AppendGuards {
     pub idempotency_key: Option<u128>,
 }
 
-/// Pre-computed per-item batch state shared between the precompute, write,
-/// stage, and broadcast phases of `handle_append_batch`.
-///
-/// Every field is derived in `precompute_batch_items` BEFORE any frame is
-/// written. The downstream phases (`write_batch_event_frames`,
-/// `stage_batch_index_entries`) consume these values verbatim. This is
-/// load-bearing: an earlier version computed `event_hash` only inside the
-/// frame-write phase and reconstructed it from a shared scratch map in the
-/// stage phase, which silently corrupted hash chains for batches with two or
-/// more items on the same entity (the second item's `prev_hash` came from a
-/// post-precompute `[0u8; 32]` placeholder, and every staged `event_hash`
-/// collapsed to the entity's LAST item's hash because the map insert
-/// overwrote per item). Capturing all per-item material here makes those
-/// invariants impossible to break — there is no scratch map.
-struct BatchItemComputed {
-    global_seq: u64,
-    clock: u32,
-    /// Per-item monotonic wall_ms used by BOTH the on-disk header position AND
-    /// the in-memory `IndexEntry.wall_ms`. Computed once with `max(last_ms)`
-    /// clamping per entity (matches the single-append path) so a regressing
-    /// injected/system clock cannot reorder `stream()` results.
-    wall_ms: u64,
-    /// Microsecond timestamp captured once at the top of
-    /// `precompute_batch_items` and reused as the header `timestamp_us` for
-    /// every item in the batch. Single-batch / single-`now_us()` semantics
-    /// keep the on-disk and in-memory views byte-equivalent.
-    wall_us: i64,
-    prev_hash: [u8; 32],
-    /// Blake3 of the payload, computed in `precompute_batch_items` so the
-    /// next same-entity item can read it as its `prev_hash`. Without this,
-    /// hash chains for multi-item same-entity batches break.
-    event_hash: [u8; 32],
-    event_id: u128,
-    causation_id: Option<u128>,
-}
-
 impl WriterState<'_> {
+    fn execute_command(&mut self, phase: WriterLoopPhase, cmd: WriterCommand) -> CommandResult {
+        match cmd {
+            WriterCommand::BeginVisibilityFence { token, respond } => match phase {
+                WriterLoopPhase::Main | WriterLoopPhase::ShutdownDrain => {
+                    let _ = respond.send(self.begin_visibility_fence(token));
+                    CommandResult::immediate(0)
+                }
+                WriterLoopPhase::GroupCommitDrain => CommandResult::immediate(0)
+                    .with_sync(DeferredReply::BeginVisibilityFence { token, respond })
+                    .break_after_reply(),
+            },
+            WriterCommand::Append {
+                coord,
+                event,
+                kind,
+                guards,
+                respond,
+            } => {
+                let result = self.handle_append(&coord, *event, kind, &guards, None);
+                let _ = respond.send(result);
+                let base = CommandResult::immediate(1);
+                if matches!(phase, WriterLoopPhase::Main) {
+                    base.enter_group_commit_drain()
+                } else {
+                    base
+                }
+            }
+            WriterCommand::FenceAppend {
+                token,
+                coord,
+                event,
+                kind,
+                guards,
+                respond,
+            } => {
+                if let Err(error) = self.handle_fence_append_command(
+                    token,
+                    &coord,
+                    *event,
+                    kind,
+                    &guards,
+                    respond.clone(),
+                ) {
+                    let _ = respond.send(Err(error));
+                    CommandResult::immediate(0)
+                } else {
+                    CommandResult::immediate(1)
+                }
+            }
+            WriterCommand::AppendBatch { items, respond } => {
+                let result = self.handle_append_batch(items, None);
+                let _ = respond.send(result);
+                CommandResult::immediate(1)
+            }
+            WriterCommand::FenceAppendBatch {
+                token,
+                items,
+                respond,
+            } => {
+                if let Err(error) =
+                    self.handle_fence_append_batch_command(token, items, respond.clone())
+                {
+                    let _ = respond.send(Err(error));
+                    CommandResult::immediate(0)
+                } else {
+                    CommandResult::immediate(1)
+                }
+            }
+            WriterCommand::CommitVisibilityFence { token, respond } => match phase {
+                WriterLoopPhase::Main | WriterLoopPhase::GroupCommitDrain => {
+                    CommandResult::immediate(0)
+                        .with_sync(DeferredReply::CommitVisibilityFence { token, respond })
+                        .break_after_reply_if(matches!(phase, WriterLoopPhase::GroupCommitDrain))
+                }
+                WriterLoopPhase::ShutdownDrain => {
+                    let _ = respond.send(self.commit_visibility_fence(token));
+                    CommandResult::immediate(0)
+                }
+            },
+            WriterCommand::CancelVisibilityFence { token, respond } => {
+                let _ = respond.send(self.cancel_visibility_fence(token));
+                let base = CommandResult::immediate(0);
+                if matches!(phase, WriterLoopPhase::GroupCommitDrain) {
+                    base.break_after_reply()
+                } else {
+                    base
+                }
+            }
+            WriterCommand::Sync { respond } => match phase {
+                WriterLoopPhase::Main | WriterLoopPhase::GroupCommitDrain => {
+                    CommandResult::immediate(0)
+                        .with_sync(DeferredReply::Sync { respond })
+                        .break_after_reply_if(matches!(phase, WriterLoopPhase::GroupCommitDrain))
+                }
+                WriterLoopPhase::ShutdownDrain => {
+                    let _ = respond.send(self.sync_active_segment());
+                    CommandResult::immediate(0)
+                }
+            },
+            WriterCommand::Shutdown { respond } => match phase {
+                WriterLoopPhase::Main => CommandResult::immediate(0)
+                    .enter_shutdown_drain(DeferredReply::Shutdown { respond }),
+                WriterLoopPhase::GroupCommitDrain => CommandResult::immediate(0)
+                    .with_sync(DeferredReply::Shutdown { respond })
+                    .break_after_reply()
+                    .exit_writer(),
+                WriterLoopPhase::ShutdownDrain => {
+                    let _ = respond.send(Ok(()));
+                    CommandResult::immediate(0)
+                }
+            },
+            #[cfg(feature = "dangerous-test-hooks")]
+            WriterCommand::PanicForTest { respond } => match phase {
+                WriterLoopPhase::Main => {
+                    let _ = respond.send(Ok(()));
+                    std::panic::resume_unwind(Box::new(
+                        "PanicForTest: intentional writer panic for restart_policy testing",
+                    ));
+                }
+                WriterLoopPhase::GroupCommitDrain | WriterLoopPhase::ShutdownDrain => {
+                    let _ = respond.send(Ok(()));
+                    CommandResult::immediate(0).break_after_reply()
+                }
+            },
+        }
+    }
+
+    fn sync_active_segment(&mut self) -> Result<(), StoreError> {
+        self.active_segment.sync_with_mode(&self.config.sync.mode)
+    }
+
+    fn auto_cancel_fence_on_shutdown(&mut self) {
+        if let Some(fence) = self.fence_ledger.take() {
+            tracing::warn!(
+                token = fence.token,
+                pending = fence.responses.len(),
+                "auto-cancelling active visibility fence during shutdown"
+            );
+            let _ = self.index.cancel_visibility_fence(fence.token);
+            if let Err(error) = self.persist_cancelled_visibility_ranges() {
+                tracing::error!(
+                    error = %error,
+                    "failed to persist cancelled visibility ranges during shutdown"
+                );
+            }
+            fence.complete_cancelled();
+        }
+    }
+
+    fn with_matching_fence_ledger<R>(
+        &mut self,
+        token: u64,
+        f: impl FnOnce(&mut Self, &mut FenceLedger) -> Result<R, StoreError>,
+    ) -> Result<R, StoreError> {
+        if self.fence_ledger.as_ref().map(|fence| fence.token) != Some(token) {
+            return Err(StoreError::VisibilityFenceNotActive);
+        }
+        let mut fence = self
+            .fence_ledger
+            .take()
+            .expect("token check guaranteed fence ledger");
+        let result = f(self, &mut fence);
+        self.fence_ledger = Some(fence);
+        result
+    }
+
+    fn handle_fence_append_command(
+        &mut self,
+        token: u64,
+        coord: &Coordinate,
+        event: Event<Vec<u8>>,
+        kind: EventKind,
+        guards: &AppendGuards,
+        respond: Sender<Result<AppendReceipt, StoreError>>,
+    ) -> Result<(), StoreError> {
+        self.with_matching_fence_ledger(token, |state, fence| {
+            let receipt = state.handle_append(coord, event, kind, guards, Some(fence))?;
+            fence.push_response(PendingFenceResponse::Single { respond, receipt });
+            Ok(())
+        })
+    }
+
+    fn handle_fence_append_batch_command(
+        &mut self,
+        token: u64,
+        items: Vec<BatchAppendItem>,
+        respond: Sender<Result<Vec<AppendReceipt>, StoreError>>,
+    ) -> Result<(), StoreError> {
+        self.with_matching_fence_ledger(token, |state, fence| {
+            let receipts = state.handle_append_batch(items, Some(fence))?;
+            fence.push_response(PendingFenceResponse::Batch { respond, receipts });
+            Ok(())
+        })
+    }
+
     fn begin_visibility_fence(&mut self, token: u64) -> Result<(), StoreError> {
-        if self.active_fence.is_some() {
+        if self.fence_ledger.is_some() {
             return Err(StoreError::VisibilityFenceActive);
         }
         if self.index.active_visibility_fence() != Some(token) {
             return Err(StoreError::VisibilityFenceNotActive);
         }
-        self.active_fence = Some(ActiveVisibilityFence {
-            token,
-            pending_publish_up_to: None,
-            notifications: Vec::new(),
-            envelopes: Vec::new(),
-            responses: Vec::new(),
-        });
+        self.fence_ledger = Some(FenceLedger::new(token));
         Ok(())
     }
 
     fn commit_visibility_fence(&mut self, token: u64) -> Result<(), StoreError> {
-        let Some(fence) = self.active_fence.take() else {
+        let Some(fence) = self.fence_ledger.take() else {
             return Err(StoreError::VisibilityFenceNotActive);
         };
         if fence.token != token {
-            self.active_fence = Some(fence);
+            self.fence_ledger = Some(fence);
             return Err(StoreError::VisibilityFenceNotActive);
         }
 
         self.index
-            .finish_visibility_fence(token, fence.pending_publish_up_to)?;
-        for notification in &fence.notifications {
-            self.subscribers.broadcast(notification);
-        }
-        for envelope in &fence.envelopes {
-            self.reactor_subscribers.broadcast(envelope);
-        }
-        for response in fence.responses {
-            match response {
-                PendingFenceResponse::Single { respond, receipt } => {
-                    let _ = respond.send(Ok(receipt));
-                }
-                PendingFenceResponse::Batch { respond, receipts } => {
-                    let _ = respond.send(Ok(receipts));
-                }
-            }
-        }
+            .finish_visibility_fence(token, fence.publish_up_to)?;
+        fence.complete_ok(self.subscribers, self.reactor_subscribers);
         Ok(())
     }
 
     fn cancel_visibility_fence(&mut self, token: u64) -> Result<(), StoreError> {
-        let Some(fence) = self.active_fence.take() else {
+        let Some(fence) = self.fence_ledger.take() else {
             return Err(StoreError::VisibilityFenceNotActive);
         };
         if fence.token != token {
-            self.active_fence = Some(fence);
+            self.fence_ledger = Some(fence);
             return Err(StoreError::VisibilityFenceNotActive);
         }
 
         self.index.cancel_visibility_fence(token)?;
+        self.persist_cancelled_visibility_ranges()?;
+        fence.complete_cancelled();
+        Ok(())
+    }
+
+    fn persist_cancelled_visibility_ranges(&self) -> Result<(), StoreError> {
         crate::store::visibility_ranges::write_cancelled_ranges(
             &self.config.data_dir,
             &self.index.cancelled_visibility_ranges(),
-        )?;
-        for response in fence.responses {
-            match response {
-                PendingFenceResponse::Single { respond, .. } => {
-                    let _ = respond.send(Err(StoreError::VisibilityFenceCancelled));
-                }
-                PendingFenceResponse::Batch { respond, .. } => {
-                    let _ = respond.send(Err(StoreError::VisibilityFenceCancelled));
-                }
-            }
-        }
-        Ok(())
+        )
     }
 
     /// Check whether the active segment needs rotation, and if so, seal it,
@@ -1191,14 +1097,15 @@ impl WriterState<'_> {
     /// **Eager hash invariant.** `event_hash` is computed here (not deferred
     /// to the frame-write phase) so the next same-entity item can read it as
     /// its `prev_hash`. Without this, the on-disk frame chain and the
-    /// in-memory IndexEntry chain diverge — see `BatchItemComputed` for the
-    /// historical incident this guards against.
+    /// in-memory IndexEntry chain diverge. `StagedCommittedEvent` now carries
+    /// the per-item committed shape end-to-end so there is no scratch map or
+    /// reconstruction step left to drift.
     fn precompute_batch_items(
         &self,
-        items: &[BatchAppendItem],
+        prepared: &PreparedBatch,
         first_seq: u64,
-    ) -> Result<Vec<BatchItemComputed>, StoreError> {
-        let mut computed: Vec<BatchItemComputed> = Vec::with_capacity(items.len());
+    ) -> Result<Vec<StagedCommittedEvent>, StoreError> {
+        let mut computed: Vec<StagedCommittedEvent> = Vec::with_capacity(prepared.len());
         let mut entity_prev_hashes: std::collections::HashMap<Arc<str>, [u8; 32]> =
             std::collections::HashMap::new();
         let mut entity_batch_clocks: std::collections::HashMap<Arc<str>, u32> =
@@ -1213,8 +1120,8 @@ impl WriterState<'_> {
         #[allow(clippy::cast_sign_loss)] // timestamp_us is always positive (from SystemTime)
         let now_ms = (now_us / 1000) as u64;
 
-        for (idx, item) in items.iter().enumerate() {
-            let entity: Arc<str> = Arc::from(item.coord.entity());
+        for (idx, item) in prepared.items().iter().enumerate() {
+            let entity = Arc::clone(item.entity_arc());
 
             // prev_hash: previous batch item if same entity, else the index's
             // latest entry for the entity, else genesis [0; 32].
@@ -1256,8 +1163,8 @@ impl WriterState<'_> {
 
             let event_id = uuid::Uuid::now_v7().as_u128();
 
-            let causation_id = match item.causation {
-                CausationRef::None => item.options.causation_id,
+            let causation_id = match item.causation() {
+                CausationRef::None => item.options().causation_id,
                 CausationRef::Absolute(id) => Some(id),
                 CausationRef::PriorItem(prior_idx) => {
                     if prior_idx >= idx {
@@ -1269,13 +1176,13 @@ impl WriterState<'_> {
                             )),
                         });
                     }
-                    Some(computed[prior_idx].event_id)
+                    Some(computed[prior_idx].event_id())
                 }
             };
 
             // Compute event_hash NOW (eager hash invariant — see fn doc).
             #[cfg(feature = "blake3")]
-            let event_hash = crate::event::hash::compute_hash(&item.payload_bytes);
+            let event_hash = crate::event::hash::compute_hash(item.payload_bytes());
             #[cfg(not(feature = "blake3"))]
             let event_hash = [0u8; 32];
 
@@ -1285,16 +1192,23 @@ impl WriterState<'_> {
             entity_prev_hashes.insert(entity, event_hash);
 
             let global_seq = first_seq + idx as u64;
-            computed.push(BatchItemComputed {
-                global_seq,
-                clock,
-                wall_ms,
-                wall_us: now_us,
-                prev_hash,
-                event_hash,
+            let meta = StagedCommitMeta::new(
                 event_id,
+                item.options().correlation_id.unwrap_or(event_id),
                 causation_id,
-            });
+                item.kind(),
+                global_seq,
+            );
+            let timing = StagedCommitTiming::new(now_us, wall_ms, clock);
+            computed.push(StagedCommittedEvent::new(
+                item.coord(),
+                meta,
+                timing,
+                HashChain {
+                    prev_hash,
+                    event_hash,
+                },
+            ));
         }
         Ok(computed)
     }
@@ -1350,14 +1264,13 @@ impl WriterState<'_> {
     }
 
     /// The 10-step commit protocol.
-    /// [SPEC:src/store/writer.rs — handle_append]
     fn handle_append(
         &mut self,
         coord: &Coordinate,
         mut event: Event<Vec<u8>>,
         kind: EventKind,
         guards: &AppendGuards,
-        fence: Option<&mut ActiveVisibilityFence>,
+        fence: Option<&mut FenceLedger>,
     ) -> Result<AppendReceipt, StoreError> {
         let correlation_id = guards.correlation_id;
         let causation_id = guards.causation_id;
@@ -1415,8 +1328,8 @@ impl WriterState<'_> {
         event.header.correlation_id = correlation_id;
         event.header.causation_id = causation_id;
 
-        // STEP 5: Compute blake3 hash, set hash chain (or skip if feature off).
-        // [SPEC:INVARIANTS item 5 — blake3 only]
+        // STEP 5: Compute the event hash and set the hash chain.
+        // `blake3` is the only supported hash algorithm for committed events.
         #[cfg(feature = "blake3")]
         let event_hash = crate::event::hash::compute_hash(&event.payload);
         #[cfg(not(feature = "blake3"))]
@@ -1429,8 +1342,7 @@ impl WriterState<'_> {
         // Set content_hash on header for projection cache auto-invalidation.
         event.header.content_hash = event_hash;
 
-        // STEP 6: Serialize to MessagePack + CRC32 frame.
-        // [SPEC:WIRE FORMAT DECISIONS — rmp_serde::to_vec_named() ALWAYS]
+        // STEP 6: Serialize to named MessagePack + CRC32 frame.
         let frame_payload = FramePayloadRef {
             event: &event,
             entity,
@@ -1455,58 +1367,35 @@ impl WriterState<'_> {
             #[allow(clippy::cast_possible_truncation)] // checked_payload_len already verified < u32::MAX
             length: frame.len() as u32,
         };
-        let entity_id = self.index.interner.intern(entity);
-        let scope_id = self.index.interner.intern(scope);
-        let entry = IndexEntry {
-            event_id: event.header.event_id,
+        let meta = StagedCommitMeta::new(
+            event.header.event_id,
             correlation_id,
             causation_id,
-            coord: coord.clone(),
-            entity_id,
-            scope_id,
             kind,
-            wall_ms: now_ms,
-            clock,
-            hash_chain: event.hash_chain.clone().unwrap_or_default(),
+            global_seq,
+        );
+        let timing = StagedCommitTiming::new(event.header.timestamp_us, now_ms, clock);
+        let staged = StagedCommittedEvent::new(
+            coord,
+            meta,
+            timing,
+            HashChain {
+                prev_hash,
+                event_hash,
+            },
+        );
+        let artifact = self.materialize_commit_artifacts(
+            &staged,
             disk_pos,
-            global_sequence: global_seq,
-        };
-        self.index.insert(entry);
-
-        // Record SIDX entry for the segment footer (written on rotation/shutdown).
-        let hash_chain_ref = event.hash_chain.as_ref();
-        let sidx_entry = crate::store::sidx::SidxEntry {
-            event_id: event.header.event_id,
-            entity_idx: 0, // filled by collector.record()
-            scope_idx: 0,  // filled by collector.record()
-            kind: crate::store::sidx::kind_to_raw(kind),
-            wall_ms: now_ms,
-            clock,
-            prev_hash: hash_chain_ref.map(|h| h.prev_hash).unwrap_or([0u8; 32]),
-            event_hash: hash_chain_ref.map(|h| h.event_hash).unwrap_or([0u8; 32]),
-            frame_offset: offset,
-            #[allow(clippy::cast_possible_truncation)] // frame.len() checked by checked_payload_len
-            frame_length: frame.len() as u32,
-            global_sequence: global_seq,
-            correlation_id,
-            causation_id: causation_id.unwrap_or(0),
-        };
-        self.sidx_collector.record(sidx_entry, entity, scope);
+            &event.payload,
+            event.header.flags,
+        );
+        self.index.insert(artifact.index_entry);
+        artifact.sidx_record.record(&mut self.sidx_collector);
 
         debug!(event_id = %event.header.event_id, clock = clock, "append committed");
 
         // STEP 10: Broadcast notification to subscribers.
-        let notification = Notification {
-            event_id: event.header.event_id,
-            correlation_id,
-            causation_id,
-            coord: coord.clone(),
-            kind,
-            sequence: global_seq,
-        };
-        let envelope = self
-            .single_event_envelope(coord.clone(), &event, global_seq)
-            .ok();
         if let Some(fence) = fence {
             self.index
                 .note_visibility_fence_progress(
@@ -1515,25 +1404,20 @@ impl WriterState<'_> {
                     global_seq.saturating_add(1),
                 )
                 .expect("active fence token verified before fenced append");
-            fence.pending_publish_up_to = Some(
-                fence
-                    .pending_publish_up_to
-                    .unwrap_or(0)
-                    .max(global_seq.saturating_add(1)),
+            fence.record_publish_up_to(global_seq.saturating_add(1));
+            fence.extend_artifacts(
+                vec![artifact.notification],
+                artifact.envelope.into_iter().collect(),
             );
-            fence.notifications.push(notification);
-            if let Some(envelope) = envelope {
-                fence.envelopes.push(envelope);
-            }
         } else {
             // Publish: make this entry visible to concurrent readers.
             // Explicit boundary: the entry has global_sequence == global_seq,
             // so visible_sequence must advance to global_seq + 1.
             self.index.publish(global_seq + 1);
-            self.subscribers.broadcast(&notification);
-            if let Some(envelope) = envelope {
-                self.reactor_subscribers.broadcast(&envelope);
-            }
+            self.broadcast_commit_artifacts(
+                vec![artifact.notification],
+                artifact.envelope.into_iter().collect(),
+            );
         }
 
         Ok(AppendReceipt {
@@ -1544,20 +1428,37 @@ impl WriterState<'_> {
     }
 
     /// Batch append protocol: atomic multi-event commit with SYSTEM_BATCH_BEGIN envelope.
-    /// [SPEC:src/store/writer.rs — handle_append_batch]
     fn handle_append_batch(
         &mut self,
-        items: &[BatchAppendItem],
-        fence: Option<&mut ActiveVisibilityFence>,
+        items: Vec<BatchAppendItem>,
+        fence: Option<&mut FenceLedger>,
     ) -> Result<Vec<AppendReceipt>, StoreError> {
         // STEPs 1-2: Validate size, bytes, and reject CAS.
-        self.validate_batch(items)?;
+        self.validate_batch(&items)?;
 
         // STEP 3: Preflight idempotency. Full replay returns cached receipts;
         // partial replay errors out; clean batch proceeds.
-        if let Some(cached) = self.preflight_batch_idempotency(items)? {
+        if let Some(cached) = self.preflight_batch_idempotency(&items)? {
             return Ok(cached);
         }
+
+        let prepared = PreparedBatch::from_items(items)?;
+        self.handle_prepared_batch(&prepared, fence)
+    }
+
+    fn handle_prepared_batch(
+        &mut self,
+        prepared: &PreparedBatch,
+        fence: Option<&mut FenceLedger>,
+    ) -> Result<Vec<AppendReceipt>, StoreError> {
+        debug_assert_eq!(
+            prepared.total_bytes(),
+            prepared
+                .items()
+                .iter()
+                .map(|item| item.payload_bytes().len())
+                .sum::<usize>()
+        );
 
         // STEPs 4-5: (no locks needed) — single writer thread owns all
         // index mutation. The previous per-entity Mutex was a leftover from
@@ -1565,26 +1466,26 @@ impl WriterState<'_> {
 
         // STEP 6: Generate batch_id and reserve global sequences.
         let batch_id = self.index.global_sequence();
-        let first_seq = self.index.reserve_sequences(items.len() as u64);
+        let first_seq = self.index.reserve_sequences(prepared.len() as u64);
 
         // FAULT INJECTION: Batch start
         #[cfg(feature = "dangerous-test-hooks")]
         crate::store::fault::maybe_inject(
             crate::store::fault::InjectionPoint::BatchStart {
                 batch_id,
-                item_count: items.len(),
+                item_count: prepared.len(),
             },
             &self.config.fault_injector,
         )?;
 
         // STEP 7: Pre-compute per-item global sequences, clocks, prev_hashes,
         // event_ids, and intra-batch causation chains.
-        let computed = self.precompute_batch_items(items, first_seq)?;
+        let computed = self.precompute_batch_items(prepared, first_seq)?;
 
         // STEP 8: Write SYSTEM_BATCH_BEGIN marker. Stores batch count in payload_size.
         // batch_max_size validation guarantees items.len() <= u32::MAX.
         #[allow(clippy::cast_possible_truncation)]
-        let batch_count = items.len() as u32;
+        let batch_count = prepared.len() as u32;
         let marker_offset =
             self.write_batch_marker_frame(batch_id, EventKind::SYSTEM_BATCH_BEGIN, batch_count, 0)?;
         trace!(batch_id, offset = marker_offset, "batch marker written");
@@ -1594,24 +1495,23 @@ impl WriterState<'_> {
         crate::store::fault::maybe_inject(
             crate::store::fault::InjectionPoint::BatchBeginWritten {
                 batch_id,
-                item_count: items.len(),
+                item_count: prepared.len(),
             },
             &self.config.fault_injector,
         )?;
 
-        // STEP 9: Write all event frames. Returns offsets and receipts;
+        // STEP 9: Write all event frames. Returns receipts;
         // every per-item value the stage step needs (`prev_hash`,
         // `event_hash`, `wall_ms`, `clock`) was already locked in by
         // `precompute_batch_items`.
-        let (frame_offsets, receipts) =
-            self.write_batch_event_frames(items, &computed, batch_id)?;
+        let receipts = self.write_batch_event_frames(prepared, &computed, batch_id)?;
 
         // FAULT INJECTION: All batch items complete
         #[cfg(feature = "dangerous-test-hooks")]
         crate::store::fault::maybe_inject(
             crate::store::fault::InjectionPoint::BatchItemsComplete {
                 batch_id,
-                item_count: items.len(),
+                item_count: prepared.len(),
             },
             &self.config.fault_injector,
         )?;
@@ -1621,7 +1521,7 @@ impl WriterState<'_> {
             batch_id,
             EventKind::SYSTEM_BATCH_COMMIT,
             0,
-            items.len() - 1,
+            prepared.len() - 1,
         )?;
         trace!(batch_id, "batch commit marker written");
 
@@ -1646,110 +1546,78 @@ impl WriterState<'_> {
         self.active_segment
             .sync_with_mode(&self.config.sync.mode)
             .map_err(|e| StoreError::BatchFailed {
-                item_index: items.len() - 1,
+                item_index: prepared.len() - 1,
                 stage: BatchStage::Syncing,
                 source: Box::new(e),
             })?;
 
-        // STEP 12: Build index entries from the precomputed data + frame offsets.
-        let staged_entries =
-            self.stage_batch_index_entries(items, &computed, &frame_offsets, &receipts)?;
+        // STEP 12/14: Materialize all post-write projections in one pass.
+        let artifacts = self.materialize_batch_commit_artifacts(prepared, &computed, &receipts);
+        Self::record_sidx_records(artifacts.sidx_records, &mut self.sidx_collector);
 
         // FAULT INJECTION: Before atomic publish to index
         #[cfg(feature = "dangerous-test-hooks")]
         crate::store::fault::maybe_inject(
             crate::store::fault::InjectionPoint::BatchPrePublish {
                 batch_id,
-                item_count: items.len(),
+                item_count: prepared.len(),
             },
             &self.config.fault_injector,
         )?;
 
         // STEP 13: Insert all entries into the in-memory index, then publish
         // atomically. Entries occupy [first_seq, first_seq + items.len()).
-        self.index.insert_batch(staged_entries);
-        #[allow(clippy::cast_possible_truncation)] // items.len() bounded by batch_max_size (u32)
-        let publish_up_to = first_seq + items.len() as u64;
+        self.index.insert_batch(artifacts.entries);
+        #[allow(clippy::cast_possible_truncation)] // prepared.len() bounded by batch_max_size (u32)
+        let publish_up_to = first_seq + prepared.len() as u64;
 
         if let Some(fence) = fence {
             self.index
                 .note_visibility_fence_progress(fence.token, first_seq, publish_up_to)
                 .expect("active fence token verified before fenced batch append");
-            fence.pending_publish_up_to =
-                Some(fence.pending_publish_up_to.unwrap_or(0).max(publish_up_to));
-            self.collect_batch_notifications(items, &computed, fence)?;
+            fence.record_publish_up_to(publish_up_to);
+            fence.extend_artifacts(artifacts.notifications, artifacts.envelopes);
         } else {
             self.index.publish(publish_up_to);
             // STEP 14: Broadcast notifications. A subscriber that reacts by calling
             // query/get will now see the full batch (publish happened first).
-            self.broadcast_batch_notifications(items, &computed)?;
+            self.broadcast_commit_artifacts(artifacts.notifications, artifacts.envelopes);
         }
 
-        debug!(batch_id, count = items.len(), "batch committed");
+        debug!(batch_id, count = prepared.len(), "batch committed");
         Ok(receipts)
     }
 
-    /// STEP 9: Write all event frames for the batch. Returns frame offsets and
-    /// per-item receipts. All per-item state (`prev_hash`, `event_hash`,
-    /// `wall_us`, etc.) is taken verbatim from the precomputed
-    /// `BatchItemComputed` slice — this function does NOT recompute hashes,
-    /// timestamps, or chain links. See the `BatchItemComputed` doc for the
-    /// historical incident behind this discipline.
+    /// STEP 9: Write all event frames for the batch. Returns per-item receipts.
+    /// All per-item state (`prev_hash`, `event_hash`,
+    /// `wall_us`, etc.) is taken verbatim from the precomputed staged slice —
+    /// this function does NOT recompute hashes, timestamps, or chain links.
     fn write_batch_event_frames(
         &mut self,
-        items: &[BatchAppendItem],
-        computed: &[BatchItemComputed],
+        prepared: &PreparedBatch,
+        staged: &[StagedCommittedEvent],
         batch_id: u64,
-    ) -> Result<(Vec<u64>, Vec<AppendReceipt>), StoreError> {
-        let mut frame_offsets: Vec<u64> = Vec::with_capacity(items.len());
-        let mut receipts: Vec<AppendReceipt> = Vec::with_capacity(items.len());
+    ) -> Result<Vec<AppendReceipt>, StoreError> {
+        let mut receipts: Vec<AppendReceipt> = Vec::with_capacity(prepared.len());
 
-        for (idx, item) in items.iter().enumerate() {
-            let c = &computed[idx];
-            let global_seq = c.global_seq;
-            let clock = c.clock;
-            let prev_hash = c.prev_hash;
-            let event_hash = c.event_hash;
-            let event_id = c.event_id;
-            let causation_id = c.causation_id;
-            let wall_us = c.wall_us;
-            let wall_ms = c.wall_ms;
+        for (idx, item) in prepared.items().iter().enumerate() {
+            let staged = &staged[idx];
 
-            // Build event header. wall_us / wall_ms come from the single
-            // batch-level capture in precompute, with per-entity monotonicity
-            // already applied to wall_ms.
-            let position = DagPosition::child_at(clock, wall_ms, 0);
-            let correlation_id = item.options.correlation_id.unwrap_or(event_id);
-
-            let header = EventHeader::new(
-                event_id,
-                correlation_id,
-                causation_id,
-                wall_us,
-                position,
-                // Payload sizes bounded by batch_max_bytes validation
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    item.payload_bytes.len() as u32
-                },
-                item.kind,
-            );
-
-            // Build event using the precomputed event_hash. The frame's
-            // prev_hash MUST be the precomputed value so multi-item
-            // same-entity batches produce a continuous on-disk hash chain.
-            let mut event = Event::new(header, item.payload_bytes.clone());
-            event.hash_chain = Some(HashChain {
-                prev_hash,
-                event_hash,
-            });
-            event.header.content_hash = event_hash;
+            // Build the committed frame event from the staged packet so batch
+            // write, index, and broadcast all share one source of truth.
+            let event = staged
+                .borrowed_frame_event(item.payload_bytes())
+                .map_err(|e| StoreError::BatchFailed {
+                    item_index: idx,
+                    stage: BatchStage::Encoding,
+                    source: Box::new(e),
+                })?;
 
             // Encode frame.
             let frame_payload = FramePayloadRef {
                 event: &event,
-                entity: item.coord.entity(),
-                scope: item.coord.scope(),
+                entity: staged.entity(),
+                scope: staged.scope(),
             };
             let frame =
                 segment::frame_encode(&frame_payload).map_err(|e| StoreError::BatchFailed {
@@ -1775,7 +1643,6 @@ impl WriterState<'_> {
                         stage: BatchStage::Writing,
                         source: Box::new(e),
                     })?;
-            frame_offsets.push(offset);
 
             // Build receipt (index update happens after all writes succeed).
             let disk_pos = DiskPos {
@@ -1785,8 +1652,8 @@ impl WriterState<'_> {
                 length: frame.len() as u32,
             };
             receipts.push(AppendReceipt {
-                event_id,
-                sequence: global_seq,
+                event_id: staged.event_id(),
+                sequence: staged.global_sequence(),
                 disk_pos,
             });
 
@@ -1796,7 +1663,7 @@ impl WriterState<'_> {
                 crate::store::fault::InjectionPoint::BatchItemWritten {
                     batch_id,
                     item_index: idx,
-                    total_items: items.len(),
+                    total_items: prepared.len(),
                 },
                 &self.config.fault_injector,
             )?;
@@ -1804,224 +1671,135 @@ impl WriterState<'_> {
         // Suppress unused warning when dangerous-test-hooks is disabled.
         let _ = batch_id;
 
-        Ok((frame_offsets, receipts))
+        Ok(receipts)
     }
 
-    /// STEP 12: Build IndexEntry vec from precomputed data + write outputs.
-    /// Also records SIDX entries for the segment footer. Per-item state
-    /// (`prev_hash`, `event_hash`, `wall_ms`, `clock`) is taken verbatim from
-    /// `BatchItemComputed`. The map-based hash lookup that lived here
-    /// previously was wrong: it returned the entity's LAST item's hash for
-    /// every staged entry on that entity, silently corrupting in-memory and
-    /// SIDX hash chains for multi-item same-entity batches.
-    fn stage_batch_index_entries(
-        &mut self,
-        items: &[BatchAppendItem],
-        computed: &[BatchItemComputed],
-        frame_offsets: &[u64],
-        receipts: &[AppendReceipt],
-    ) -> Result<Vec<IndexEntry>, StoreError> {
-        let mut staged_entries: Vec<IndexEntry> = Vec::with_capacity(items.len());
-        for (idx, item) in items.iter().enumerate() {
-            let c = &computed[idx];
-            let global_seq = c.global_seq;
-            let clock = c.clock;
-            let prev_hash = c.prev_hash;
-            let event_hash = c.event_hash;
-            let wall_ms = c.wall_ms;
-            let event_id = c.event_id;
-            let causation_id = c.causation_id;
-            let offset = frame_offsets[idx];
-
-            let entity: Arc<str> = Arc::from(item.coord.entity());
-            let scope: Arc<str> = Arc::from(item.coord.scope());
-
-            // Use disk_pos captured at write time — if rotation happened mid-batch,
-            // earlier items live on a prior segment.
-            let disk_pos = receipts[idx].disk_pos;
-            let coord =
-                Coordinate::new(entity.as_ref(), scope.as_ref()).map_err(StoreError::Coordinate)?;
-            let entity_id = self.index.interner.intern(entity.as_ref());
-            let scope_id = self.index.interner.intern(scope.as_ref());
-
-            let entry = IndexEntry {
-                event_id,
-                correlation_id: item.options.correlation_id.unwrap_or(event_id),
-                causation_id,
-                coord: coord.clone(),
-                entity_id,
-                scope_id,
-                kind: item.kind,
-                wall_ms,
-                clock,
-                hash_chain: HashChain {
-                    prev_hash,
-                    event_hash,
-                },
-                disk_pos,
-                global_sequence: global_seq,
-            };
-
-            staged_entries.push(entry);
-
-            // Record SIDX entry.
-            let sidx_entry = crate::store::sidx::SidxEntry {
-                event_id,
-                entity_idx: 0,
-                scope_idx: 0,
-                kind: crate::store::sidx::kind_to_raw(item.kind),
-                wall_ms,
-                clock,
-                prev_hash,
-                event_hash,
-                frame_offset: offset,
-                frame_length: receipts[idx].disk_pos.length,
-                global_sequence: global_seq,
-                correlation_id: item.options.correlation_id.unwrap_or(event_id),
-                causation_id: causation_id.unwrap_or(0),
-            };
-            self.sidx_collector
-                .record(sidx_entry, entity.as_ref(), scope.as_ref());
-        }
-        Ok(staged_entries)
-    }
-
-    /// STEP 14: Broadcast a Notification for each item in the committed batch.
-    fn broadcast_batch_notifications(
+    fn materialize_commit_artifacts(
         &self,
-        items: &[BatchAppendItem],
-        computed: &[BatchItemComputed],
-    ) -> Result<(), StoreError> {
-        for (idx, item) in items.iter().enumerate() {
-            let c = &computed[idx];
-            let global_seq = c.global_seq;
-            let event_id = c.event_id;
-            let causation_id = c.causation_id;
-            let entity: Arc<str> = Arc::from(item.coord.entity());
-            let scope: Arc<str> = Arc::from(item.coord.scope());
-            let coord =
-                Coordinate::new(entity.as_ref(), scope.as_ref()).map_err(StoreError::Coordinate)?;
-
-            self.subscribers.broadcast(&Notification {
-                event_id,
-                correlation_id: item.options.correlation_id.unwrap_or(event_id),
-                causation_id,
-                coord,
-                kind: item.kind,
-                sequence: global_seq,
-            });
-            if let Ok(envelope) = self.batch_event_envelope(item, c, global_seq) {
-                self.reactor_subscribers.broadcast(&envelope);
-            }
-        }
-        Ok(())
-    }
-
-    fn collect_batch_notifications(
-        &self,
-        items: &[BatchAppendItem],
-        computed: &[BatchItemComputed],
-        fence: &mut ActiveVisibilityFence,
-    ) -> Result<(), StoreError> {
-        for (idx, item) in items.iter().enumerate() {
-            let c = &computed[idx];
-            let global_seq = c.global_seq;
-            let event_id = c.event_id;
-            let causation_id = c.causation_id;
-            let entity: Arc<str> = Arc::from(item.coord.entity());
-            let scope: Arc<str> = Arc::from(item.coord.scope());
-            let coord =
-                Coordinate::new(entity.as_ref(), scope.as_ref()).map_err(StoreError::Coordinate)?;
-
-            fence.notifications.push(Notification {
-                event_id,
-                correlation_id: item.options.correlation_id.unwrap_or(event_id),
-                causation_id,
-                coord,
-                kind: item.kind,
-                sequence: global_seq,
-            });
-            if let Ok(envelope) = self.batch_event_envelope(item, c, global_seq) {
-                fence.envelopes.push(envelope);
-            }
-        }
-        Ok(())
-    }
-
-    fn single_event_envelope(
-        &self,
-        coord: Coordinate,
-        event: &Event<Vec<u8>>,
-        sequence: u64,
-    ) -> Result<CommittedEventEnvelope, StoreError> {
-        let notification = Notification {
-            event_id: event.header.event_id,
-            correlation_id: event.header.correlation_id,
-            causation_id: event.header.causation_id,
-            coord: coord.clone(),
-            kind: event.header.event_kind,
-            sequence,
+        staged: &StagedCommittedEvent,
+        disk_pos: DiskPos,
+        payload_bytes: &[u8],
+        flags: u8,
+    ) -> CommitArtifacts {
+        let index_entry = staged.index_entry(self.index, disk_pos);
+        let notification = staged.notification();
+        let envelope = staged
+            .stored_event(payload_bytes, flags)
+            .map(|stored| CommittedEventEnvelope {
+                notification: notification.clone(),
+                stored,
+            })
+            .ok();
+        let sidx_record = SidxRecord {
+            entry: staged.sidx_entry(disk_pos),
+            coord: staged.coord().clone(),
         };
-        let payload = rmp_serde::from_slice::<serde_json::Value>(&event.payload)
-            .map_err(|e| StoreError::Serialization(Box::new(e)))?;
-        Ok(CommittedEventEnvelope {
+
+        CommitArtifacts {
+            index_entry,
+            sidx_record,
             notification,
-            stored: StoredEvent {
-                coordinate: coord,
-                event: Event {
-                    header: event.header.clone(),
-                    payload,
-                    hash_chain: event.hash_chain.clone(),
-                },
-            },
-        })
+            envelope,
+        }
     }
 
-    fn batch_event_envelope(
+    fn materialize_prepared_commit_artifacts(
         &self,
-        item: &BatchAppendItem,
-        computed: &BatchItemComputed,
-        sequence: u64,
-    ) -> Result<CommittedEventEnvelope, StoreError> {
-        let event_id = computed.event_id;
-        let correlation_id = item.options.correlation_id.unwrap_or(event_id);
-        let coord = item.coord.clone();
-        let header = EventHeader::new(
-            event_id,
-            correlation_id,
-            computed.causation_id,
-            computed.wall_us,
-            DagPosition::child_at(computed.clock, computed.wall_ms, 0),
-            u32::try_from(item.payload_bytes.len())
-                .map_err(|_| StoreError::ser_msg("batch payload exceeds u32"))?,
-            item.kind,
-        )
-        .with_flags(item.options.flags);
-        let mut event = Event::new(
-            header,
-            rmp_serde::from_slice::<serde_json::Value>(&item.payload_bytes)
-                .map_err(|e| StoreError::Serialization(Box::new(e)))?,
+        prepared_item: &PreparedBatchItem,
+        staged: &StagedCommittedEvent,
+        disk_pos: DiskPos,
+        interned_ids: &PreparedBatchInternedIds,
+    ) -> CommitArtifacts {
+        let index_entry = staged.index_entry_with_ids(
+            disk_pos,
+            interned_ids.entity_id(prepared_item),
+            interned_ids.scope_id(prepared_item),
         );
-        event.hash_chain = Some(HashChain {
-            prev_hash: computed.prev_hash,
-            event_hash: computed.event_hash,
-        });
-        event.header.content_hash = computed.event_hash;
+        let notification = staged.notification();
+        let envelope = staged
+            .stored_event(prepared_item.payload_bytes(), prepared_item.options().flags)
+            .map(|stored| CommittedEventEnvelope {
+                notification: notification.clone(),
+                stored,
+            })
+            .ok();
+        let sidx_record = SidxRecord {
+            entry: staged.sidx_entry(disk_pos),
+            coord: staged.coord().clone(),
+        };
 
-        Ok(CommittedEventEnvelope {
-            notification: Notification {
-                event_id,
-                correlation_id,
-                causation_id: computed.causation_id,
-                coord: coord.clone(),
-                kind: item.kind,
-                sequence,
-            },
-            stored: StoredEvent {
-                coordinate: coord,
-                event,
-            },
-        })
+        CommitArtifacts {
+            index_entry,
+            sidx_record,
+            notification,
+            envelope,
+        }
+    }
+
+    /// STEP 12/14: Materialize all post-write views in one pass from the
+    /// committed staged facts plus receipts. This is the product split over
+    /// the same semantic source, so index/SIDX/notification/envelope derivation
+    /// cannot silently drift apart.
+    fn materialize_batch_commit_artifacts(
+        &self,
+        prepared: &PreparedBatch,
+        staged: &[StagedCommittedEvent],
+        receipts: &[AppendReceipt],
+    ) -> BatchCommitArtifacts {
+        let mut entries: Vec<IndexEntry> = Vec::with_capacity(staged.len());
+        let mut sidx_records: Vec<SidxRecord> = Vec::with_capacity(staged.len());
+        let mut notifications: Vec<Notification> = Vec::with_capacity(staged.len());
+        let mut envelopes: Vec<CommittedEventEnvelope> = Vec::with_capacity(staged.len());
+        let interned_ids = prepared.interned_ids(self.index);
+
+        for ((item, staged), receipt) in prepared
+            .items()
+            .iter()
+            .zip(staged.iter())
+            .zip(receipts.iter())
+        {
+            let artifact = self.materialize_prepared_commit_artifacts(
+                item,
+                staged,
+                receipt.disk_pos,
+                &interned_ids,
+            );
+            entries.push(artifact.index_entry);
+            sidx_records.push(artifact.sidx_record);
+            notifications.push(artifact.notification);
+            if let Some(envelope) = artifact.envelope {
+                envelopes.push(envelope);
+            }
+        }
+
+        BatchCommitArtifacts {
+            entries,
+            sidx_records,
+            notifications,
+            envelopes,
+        }
+    }
+
+    fn record_sidx_records(
+        records: Vec<SidxRecord>,
+        collector: &mut crate::store::sidx::SidxEntryCollector,
+    ) {
+        for record in records {
+            record.record(collector);
+        }
+    }
+
+    fn broadcast_commit_artifacts(
+        &self,
+        notifications: Vec<Notification>,
+        envelopes: Vec<CommittedEventEnvelope>,
+    ) {
+        for notification in notifications {
+            self.subscribers.broadcast(&notification);
+        }
+        for envelope in envelopes {
+            self.reactor_subscribers.broadcast(&envelope);
+        }
     }
 }
 

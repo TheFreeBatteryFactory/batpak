@@ -9,11 +9,11 @@
 //!
 //! PROVES: group commit, mmap reads, kind filtering, schema versioning,
 //!         incremental projection, Arc<IndexEntry>, PackedCausation,
-//!         IndexLayout (AoS/SoA/AoSoA), SIDX footer, index checkpoint,
+//!         IndexTopology (aos/scan/entity-local/tiled/all), SIDX footer, index checkpoint,
 //!         string interner, config validation, single-slot projection cache.
 
 use batpak::prelude::*;
-use batpak::store::{Freshness, Store, StoreConfig, StoreError};
+use batpak::store::{Freshness, IndexTopology, Store, StoreConfig, StoreError};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -29,7 +29,7 @@ struct KindFilteredCounter {
 }
 
 impl EventSourced for KindFilteredCounter {
-    type Input = batpak::prelude::ValueInput;
+    type Input = batpak::prelude::JsonValueInput;
 
     fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
         if events.is_empty() {
@@ -61,7 +61,7 @@ struct AllCounter {
 }
 
 impl EventSourced for AllCounter {
-    type Input = batpak::prelude::ValueInput;
+    type Input = batpak::prelude::JsonValueInput;
 
     fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
         if events.is_empty() {
@@ -88,7 +88,7 @@ struct VersionedCounterV2 {
 }
 
 impl EventSourced for VersionedCounterV2 {
-    type Input = batpak::prelude::ValueInput;
+    type Input = batpak::prelude::JsonValueInput;
 
     fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
         if events.is_empty() {
@@ -118,7 +118,7 @@ struct IncrementalCounter {
 }
 
 impl EventSourced for IncrementalCounter {
-    type Input = batpak::prelude::ValueInput;
+    type Input = batpak::prelude::JsonValueInput;
 
     fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
         if events.is_empty() {
@@ -500,22 +500,22 @@ fn incremental_apply_delta_only() {
 }
 
 // ===========================================================================
-// 2c: INDEX LAYOUT (AoS/SoA/AoSoA)
+// 2c: INDEX TOPOLOGY (aos/scan/entity-local/tiled/all)
 // ===========================================================================
 
 #[test]
-fn index_layout_aos_is_default() {
+fn index_topology_aos_is_default() {
     let dir = TempDir::new().expect("temp dir");
-    // Default config — should compile and work as AoS
+    // Default config — should compile and work as base AoS only.
     let config = StoreConfig::new(dir.path());
     let store = Store::open(config).expect("open");
     store.close().expect("close");
 }
 
 #[test]
-fn index_layout_soa_by_fact_correct() {
+fn index_topology_scan_by_fact_correct() {
     let dir = TempDir::new().expect("temp dir");
-    let config = StoreConfig::new(dir.path()).with_index_layout(IndexLayout::SoA);
+    let config = StoreConfig::new(dir.path()).with_index_topology(IndexTopology::scan());
     let store = Store::open(config).expect("open");
     let coord = Coordinate::new("soa:entity", "soa:scope").expect("coord");
     for i in 0u32..10 {
@@ -528,16 +528,16 @@ fn index_layout_soa_by_fact_correct() {
     assert_eq!(
         results.len(),
         10,
-        "PROPERTY: SoA by_fact must return correct count.\n\
+        "PROPERTY: scan topology by_fact must return correct count.\n\
          Investigate: src/store/columnar.rs query_by_kind."
     );
     store.close().expect("close");
 }
 
 #[test]
-fn index_layout_aosoa8_by_fact_correct() {
+fn index_topology_tiled_by_fact_correct() {
     let dir = TempDir::new().expect("temp dir");
-    let config = StoreConfig::new(dir.path()).with_index_layout(IndexLayout::AoSoA8);
+    let config = StoreConfig::new(dir.path()).with_index_topology(IndexTopology::tiled());
     let store = Store::open(config).expect("open");
     let coord = Coordinate::new("tile:entity", "tile:scope").expect("coord");
     for i in 0u32..20 {
@@ -547,16 +547,16 @@ fn index_layout_aosoa8_by_fact_correct() {
     assert_eq!(
         results.len(),
         20,
-        "PROPERTY: AoSoA8 by_fact must return correct count.\n\
-         Investigate: src/store/columnar.rs Tile<8> query."
+        "PROPERTY: tiled topology by_fact must return correct count.\n\
+         Investigate: src/store/columnar.rs AoSoA64 query."
     );
     store.close().expect("close");
 }
 
 #[test]
-fn index_layout_aosoa16_by_fact_correct() {
+fn index_topology_entity_local_by_fact_correct() {
     let dir = TempDir::new().expect("temp dir");
-    let config = StoreConfig::new(dir.path()).with_index_layout(IndexLayout::AoSoA16);
+    let config = StoreConfig::new(dir.path()).with_index_topology(IndexTopology::entity_local());
     let store = Store::open(config).expect("open");
     let coord = Coordinate::new("tile16:entity", "tile16:scope").expect("coord");
     for i in 0u32..40 {
@@ -566,16 +566,16 @@ fn index_layout_aosoa16_by_fact_correct() {
     assert_eq!(
         results.len(),
         40,
-        "PROPERTY: AoSoA16 by_fact must return correct count.\n\
-         Investigate: src/store/columnar.rs Tile<16> query."
+        "PROPERTY: entity-local topology by_fact must return correct count.\n\
+         Investigate: src/store/columnar.rs SoAoSInner::query_by_kind."
     );
     store.close().expect("close");
 }
 
 #[test]
-fn index_layout_aosoa64_by_fact_correct() {
+fn index_topology_all_by_fact_correct() {
     let dir = TempDir::new().expect("temp dir");
-    let config = StoreConfig::new(dir.path()).with_index_layout(IndexLayout::AoSoA64);
+    let config = StoreConfig::new(dir.path()).with_index_topology(IndexTopology::all());
     let store = Store::open(config).expect("open");
     let coord = Coordinate::new("tile64:entity", "tile64:scope").expect("coord");
     for i in 0u32..150 {
@@ -585,16 +585,16 @@ fn index_layout_aosoa64_by_fact_correct() {
     assert_eq!(
         results.len(),
         150,
-        "PROPERTY: AoSoA64 by_fact must return correct count.\n\
-         Investigate: src/store/columnar.rs Tile<8> query."
+        "PROPERTY: all-topology by_fact must return correct count.\n\
+         Investigate: src/store/columnar.rs overlay fanout."
     );
     store.close().expect("close");
 }
 
 #[test]
-fn layout_parity_aos_vs_soa() {
+fn topology_parity_aos_vs_scan() {
     let dir_aos = TempDir::new().expect("dir aos");
-    let dir_soa = TempDir::new().expect("dir soa");
+    let dir_scan = TempDir::new().expect("dir scan");
     let kind = kind_a();
 
     let populate = |store: &Store| {
@@ -607,33 +607,33 @@ fn layout_parity_aos_vs_soa() {
     let store_aos = Store::open(StoreConfig::new(dir_aos.path())).expect("open aos");
     populate(&store_aos);
 
-    let store_soa =
-        Store::open(StoreConfig::new(dir_soa.path()).with_index_layout(IndexLayout::SoA))
-            .expect("open soa");
-    populate(&store_soa);
+    let store_scan =
+        Store::open(StoreConfig::new(dir_scan.path()).with_index_topology(IndexTopology::scan()))
+            .expect("open scan");
+    populate(&store_scan);
 
     let events_aos = store_aos.by_fact(kind);
-    let events_soa = store_soa.by_fact(kind);
+    let events_scan = store_scan.by_fact(kind);
     assert_eq!(
         events_aos.len(),
-        events_soa.len(),
-        "PROPERTY: AoS and SoA must return identical by_fact results.\n\
-         aos={}, soa={}.",
+        events_scan.len(),
+        "PROPERTY: aos and scan must return identical by_fact results.\n\
+         aos={}, scan={}.",
         events_aos.len(),
-        events_soa.len()
+        events_scan.len()
     );
     store_aos.close().expect("close");
-    store_soa.close().expect("close");
+    store_scan.close().expect("close");
 }
 
 // ===========================================================================
-// 2c continued: SoAoS LAYOUT
+// 2c continued: entity-local topology
 // ===========================================================================
 
 #[test]
-fn index_layout_soaos_by_fact_correct() {
+fn index_topology_entity_local_mixed_fact_correct() {
     let dir = TempDir::new().expect("temp dir");
-    let config = StoreConfig::new(dir.path()).with_index_layout(IndexLayout::SoAoS);
+    let config = StoreConfig::new(dir.path()).with_index_topology(IndexTopology::entity_local());
     let store = Store::open(config).expect("open");
     let coord = Coordinate::new("soaos:entity", "soaos:scope").expect("coord");
     for i in 0u32..15 {
@@ -646,16 +646,16 @@ fn index_layout_soaos_by_fact_correct() {
     assert_eq!(
         results.len(),
         15,
-        "PROPERTY: SoAoS by_fact must return correct count.\n\
+        "PROPERTY: entity-local topology by_fact must return correct count.\n\
          Investigate: src/store/columnar.rs SoAoSInner::query_by_kind."
     );
     store.close().expect("close");
 }
 
 #[test]
-fn layout_parity_aos_vs_soaos() {
+fn topology_parity_aos_vs_entity_local() {
     let dir_aos = TempDir::new().expect("dir aos");
-    let dir_soaos = TempDir::new().expect("dir soaos");
+    let dir_entity_local = TempDir::new().expect("dir entity-local");
     let kind = kind_a();
 
     let populate = |store: &Store| {
@@ -668,23 +668,25 @@ fn layout_parity_aos_vs_soaos() {
     let store_aos = Store::open(StoreConfig::new(dir_aos.path())).expect("open aos");
     populate(&store_aos);
 
-    let store_soaos =
-        Store::open(StoreConfig::new(dir_soaos.path()).with_index_layout(IndexLayout::SoAoS))
-            .expect("open soaos");
-    populate(&store_soaos);
+    let store_entity_local = Store::open(
+        StoreConfig::new(dir_entity_local.path())
+            .with_index_topology(IndexTopology::entity_local()),
+    )
+    .expect("open entity-local");
+    populate(&store_entity_local);
 
     let events_aos = store_aos.by_fact(kind);
-    let events_soaos = store_soaos.by_fact(kind);
+    let events_entity_local = store_entity_local.by_fact(kind);
     assert_eq!(
         events_aos.len(),
-        events_soaos.len(),
-        "PROPERTY: AoS and SoAoS must return identical by_fact results.\n\
-         aos={}, soaos={}.",
+        events_entity_local.len(),
+        "PROPERTY: aos and entity-local must return identical by_fact results.\n\
+         aos={}, entity-local={}.",
         events_aos.len(),
-        events_soaos.len()
+        events_entity_local.len()
     );
     store_aos.close().expect("close");
-    store_soaos.close().expect("close");
+    store_entity_local.close().expect("close");
 }
 
 // ===========================================================================

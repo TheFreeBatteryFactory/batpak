@@ -3,7 +3,6 @@ use std::fmt;
 
 /// EventKind wraps a private u16. Products cannot construct arbitrary system kinds.
 /// Products use EventKind::custom(category, type_id) which validates the range.
-/// [SPEC:src/event/kind.rs]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EventKind(u16); // PRIVATE inner field — not pub
 

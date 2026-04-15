@@ -58,9 +58,6 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants@27.0.0
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: mdbook@0.4.52
       - uses: Swatinem/rust-cache@v2
       - name: Integrity
         run: cargo xtask ci
@@ -124,7 +121,7 @@ jobs:
     # HARD GATE: mutation score must be >= 20% (caught) or the job fails.
     # cargo-mutants 27.0.0 has no built-in threshold flag; the gate is
     # implemented by parsing caught.txt / missed.txt in mutants() in
-    # tools/xtask/src/main.rs after each cargo-mutants invocation.
+    # tools/xtask/src/commands.rs after each cargo-mutants invocation.
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: [integrity-linux-container, integrity-windows-native]
@@ -186,24 +183,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-devcontainer
-      - name: Build rustdoc + scrub upload-pages-artifact gotchas
-        # Two things in the rustdoc output break `actions/upload-pages-artifact@v3`:
-        #   1. `macro.NAME!.html` redirect files — the `!` in the filename
-        #      is rejected by the tar packing the action uses.
-        #   2. `./api/.lock` — a rustdoc-internal lock file with restricted
-        #      permissions; the GH runner user can't read it.
-        # Both files are owned by the in-container user (root) because
-        # rustdoc runs inside the canonical devcontainer. Delete them
-        # INSIDE the container so the host runner doesn't hit
-        # permission-denied. Both deletes are best-effort (`|| true`)
-        # so a missing file doesn't fail the step.
-        run: |
-          bash ./scripts/run-in-devcontainer.sh '
-            cargo xtask docs &&
-            find target/site -name "*!*.html" -type f -delete &&
-            find target/site -name ".lock" -type f -delete &&
-            chmod -R u+rX target/site
-          '
+      - name: Build root docs site + rustdoc
+        run: bash ./scripts/run-in-devcontainer.sh 'cargo xtask docs'
       - uses: actions/upload-pages-artifact@v3
         with:
           path: target/site
@@ -212,7 +193,7 @@ jobs:
         # with `404 Not Found` until GitHub Pages is enabled in repository
         # Settings → Pages (deployment source: "GitHub Actions"). The build
         # and upload steps above are the meaningful gates — they catch
-        # rustdoc/mdbook breakage. The deploy itself is the LAST mile and
+        # rustdoc and root-doc site breakage. The deploy itself is the LAST mile and
         # should not block CI on a one-time admin setup that the codebase
         # cannot fix from inside Rust source. Once Pages is enabled, this
         # step succeeds silently and `continue-on-error` becomes a no-op.

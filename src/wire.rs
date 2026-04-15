@@ -5,11 +5,9 @@ use std::fmt;
 /// Serde helpers for u128 serialization as [u8; 16] big-endian.
 /// MessagePack has no native u128 type. Bare u128 causes rmp-serde errors.
 /// Big-endian preserves sort order and is standard network byte order.
-/// [SPEC:WIRE FORMAT DECISIONS item 2]
 ///
 /// ZERO internal dependencies. This module is declared FIRST in lib.rs.
 /// Every serializable type with a u128 field uses these helpers.
-/// [SPEC:BUILD ORDER STEP 4 — wire.rs is FIRST]
 pub mod u128_bytes {
     /// Usage: #[serde(with = "crate::wire::u128_bytes")]
     /// Annotated on: EventHeader.event_id, EventHeader.correlation_id,

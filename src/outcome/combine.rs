@@ -3,7 +3,6 @@ use crate::outcome::error::ErrorKind;
 
 /// zip: combine two outcomes into a tuple outcome.
 /// If either is Err, the first Err wins.
-/// [SPEC:src/outcome/combine.rs]
 pub fn zip<A: Clone, B: Clone>(a: Outcome<A>, b: Outcome<B>) -> Outcome<(A, B)> {
     // Priority order for non-Ok variants (highest wins):
     //   Err > Cancelled > Retry > Pending > Batch > Ok
@@ -92,7 +91,6 @@ pub fn zip<A: Clone, B: Clone>(a: Outcome<A>, b: Outcome<B>) -> Outcome<(A, B)> 
 
 /// join_all: collect a Vec of outcomes into an outcome of Vec.
 /// All must be Ok for the result to be Ok. First Err short-circuits.
-/// [SPEC:src/outcome/combine.rs]
 pub fn join_all<T>(outcomes: Vec<Outcome<T>>) -> Outcome<Vec<T>> {
     let mut results = Vec::with_capacity(outcomes.len());
     for outcome in outcomes {
@@ -163,7 +161,6 @@ pub fn join_all<T>(outcomes: Vec<Outcome<T>>) -> Outcome<Vec<T>> {
 }
 
 /// join_any: first Ok wins. If all fail, last Err wins.
-/// [SPEC:src/outcome/combine.rs]
 #[allow(clippy::wildcard_enum_match_arm)] // Retry/Pending/Cancelled are intentional pass-through
 pub fn join_any<T>(outcomes: Vec<Outcome<T>>) -> Outcome<T> {
     let mut last_err = None;

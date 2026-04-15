@@ -6,14 +6,12 @@ pub mod bypass;
 pub use bypass::{BypassReason, BypassReceipt};
 
 /// `Proposal<T>`: wraps a value for gate evaluation.
-/// [SPEC:src/pipeline/mod.rs]
 pub struct Proposal<T>(
     /// The payload to be evaluated and committed.
     pub(crate) T,
 );
 
 /// `Committed<T>`: proof that an event was persisted.
-/// [SPEC:src/pipeline/mod.rs]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Committed<T> {
     /// The committed event payload.
@@ -28,7 +26,6 @@ pub struct Committed<T> {
 }
 
 /// `Pipeline<Ctx>`: evaluate gates then commit.
-/// [SPEC:src/pipeline/mod.rs]
 pub struct Pipeline<Ctx> {
     /// The set of gates applied during proposal evaluation.
     gates: GateSet<Ctx>,
@@ -67,7 +64,6 @@ impl<Ctx> Pipeline<Ctx> {
 
     /// commit: generic over error type E. Pipeline doesn't know about StoreError.
     /// Products pass a closure that calls store.append() and wraps the result.
-    /// [SPEC:IMPLEMENTATION NOTES item 9 — Pipeline::commit() E is generic]
     ///
     /// # Errors
     /// Returns `Err(E)` if the caller-supplied `commit_fn` closure fails.
@@ -92,7 +88,6 @@ impl<Ctx> Pipeline<Ctx> {
 
     /// commit_bypass: persist a bypassed proposal through the same commit path.
     /// Mirrors commit() but takes a BypassReceipt instead of a Receipt.
-    /// [SPEC:src/pipeline/mod.rs — Pipeline::commit_bypass]
     ///
     /// # Errors
     /// Returns `Err(E)` if the caller-supplied `commit_fn` closure fails.

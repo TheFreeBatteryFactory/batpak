@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 
 /// Cursor: pull-based event consumption with guaranteed delivery.
 /// Reads from index, not channels. Cannot lose events.
-/// [SPEC:src/store/cursor.rs]
 pub struct Cursor {
     region: Region,
     position: u64, // tracks global_sequence — next poll starts after this

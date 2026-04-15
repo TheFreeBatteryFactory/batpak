@@ -12,7 +12,6 @@ use std::sync::Arc;
 pub const MAX_COORDINATE_COMPONENT_LEN: usize = 1024;
 
 /// Coordinate: WHO (entity) + WHERE (scope). The address of an event stream.
-/// [SPEC:src/coordinate/mod.rs]
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Coordinate {
@@ -45,7 +44,6 @@ pub enum CoordinateError {
 }
 
 /// Region: the ONE predicate type for query, subscription, cursor, traversal.
-/// [SPEC:src/coordinate/mod.rs — Region replaces SubscriptionPattern]
 #[derive(Clone, Debug, Default)]
 pub struct Region {
     /// Optional entity name prefix; matches any entity whose name starts with this string.
@@ -55,7 +53,7 @@ pub struct Region {
     /// Optional event-kind filter applied to matched events.
     pub fact: Option<KindFilter>,
     /// Optional inclusive per-entity clock range; does not apply to live filtering.
-    pub clock_range: Option<(u32, u32)>, // per-entity clock, NOT global_sequence [SPEC:IMPLEMENTATION NOTES item 12]
+    pub clock_range: Option<(u32, u32)>, // per-entity clock, not global_sequence
 }
 
 /// Filter on [`EventKind`] used within a [`Region`] query.
@@ -79,24 +77,7 @@ impl Coordinate {
     pub fn new(entity: impl AsRef<str>, scope: impl AsRef<str>) -> Result<Self, CoordinateError> {
         let entity = entity.as_ref();
         let scope = scope.as_ref();
-        if entity.is_empty() {
-            return Err(CoordinateError::EmptyEntity);
-        }
-        if scope.is_empty() {
-            return Err(CoordinateError::EmptyScope);
-        }
-        if entity.len() > MAX_COORDINATE_COMPONENT_LEN {
-            return Err(CoordinateError::EntityTooLong {
-                len: entity.len(),
-                max: MAX_COORDINATE_COMPONENT_LEN,
-            });
-        }
-        if scope.len() > MAX_COORDINATE_COMPONENT_LEN {
-            return Err(CoordinateError::ScopeTooLong {
-                len: scope.len(),
-                max: MAX_COORDINATE_COMPONENT_LEN,
-            });
-        }
+        Self::validate_parts(entity, scope)?;
         Ok(Self {
             entity: Arc::from(entity),
             scope: Arc::from(scope),
@@ -116,6 +97,36 @@ impl Coordinate {
     }
     pub(crate) fn scope_arc(&self) -> Arc<str> {
         Arc::clone(&self.scope)
+    }
+
+    pub(crate) fn from_shared_parts(
+        entity: Arc<str>,
+        scope: Arc<str>,
+    ) -> Result<Self, CoordinateError> {
+        Self::validate_parts(entity.as_ref(), scope.as_ref())?;
+        Ok(Self { entity, scope })
+    }
+
+    fn validate_parts(entity: &str, scope: &str) -> Result<(), CoordinateError> {
+        if entity.is_empty() {
+            return Err(CoordinateError::EmptyEntity);
+        }
+        if scope.is_empty() {
+            return Err(CoordinateError::EmptyScope);
+        }
+        if entity.len() > MAX_COORDINATE_COMPONENT_LEN {
+            return Err(CoordinateError::EntityTooLong {
+                len: entity.len(),
+                max: MAX_COORDINATE_COMPONENT_LEN,
+            });
+        }
+        if scope.len() > MAX_COORDINATE_COMPONENT_LEN {
+            return Err(CoordinateError::ScopeTooLong {
+                len: scope.len(),
+                max: MAX_COORDINATE_COMPONENT_LEN,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -142,7 +153,7 @@ impl fmt::Display for CoordinateError {
 }
 impl std::error::Error for CoordinateError {}
 
-/// Region builder — method chaining. [SPEC:src/coordinate/mod.rs — Region builder]
+/// Region builder with method chaining.
 impl Region {
     /// Returns a region that matches all events.
     pub fn all() -> Self {

@@ -15,6 +15,10 @@
 //! - Two systems can independently derive the same count from the same events
 //! - You never lose information — a decrement is a new event, not an overwrite
 //!
+//! This example intentionally uses `JsonValueInput`, the ergonomic default
+//! replay lane. When replay throughput matters more than projection simplicity,
+//! compare it with `raw_projection_counter`.
+//!
 //! Run: `cargo run --example event_sourced_counter`
 
 use batpak::prelude::*;
@@ -43,7 +47,7 @@ struct CounterState {
 
 // -- Step 4: Implement EventSourced to teach batpak how to fold events --
 impl EventSourced for CounterState {
-    type Input = batpak::prelude::ValueInput;
+    type Input = batpak::prelude::JsonValueInput;
 
     fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
         if events.is_empty() {
@@ -124,6 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("  value:            {}", s.value);
             println!("  total_increments: {}", s.total_increments);
             println!("  total_decrements: {}", s.total_decrements);
+            println!("  replay lane:      JsonValueInput (ergonomic default)");
         }
         None => println!("No events found!"),
     }

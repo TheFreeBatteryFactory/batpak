@@ -64,8 +64,8 @@ pub struct StoreDiagnostics {
     pub restart_policy: RestartPolicy,
     /// Current writer mailbox pressure snapshot.
     pub writer_pressure: WriterPressure,
-    /// Active scan topology name (`AoS` or `MultiView`).
-    pub index_layout: &'static str,
+    /// Active scan topology label (`aos`, `scan`, `entity-local`, `tiled`, `all`, or `hybrid`).
+    pub index_topology: &'static str,
     /// Number of tiles in the columnar index (0 for non-tiled layouts).
     pub tile_count: usize,
     /// Structured report from the cold-start open path, if available.

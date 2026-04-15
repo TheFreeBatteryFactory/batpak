@@ -15,7 +15,7 @@
 
 use batpak::prelude::*;
 use batpak::store::{
-    BatchConfig, IndexConfig, Store, StoreConfig, SyncConfig, SyncMode, ViewConfig, WriterConfig,
+    BatchConfig, IndexConfig, IndexTopology, Store, StoreConfig, SyncConfig, SyncMode, WriterConfig,
 };
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -414,8 +414,7 @@ fn store_config_all_fields_overridable() {
             group_commit_max_batch: 1,  // default (not testing group commit here)
         },
         index: IndexConfig {
-            layout: IndexLayout::default(), // default
-            views: ViewConfig::none()
+            topology: IndexTopology::aos()
                 .with_soa(true)
                 .with_entity_groups(false)
                 .with_tiles64(true),
@@ -484,8 +483,7 @@ fn store_config_debug_lists_all_integrity_relevant_fields() {
             group_commit_max_batch: 1,
         },
         index: IndexConfig {
-            layout: IndexLayout::default(),
-            views: ViewConfig::none()
+            topology: IndexTopology::aos()
                 .with_soa(true)
                 .with_entity_groups(false)
                 .with_tiles64(true),
@@ -522,7 +520,7 @@ fn store_config_debug_lists_all_integrity_relevant_fields() {
         "max_size: 333",
         "max_bytes: 44444",
         "IndexConfig",
-        "views: ViewConfig { soa: true, entity_groups: false, tiles64: true }",
+        "topology: IndexTopology { soa: true, entity_groups: false, tiles64: true }",
         "enable_checkpoint: true",
         "enable_mmap_index: false",
         "clock: Some(\"<fn>\")",

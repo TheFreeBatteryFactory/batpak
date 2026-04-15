@@ -2,7 +2,7 @@
 //!
 //! This module provides the columnar overlay indexes and the [`ScanIndex`]
 //! fanout struct that maintains a mandatory AoS base view plus optional
-//! SoA, SoAoS, and AoSoA64 overlays.  All active views are populated on
+//! SoA, SoAoS, and AoSoA64 overlays. All active views are populated on
 //! every insert; queries route to the most efficient view for each access
 //! pattern.
 //!
@@ -60,7 +60,7 @@ type ProjectionCandidates = (u64, u64, Vec<(u64, DiskPos)>);
 /// (no extra alloc, pointer locality preserved) while keeping the code
 /// straightforward.
 #[repr(C, align(64))]
-pub struct Tile<const N: usize> {
+pub(crate) struct Tile<const N: usize> {
     /// Event kinds stored in this tile; all entries have the same kind.
     pub kinds: Vec<EventKind>,
     /// `global_sequence` values parallel to `kinds` and `entries`.
@@ -328,7 +328,7 @@ impl<const N: usize> AoSoAInner<N> {
 // ── SoAoS: hybrid AoS-outer, SoA-inner ──────────────────────────────────────
 
 /// One entity's events stored as parallel arrays (SoA within an entity group).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct CachedProjectionSlot {
     pub(crate) bytes: Vec<u8>,
     pub(crate) watermark: u64,
@@ -831,6 +831,31 @@ impl ColumnarIndex {
 // ScanIndex — top-level dispatcher
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScanRoute {
+    BaseAoS,
+    SoA,
+    SoAoS,
+    AoSoA64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProjectionSupport {
+    entity_generation_fast_path: bool,
+    cached_projection: bool,
+    projection_candidates: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScanCapabilities {
+    by_kind: ScanRoute,
+    by_scope: ScanRoute,
+    by_category: ScanRoute,
+    projection: ProjectionSupport,
+    topology_name: &'static str,
+    tile_count: usize,
+}
+
 /// Base AoS indexes plus optional multi-view overlays.
 pub(crate) struct ScanIndex {
     /// Event-kind → ordered event entries.
@@ -848,17 +873,9 @@ pub(crate) struct ScanIndex {
 impl ScanIndex {
     /// Construct base AoS maps plus the configured optional overlays.
     pub(crate) fn for_config(config: &crate::store::IndexConfig) -> Self {
-        use crate::store::IndexLayout;
-        let mut soa = config.views.soa;
-        let mut entity_groups = config.views.entity_groups;
-        let mut tiles64 = config.views.tiles64;
-
-        match config.layout {
-            IndexLayout::AoS => {}
-            IndexLayout::SoA => soa = true,
-            IndexLayout::AoSoA8 | IndexLayout::AoSoA16 | IndexLayout::AoSoA64 => tiles64 = true,
-            IndexLayout::SoAoS => entity_groups = true,
-        }
+        let soa = config.topology.soa;
+        let entity_groups = config.topology.entity_groups;
+        let tiles64 = config.topology.tiles64;
 
         Self {
             by_fact: DashMap::new(),
@@ -906,16 +923,132 @@ impl ScanIndex {
         results
     }
 
-    pub(crate) fn layout_name(&self) -> &'static str {
-        if self.soa.is_none() && self.entity_groups.is_none() && self.tiles64.is_none() {
-            "AoS"
-        } else {
-            "MultiView"
+    fn capabilities(&self) -> ScanCapabilities {
+        let (has_soa, has_entity_groups, has_tiles64) = (
+            self.soa.is_some(),
+            self.entity_groups.is_some(),
+            self.tiles64.is_some(),
+        );
+
+        let topology_name = match (has_soa, has_entity_groups, has_tiles64) {
+            (false, false, false) => "aos",
+            (true, false, false) => "scan",
+            (false, true, false) => "entity-local",
+            (false, false, true) => "tiled",
+            (true, true, true) => "all",
+            _ => "hybrid",
+        };
+
+        ScanCapabilities {
+            by_kind: if has_soa {
+                ScanRoute::SoA
+            } else if has_tiles64 {
+                ScanRoute::AoSoA64
+            } else if has_entity_groups {
+                ScanRoute::SoAoS
+            } else {
+                ScanRoute::BaseAoS
+            },
+            by_scope: if has_entity_groups {
+                ScanRoute::SoAoS
+            } else if has_soa {
+                ScanRoute::SoA
+            } else if has_tiles64 {
+                ScanRoute::AoSoA64
+            } else {
+                ScanRoute::BaseAoS
+            },
+            by_category: if has_soa {
+                ScanRoute::SoA
+            } else if has_tiles64 {
+                ScanRoute::AoSoA64
+            } else if has_entity_groups {
+                ScanRoute::SoAoS
+            } else {
+                ScanRoute::BaseAoS
+            },
+            projection: ProjectionSupport {
+                entity_generation_fast_path: has_entity_groups,
+                cached_projection: has_entity_groups,
+                projection_candidates: has_entity_groups,
+            },
+            topology_name,
+            tile_count: self.tiles64.as_ref().map_or(0, ColumnarIndex::tile_count),
         }
     }
 
+    fn query_by_kind_route(&self, route: ScanRoute, kind: EventKind) -> Vec<Arc<IndexEntry>> {
+        match route {
+            ScanRoute::BaseAoS => self.query_base_by_kind(kind),
+            ScanRoute::SoA => self
+                .soa
+                .as_ref()
+                .expect("ScanCapabilities routed kind queries through missing SoA overlay")
+                .query_by_kind(kind),
+            ScanRoute::SoAoS => self
+                .entity_groups
+                .as_ref()
+                .expect("ScanCapabilities routed kind queries through missing SoAoS overlay")
+                .query_by_kind(kind),
+            ScanRoute::AoSoA64 => self
+                .tiles64
+                .as_ref()
+                .expect("ScanCapabilities routed kind queries through missing AoSoA64 overlay")
+                .query_by_kind(kind),
+        }
+    }
+
+    fn query_by_category_route(&self, route: ScanRoute, category: u8) -> Vec<Arc<IndexEntry>> {
+        match route {
+            ScanRoute::BaseAoS => self.query_base_by_category(category),
+            ScanRoute::SoA => self
+                .soa
+                .as_ref()
+                .expect("ScanCapabilities routed category queries through missing SoA overlay")
+                .query_by_category(category),
+            ScanRoute::SoAoS => self
+                .entity_groups
+                .as_ref()
+                .expect("ScanCapabilities routed category queries through missing SoAoS overlay")
+                .query_by_category(category),
+            ScanRoute::AoSoA64 => self
+                .tiles64
+                .as_ref()
+                .expect("ScanCapabilities routed category queries through missing AoSoA64 overlay")
+                .query_by_category(category),
+        }
+    }
+
+    fn query_by_scope_route(&self, route: ScanRoute, scope: &str) -> Vec<Arc<IndexEntry>> {
+        match route {
+            // Base AoS keeps the authoritative scope -> entity set, but not a
+            // direct scope -> entries index. Callers pair this route with
+            // `scope_entity_set` when they need the full entry list.
+            ScanRoute::BaseAoS => Vec::new(),
+            ScanRoute::SoA => self
+                .soa
+                .as_ref()
+                .expect("ScanCapabilities routed scope queries through missing SoA overlay")
+                .query_by_scope(scope),
+            ScanRoute::SoAoS => self
+                .entity_groups
+                .as_ref()
+                .expect("ScanCapabilities routed scope queries through missing SoAoS overlay")
+                .query_by_scope(scope),
+            ScanRoute::AoSoA64 => self
+                .tiles64
+                .as_ref()
+                .expect("ScanCapabilities routed scope queries through missing AoSoA64 overlay")
+                .query_by_scope(scope),
+        }
+    }
+
+    pub(crate) fn topology_name(&self) -> &'static str {
+        self.capabilities().topology_name
+    }
+
     pub(crate) fn tile_count(&self) -> usize {
-        self.tiles64.as_ref().map_or(0, ColumnarIndex::tile_count)
+        self.capabilities().tile_count
     }
 
     /// Insert an entry into whichever secondary index is active.
@@ -993,16 +1126,7 @@ impl ScanIndex {
     ///
     /// For `Columnar`, delegates to [`ColumnarIndex::query_by_kind`].
     pub(crate) fn query_by_kind(&self, kind: EventKind) -> Vec<Arc<IndexEntry>> {
-        if let Some(idx) = &self.soa {
-            return idx.query_by_kind(kind);
-        }
-        if let Some(idx) = &self.tiles64 {
-            return idx.query_by_kind(kind);
-        }
-        if let Some(idx) = &self.entity_groups {
-            return idx.query_by_kind(kind);
-        }
-        self.query_base_by_kind(kind)
+        self.query_by_kind_route(self.capabilities().by_kind, kind)
     }
 
     /// Return all entries whose coordinate scope matches `scope`, sorted by
@@ -1015,16 +1139,7 @@ impl ScanIndex {
     ///
     /// For `Columnar`, delegates to [`ColumnarIndex::query_by_scope`].
     pub(crate) fn query_by_scope(&self, scope: &str) -> Vec<Arc<IndexEntry>> {
-        if let Some(idx) = &self.entity_groups {
-            return idx.query_by_scope(scope);
-        }
-        if let Some(idx) = &self.soa {
-            return idx.query_by_scope(scope);
-        }
-        if let Some(idx) = &self.tiles64 {
-            return idx.query_by_scope(scope);
-        }
-        Vec::new()
+        self.query_by_scope_route(self.capabilities().by_scope, scope)
     }
 
     /// Return all entries whose kind falls in `category` (upper 4 bits),
@@ -1034,16 +1149,7 @@ impl ScanIndex {
     /// the category. For `Columnar`, delegates to
     /// [`ColumnarIndex::query_by_category`].
     pub(crate) fn query_by_category(&self, category: u8) -> Vec<Arc<IndexEntry>> {
-        if let Some(idx) = &self.soa {
-            return idx.query_by_category(category);
-        }
-        if let Some(idx) = &self.tiles64 {
-            return idx.query_by_category(category);
-        }
-        if let Some(idx) = &self.entity_groups {
-            return idx.query_by_category(category);
-        }
-        self.query_base_by_category(category)
+        self.query_by_category_route(self.capabilities().by_category, category)
     }
 
     /// Return the set of entity strings registered under `scope` (Maps variant only).
@@ -1072,6 +1178,10 @@ impl ScanIndex {
     }
 
     pub(crate) fn entity_generation(&self, entity: &str) -> Option<u64> {
+        let projection = self.capabilities().projection;
+        if !projection.entity_generation_fast_path {
+            return None;
+        }
         self.entity_groups
             .as_ref()
             .and_then(|idx| idx.entity_generation(entity))
@@ -1082,6 +1192,10 @@ impl ScanIndex {
         entity: &str,
         type_id: TypeId,
     ) -> Option<CachedProjectionSlot> {
+        let projection = self.capabilities().projection;
+        if !projection.cached_projection {
+            return None;
+        }
         self.entity_groups
             .as_ref()
             .and_then(|idx| idx.cached_projection(entity, type_id))
@@ -1095,9 +1209,11 @@ impl ScanIndex {
         watermark: u64,
         cached_at_us: i64,
     ) -> bool {
-        self.entity_groups.as_ref().is_some_and(|idx| {
-            idx.store_cached_projection(entity, type_id, bytes, watermark, cached_at_us)
-        })
+        let projection = self.capabilities().projection;
+        projection.cached_projection
+            && self.entity_groups.as_ref().is_some_and(|idx| {
+                idx.store_cached_projection(entity, type_id, bytes, watermark, cached_at_us)
+            })
     }
 
     pub(crate) fn projection_candidates(
@@ -1105,6 +1221,10 @@ impl ScanIndex {
         entity: &str,
         relevant_kinds: &[EventKind],
     ) -> Option<ProjectionCandidates> {
+        let projection = self.capabilities().projection;
+        if !projection.projection_candidates {
+            return None;
+        }
         self.entity_groups
             .as_ref()
             .and_then(|idx| idx.projection_candidates(entity, relevant_kinds))
@@ -1341,8 +1461,7 @@ mod tests {
     #[test]
     fn scan_index_maps_variant_insert_and_query() {
         let si = ScanIndex::for_config(&crate::store::IndexConfig {
-            layout: crate::store::IndexLayout::AoS,
-            views: crate::store::ViewConfig::none(),
+            topology: crate::store::IndexTopology::aos(),
             incremental_projection: false,
             enable_checkpoint: true,
             enable_mmap_index: true,
@@ -1357,8 +1476,7 @@ mod tests {
     #[test]
     fn scan_index_soa_variant_insert_and_query() {
         let si = ScanIndex::for_config(&crate::store::IndexConfig {
-            layout: crate::store::IndexLayout::SoA,
-            views: crate::store::ViewConfig::none(),
+            topology: crate::store::IndexTopology::scan(),
             incremental_projection: false,
             enable_checkpoint: true,
             enable_mmap_index: true,
@@ -1371,10 +1489,105 @@ mod tests {
     }
 
     #[test]
+    fn scan_capabilities_follow_topology_truth() {
+        let cases = [
+            (
+                crate::store::IndexTopology::aos(),
+                ScanCapabilities {
+                    by_kind: ScanRoute::BaseAoS,
+                    by_scope: ScanRoute::BaseAoS,
+                    by_category: ScanRoute::BaseAoS,
+                    projection: ProjectionSupport {
+                        entity_generation_fast_path: false,
+                        cached_projection: false,
+                        projection_candidates: false,
+                    },
+                    topology_name: "aos",
+                    tile_count: 0,
+                },
+            ),
+            (
+                crate::store::IndexTopology::scan(),
+                ScanCapabilities {
+                    by_kind: ScanRoute::SoA,
+                    by_scope: ScanRoute::SoA,
+                    by_category: ScanRoute::SoA,
+                    projection: ProjectionSupport {
+                        entity_generation_fast_path: false,
+                        cached_projection: false,
+                        projection_candidates: false,
+                    },
+                    topology_name: "scan",
+                    tile_count: 0,
+                },
+            ),
+            (
+                crate::store::IndexTopology::entity_local(),
+                ScanCapabilities {
+                    by_kind: ScanRoute::SoAoS,
+                    by_scope: ScanRoute::SoAoS,
+                    by_category: ScanRoute::SoAoS,
+                    projection: ProjectionSupport {
+                        entity_generation_fast_path: true,
+                        cached_projection: true,
+                        projection_candidates: true,
+                    },
+                    topology_name: "entity-local",
+                    tile_count: 0,
+                },
+            ),
+            (
+                crate::store::IndexTopology::tiled(),
+                ScanCapabilities {
+                    by_kind: ScanRoute::AoSoA64,
+                    by_scope: ScanRoute::AoSoA64,
+                    by_category: ScanRoute::AoSoA64,
+                    projection: ProjectionSupport {
+                        entity_generation_fast_path: false,
+                        cached_projection: false,
+                        projection_candidates: false,
+                    },
+                    topology_name: "tiled",
+                    tile_count: 0,
+                },
+            ),
+            (
+                crate::store::IndexTopology::all(),
+                ScanCapabilities {
+                    by_kind: ScanRoute::SoA,
+                    by_scope: ScanRoute::SoAoS,
+                    by_category: ScanRoute::SoA,
+                    projection: ProjectionSupport {
+                        entity_generation_fast_path: true,
+                        cached_projection: true,
+                        projection_candidates: true,
+                    },
+                    topology_name: "all",
+                    tile_count: 0,
+                },
+            ),
+        ];
+
+        for (topology, expected) in cases {
+            let si = ScanIndex::for_config(&crate::store::IndexConfig {
+                topology,
+                incremental_projection: false,
+                enable_checkpoint: true,
+                enable_mmap_index: true,
+            });
+            assert_eq!(
+                si.capabilities(),
+                expected,
+                "ScanCapabilities must be the single routing truth for `{}`",
+                expected.topology_name
+            );
+        }
+    }
+
+    #[test]
     fn scan_index_aosoa8_variant() {
         let si = ScanIndex::for_config(&crate::store::IndexConfig {
-            layout: crate::store::IndexLayout::AoSoA8,
-            views: crate::store::ViewConfig::none(),
+            topology: crate::store::IndexTopology::tiled(),
             incremental_projection: false,
             enable_checkpoint: true,
             enable_mmap_index: true,
@@ -1389,8 +1602,7 @@ mod tests {
     #[test]
     fn scan_index_maps_scope_entity_set() {
         let si = ScanIndex::for_config(&crate::store::IndexConfig {
-            layout: crate::store::IndexLayout::AoS,
-            views: crate::store::ViewConfig::none(),
+            topology: crate::store::IndexTopology::aos(),
             incremental_projection: false,
             enable_checkpoint: true,
             enable_mmap_index: true,
@@ -1407,8 +1619,7 @@ mod tests {
     #[test]
     fn scan_index_columnar_scope_entity_set_uses_base_aos_view() {
         let si = ScanIndex::for_config(&crate::store::IndexConfig {
-            layout: crate::store::IndexLayout::SoA,
-            views: crate::store::ViewConfig::none(),
+            topology: crate::store::IndexTopology::scan(),
             incremental_projection: false,
             enable_checkpoint: true,
             enable_mmap_index: true,
@@ -1423,8 +1634,7 @@ mod tests {
     #[test]
     fn scan_index_clear() {
         let si = ScanIndex::for_config(&crate::store::IndexConfig {
-            layout: crate::store::IndexLayout::SoA,
-            views: crate::store::ViewConfig::none(),
+            topology: crate::store::IndexTopology::scan(),
             incremental_projection: false,
             enable_checkpoint: true,
             enable_mmap_index: true,
@@ -1439,8 +1649,7 @@ mod tests {
     #[test]
     fn scan_index_soaos_variant() {
         let si = ScanIndex::for_config(&crate::store::IndexConfig {
-            layout: crate::store::IndexLayout::SoAoS,
-            views: crate::store::ViewConfig::none(),
+            topology: crate::store::IndexTopology::entity_local(),
             incremental_projection: false,
             enable_checkpoint: true,
             enable_mmap_index: true,
@@ -1452,5 +1661,26 @@ mod tests {
         assert_eq!(si.query_by_scope("s1").len(), 10);
         si.clear();
         assert!(si.query_by_kind(KIND_A).is_empty());
+    }
+
+    #[test]
+    fn scan_capabilities_track_tile_count_for_tiled_views() {
+        let si = ScanIndex::for_config(&crate::store::IndexConfig {
+            topology: crate::store::IndexTopology::tiled(),
+            incremental_projection: false,
+            enable_checkpoint: true,
+            enable_mmap_index: true,
+        });
+        for i in 0u64..130 {
+            si.insert(&make_entry(KIND_A, i, "e1", "s1"));
+        }
+        let capabilities = si.capabilities();
+        assert_eq!(capabilities.topology_name, "tiled");
+        assert_eq!(capabilities.by_kind, ScanRoute::AoSoA64);
+        assert_eq!(capabilities.by_scope, ScanRoute::AoSoA64);
+        assert_eq!(capabilities.by_category, ScanRoute::AoSoA64);
+        assert_eq!(capabilities.tile_count, 3);
+        assert!(!capabilities.projection.cached_projection);
+        assert!(!capabilities.projection.projection_candidates);
     }
 }

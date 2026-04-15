@@ -1,9 +1,10 @@
-use super::*;
+use super::contracts::checked_payload_len;
+use super::{fanout, *};
 use tempfile::TempDir;
 
 fn test_store_with_writer(tx: flume::Sender<writer::WriterCommand>) -> (Store, TempDir) {
     let dir = TempDir::new().expect("temp dir");
-    let subscribers = Arc::new(writer::SubscriberList::new());
+    let subscribers = Arc::new(fanout::SubscriberList::new());
     let store = Store {
         index: Arc::new(index::StoreIndex::new()),
         reader: Arc::new(reader::Reader::new(dir.path().to_path_buf(), 4)),

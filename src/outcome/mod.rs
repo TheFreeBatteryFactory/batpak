@@ -14,7 +14,6 @@ pub use wait::{CompensationAction, WaitCondition};
 
 /// `Outcome<T>`: the core algebraic type. 6 variants.
 /// Named "Outcome" not "Effect" to eliminate Effect/Event confusion.
-/// [SPEC:src/outcome/mod.rs]
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -126,7 +125,6 @@ impl<T> Outcome<T> {
     // --- Combinators ---
 
     /// map: transform the Ok value. Distributes over Batch.
-    /// [SPEC:src/outcome/mod.rs — combinators distribute over Batch via F: Clone]
     ///
     /// # Example
     /// ```
@@ -165,7 +163,6 @@ impl<T> Outcome<T> {
 
     /// and_then: the monad bind. Distributes over Batch.
     /// F: Clone is required for Batch distribution (called once per element).
-    /// [SPEC:src/outcome/mod.rs — The and_then monad fix]
     /// This is THE critical method. Monad laws are verified by proptest.
     /// [FILE:tests/monad_laws.rs]
     pub fn and_then<U, F: FnOnce(T) -> Outcome<U> + Clone>(self, f: F) -> Outcome<U> {

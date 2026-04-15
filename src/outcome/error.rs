@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// OutcomeError: structured error with kind, message, optional compensation.
-/// [SPEC:src/outcome/error.rs]
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OutcomeError {
@@ -18,7 +17,6 @@ pub struct OutcomeError {
 
 /// ErrorKind: 8 domain kinds + Custom(u16) for product extension.
 /// Products extend via Custom(u16) — same category:type encoding as EventKind.
-/// [SPEC:src/outcome/error.rs — ErrorKind]
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]

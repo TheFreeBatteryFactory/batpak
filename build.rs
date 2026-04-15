@@ -1,11 +1,14 @@
 #![allow(clippy::panic)]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use syn::visit::Visit;
 
 // build.rs runs before every cargo build/check/test. Cannot be skipped.
-// It enforces SPEC invariants at build time so agents get English errors
-// instead of cryptic compiler failures. [SPEC:INVARIANTS]
+// It enforces live runtime invariants at build time so agents get English
+// errors instead of cryptic compiler failures. See README.md, GUIDE.md, and
+// REFERENCE.md for the current truth hierarchy.
 fn main() {
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=src/");
@@ -40,7 +43,7 @@ fn check_no_stubs_in_src() {
         ),
     ];
 
-    walk_rs_files(Path::new("src"), &|path, contents| {
+    walk_rs_files(Path::new("src"), &mut |path, contents| {
         let path_str = path.display().to_string();
         for (line_no, line) in contents.lines().enumerate() {
             let lower = line.to_lowercase();
@@ -62,7 +65,7 @@ fn check_no_stubs_in_src() {
 /// justification comment on the same or previous line explaining why.
 /// Unjustified allows are how agents silence the compiler instead of fixing bugs.
 fn check_allow_justifications() {
-    walk_rs_files(Path::new("src"), &|path, contents| {
+    walk_rs_files(Path::new("src"), &mut |path, contents| {
         let path_str = path.display().to_string();
         for (line_no, line) in contents.lines().enumerate() {
             let trimmed = line.trim();
@@ -96,7 +99,7 @@ fn check_allow_justifications() {
 
 fn check_no_tokio_in_deps() {
     //Invariant 1: tokio must not appear in [dependencies].
-    //Only [dev-dependencies] is allowed. [SPEC:INVARIANTS item 1]
+    //Only [dev-dependencies] is allowed.
     let cargo = fs::read_to_string("Cargo.toml").expect("read Cargo.toml");
 
     //Strategy: find the [dependencies] section, take text until the next
@@ -109,7 +112,7 @@ fn check_no_tokio_in_deps() {
                 "INVARIANT 1 VIOLATED: tokio found in [dependencies].\n\
                  tokio belongs in [dev-dependencies] only.\n\
                  The library is runtime-agnostic. Fan-out uses Vec<flume::Sender>.\n\
-                 See: SPEC.md ## INVARIANTS, item 1."
+                 See: REFERENCE.md."
             );
         }
     }
@@ -117,31 +120,31 @@ fn check_no_tokio_in_deps() {
 
 fn check_no_banned_patterns() {
     //Walk src/**/*.rs, read each file, check for patterns that violate
-    //invariants or red flags. [SPEC:RED FLAGS]
-    walk_rs_files(Path::new("src"), &|path, contents| {
+    //invariants or red flags.
+    walk_rs_files(Path::new("src"), &mut |path, contents| {
         let path_str = path.display().to_string();
 
         //Red flag: no transmute/mem::read/pointer_cast in any src file.
-        //All serialization goes through MessagePack. [SPEC:RED FLAGS item 1]
+        //All serialization goes through MessagePack.
         for banned in ["transmute", "mem::read", "pointer_cast"] {
             if contents.contains(banned) {
                 panic!(
                     "RED FLAG VIOLATED in {path_str}: found `{banned}`.\n\
                      repr(C) is for field ordering, not a wire format.\n\
                      All serialization goes through rmp-serde. Always.\n\
-                     See: SPEC.md ## RED FLAGS, item 1."
+                     See: REFERENCE.md."
                 );
             }
         }
 
         //Invariant 2: no async fn in store module.
-        //Store API is sync. Async lives in flume channels. [SPEC:INVARIANTS item 2]
+        //Store API is sync. Async lives in flume channels.
         if path_str.contains("store") && contents.contains("async fn") {
             panic!(
                 "INVARIANT 2 VIOLATED in {path_str}: found `async fn`.\n\
                  Store API is sync. Async callers use spawn_blocking()\n\
                  or flume's recv_async(). See: store/subscription.rs.\n\
-                 See: SPEC.md ## INVARIANTS, item 2."
+                 See: REFERENCE.md."
             );
         }
 
@@ -185,7 +188,7 @@ fn check_no_banned_patterns() {
 
         //Invariant 3: no product concepts in library code.
         //Check struct/enum/fn/type declarations for banned nouns.
-        //Skip string literals and comments. [SPEC:INVARIANTS item 3]
+        //Skip string literals and comments.
         let banned_nouns = ["trajectory", "artifact", "tenant"];
         //NOTE: "scope" and "agent" are common English words.
         //"turn" and "note" are substrings of "return" and "annotation" —
@@ -223,7 +226,7 @@ fn check_no_banned_patterns() {
                              product concept `{noun}` in declaration:\n  {trimmed}\n\
                              Library vocabulary: coordinate, entity, event, outcome, \
                              gate, region, transition.\n\
-                             See: SPEC.md ## INVARIANTS, item 3."
+                             See: REFERENCE.md."
                         );
                     }
                 }
@@ -255,7 +258,7 @@ fn check_store_surface_honesty() {
         );
     }
 
-    walk_rs_files(Path::new("src/store"), &|path, contents| {
+    walk_rs_files(Path::new("src/store"), &mut |path, contents| {
         let path_str = path.display().to_string();
         if contents.contains("test-support") {
             panic!(
@@ -267,7 +270,7 @@ fn check_store_surface_honesty() {
 }
 
 fn check_no_fixed_temp_patterns() {
-    walk_rs_files(Path::new("src/store"), &|path, contents| {
+    walk_rs_files(Path::new("src/store"), &mut |path, contents| {
         let path_str = path.display().to_string();
         if contents.contains("index.ckpt.tmp") || contents.contains(".tmp_{pid}_{n}") {
             panic!(
@@ -288,58 +291,42 @@ fn check_store_config_field_usage() {
     // Invariant: every pub field in StoreConfig must be read somewhere in src/.
     // This catches "config field defined but never wired up" bugs like the
     // historical writer.stack_size and sync.mode regressions.
-    // [SPEC:INVARIANTS — config completeness]
+    // This is part of the live configuration completeness contract.
     let config_src = fs::read_to_string("src/store/config.rs")
         .expect("read src/store/config.rs for config check");
 
-    // Extract field names from `pub struct StoreConfig { ... }`
-    let struct_start = match config_src.find("pub struct StoreConfig {") {
-        Some(pos) => pos,
-        None => return, // struct not found — skip check
-    };
-    let after_brace = &config_src[struct_start..];
-    let struct_body = match after_brace.find('}') {
-        Some(end) => &after_brace[..end],
-        None => return,
-    };
+    let config_ast = syn::parse_file(&config_src)
+        .expect("parse src/store/config.rs for config field usage check");
+    let fields = store_config_public_fields(&config_ast);
+    if fields.is_empty() {
+        return;
+    }
 
-    let fields: Vec<&str> = struct_body
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.starts_with("pub ") && trimmed.contains(':') {
-                // Extract field name: "pub field_name: Type," -> "field_name"
-                let after_pub = trimmed.strip_prefix("pub ")?;
-                let field_name = after_pub.split(':').next()?.trim();
-                Some(field_name)
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    // For each field, search all src/**/*.rs files for usage patterns like
-    // config.field_name or self.field_name. We search ALL files including mod.rs
-    // because the wiring often happens in the same module (e.g., Store::open
-    // reads config.fd_budget to construct the Reader).
-    //
-    // To avoid false positives from the struct definition and StoreConfig::new(),
-    // we strip those blocks before searching.
-    let mut all_src = String::new();
-    collect_rs_contents(Path::new("src"), &mut all_src, None);
-
-    // Remove the StoreConfig struct body and ::new() body from the search text
-    // so that field definitions and default initializations don't count as "usage".
-    let search_text = strip_struct_and_new(&all_src, "StoreConfig");
+    let mut used_fields = BTreeSet::new();
+    walk_rs_files(Path::new("src"), &mut |path, contents| {
+        if path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .ends_with("src/store/config.rs")
+        {
+            return;
+        }
+        let file = syn::parse_file(contents).unwrap_or_else(|err| {
+            panic!(
+                "CONFIG FIELD USAGE CHECK PARSE FAILURE in {}: {err}",
+                path.display()
+            )
+        });
+        let mut collector = StoreConfigFieldAccessCollector::new(&fields);
+        collector.visit_file(&file);
+        used_fields.extend(collector.found_fields);
+    });
 
     for field in &fields {
-        // Look for config.field or .field access patterns (not just the field name
-        // as a substring, which would match comments and variable names).
-        let dot_field = format!(".{field}");
-        if !search_text.contains(&dot_field) {
+        if !used_fields.contains(field) {
             panic!(
                 "STORE CONFIG FIELD UNUSED: `{field}` is defined in StoreConfig but never \
-                 accessed via `.{field}` in any src/ file (outside struct def and ::new()).\n\
+                 accessed in any parsed src/ file outside src/store/config.rs.\n\
                  Every config field must be wired to actual behavior.\n\
                  Either use the field or remove it from StoreConfig.\n\
                  See: the historical writer.stack_size / sync.mode bugs that slipped through review."
@@ -348,60 +335,49 @@ fn check_store_config_field_usage() {
     }
 }
 
-/// Strip the struct definition body and ::new() body so field definitions
-/// and default initializations don't count as "usage".
-fn strip_struct_and_new(src: &str, struct_name: &str) -> String {
-    let mut result = src.to_string();
-
-    // Strip `pub struct StructName { ... }`
-    let struct_marker = format!("pub struct {struct_name} {{");
-    if let Some(start) = result.find(&struct_marker) {
-        if let Some(end) = find_matching_brace(&result[start..]) {
-            result.replace_range(start..start + end + 1, "/* stripped */");
-        }
-    }
-
-    // Strip the Clone impl body (contains self.field_name copies)
-    let clone_marker = format!("impl Clone for {struct_name}");
-    if let Some(start) = result.find(&clone_marker) {
-        if let Some(brace_offset) = result[start..].find('{') {
-            let body_start = start + brace_offset;
-            if let Some(end) = find_matching_brace(&result[body_start..]) {
-                result.replace_range(body_start..body_start + end + 1, "/* stripped */");
+fn store_config_public_fields(file: &syn::File) -> BTreeSet<String> {
+    for item in &file.items {
+        if let syn::Item::Struct(item_struct) = item {
+            if item_struct.ident == "StoreConfig" {
+                let mut fields = BTreeSet::new();
+                for field in &item_struct.fields {
+                    if matches!(field.vis, syn::Visibility::Public(_)) {
+                        if let Some(ident) = &field.ident {
+                            fields.insert(ident.to_string());
+                        }
+                    }
+                }
+                return fields;
             }
         }
     }
-
-    // Strip the Debug impl body (contains .field("name", &self.field))
-    let debug_marker = format!("impl std::fmt::Debug for {struct_name}");
-    if let Some(start) = result.find(&debug_marker) {
-        if let Some(brace_offset) = result[start..].find('{') {
-            let body_start = start + brace_offset;
-            if let Some(end) = find_matching_brace(&result[body_start..]) {
-                result.replace_range(body_start..body_start + end + 1, "/* stripped */");
-            }
-        }
-    }
-
-    result
+    BTreeSet::new()
 }
 
-/// Find the position of the matching closing brace for text starting with '{'.
-fn find_matching_brace(s: &str) -> Option<usize> {
-    let mut depth = 0i32;
-    for (i, ch) in s.char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
+struct StoreConfigFieldAccessCollector<'a> {
+    tracked_fields: &'a BTreeSet<String>,
+    found_fields: BTreeSet<String>,
+}
+
+impl<'a> StoreConfigFieldAccessCollector<'a> {
+    fn new(tracked_fields: &'a BTreeSet<String>) -> Self {
+        Self {
+            tracked_fields,
+            found_fields: BTreeSet::new(),
         }
     }
-    None
+}
+
+impl Visit<'_> for StoreConfigFieldAccessCollector<'_> {
+    fn visit_expr_field(&mut self, node: &syn::ExprField) {
+        if let syn::Member::Named(ident) = &node.member {
+            let field_name = ident.to_string();
+            if self.tracked_fields.contains(&field_name) {
+                self.found_fields.insert(field_name);
+            }
+        }
+        syn::visit::visit_expr_field(self, node);
+    }
 }
 
 fn collect_rs_contents(dir: &Path, buf: &mut String, exclude: Option<&str>) {
@@ -496,8 +472,8 @@ fn check_pub_items_have_tests() {
             "called by writer on segment rotation, tested via store rotation integration tests",
         ),
         (
-            "IndexLayout",
-            "config enum tested through unified_red.rs layout tests and bench fixtures",
+            "IndexTopology",
+            "config topology type tested through index_topology.rs, unified_red.rs, and bench fixtures",
         ),
         (
             "watch_projection",
@@ -511,7 +487,7 @@ fn check_pub_items_have_tests() {
     let allowed_names: Vec<&str> = allowlist.iter().map(|(name, _)| *name).collect();
 
     // Walk src/ and extract pub item names.
-    walk_rs_files(Path::new("src"), &|path, contents| {
+    walk_rs_files(Path::new("src"), &mut |path, contents| {
         let path_str = path.display().to_string();
         for (line_no, line) in contents.lines().enumerate() {
             let trimmed = line.trim();
@@ -587,7 +563,7 @@ fn has_test_reference(src_contents: &str, name: &str) -> bool {
     false
 }
 
-fn walk_rs_files(dir: &Path, check: &dyn Fn(&Path, &str)) {
+fn walk_rs_files(dir: &Path, check: &mut dyn FnMut(&Path, &str)) {
     //Recursive directory walk. Only reads .rs files.
     //Uses std::fs only — no external deps allowed in build scripts
     //unless declared in [build-dependencies].

@@ -5,9 +5,12 @@ pub(crate) mod checkpoint;
 pub(crate) mod columnar;
 mod config;
 mod contracts;
+mod control_plane;
 /// Pull-based cursor for guaranteed, ordered event delivery.
 pub mod cursor;
 mod error;
+/// Writer notification fanout and internal committed-event envelopes.
+mod fanout;
 /// Fault injection framework for testing failure scenarios.
 #[cfg(feature = "dangerous-test-hooks")]
 pub mod fault;
@@ -30,6 +33,7 @@ mod runtime_contracts;
 pub mod segment;
 /// SIDX segment footer for fast cold-start index rebuild.
 pub(crate) mod sidx;
+mod staging;
 /// Runtime statistics and diagnostic snapshots.
 pub mod stats;
 /// Push-based (lossy) event subscription via broadcast channel.
@@ -38,17 +42,18 @@ pub mod subscription;
 mod test_support;
 /// Persisted hidden fence ranges used to keep cancelled fence writes invisible across reopen.
 pub(crate) mod visibility_ranges;
-/// Background writer thread, restart policy, and subscriber fanout.
+mod watch;
+/// Background writer thread, restart policy, and commit flow.
 pub mod writer;
 
 pub use config::{
-    BatchConfig, IndexConfig, IndexLayout, StoreConfig, SyncConfig, SyncMode, ViewConfig,
-    WriterConfig,
+    BatchConfig, IndexConfig, IndexTopology, StoreConfig, SyncConfig, SyncMode, WriterConfig,
 };
 pub use contracts::{
     AppendOptions, AppendReceipt, BatchAppendItem, CausationRef, CompactionConfig,
     CompactionStrategy, RetentionPredicate,
 };
+pub use control_plane::{AppendTicket, BatchAppendTicket, Outbox, VisibilityFence};
 pub use cursor::{Cursor, CursorWorkerAction, CursorWorkerConfig, CursorWorkerHandle};
 pub use error::BatchStage;
 pub use error::StoreError;
@@ -63,23 +68,24 @@ pub use projection::{
 };
 pub use stats::{StoreDiagnostics, StoreStats, WriterPressure};
 pub use subscription::Subscription;
+pub use watch::ProjectionWatcher;
 pub use writer::{Notification, RestartPolicy};
 
 use crate::coordinate::{Coordinate, KindFilter, Region};
-use crate::event::{Event, EventHeader, EventKind, EventSourced, StoredEvent};
+use crate::event::{EventKind, EventSourced, StoredEvent};
 #[cfg(test)]
 pub(crate) use config::now_us;
-use contracts::checked_payload_len;
+use control_plane::AppendSubmission;
+use fanout::{ReactorSubscriberList, SubscriberList};
 use index::StoreIndex;
 use reader::Reader;
 use serde::Serialize;
 use std::sync::Arc;
-use writer::{AppendGuards, ReactorSubscriberList, SubscriberList, WriterCommand, WriterHandle};
+use writer::{WriterCommand, WriterHandle};
 // ProjectionCache re-exported above via pub use, no separate use needed.
 
 /// Store: the runtime. Sync API. Send + Sync.
-/// [SPEC:src/store/mod.rs]
-/// Invariant 2: ALL METHODS ARE SYNC. No .await anywhere.
+/// Invariant 2: all methods are sync; async integration lives in channels.
 // Intentional impossible-feature guard: Store API is sync by design (Invariant 2).
 // async-store is not a declared feature — suppress cfg warning for this guard
 #[allow(unexpected_cfgs)]
@@ -109,278 +115,6 @@ pub struct Store<State = Open> {
 
 type AppendReply = Result<AppendReceipt, StoreError>;
 type BatchAppendReply = Result<Vec<AppendReceipt>, StoreError>;
-
-/// Nonblocking handle for a single append result.
-pub struct AppendTicket {
-    rx: flume::Receiver<AppendReply>,
-}
-
-impl AppendTicket {
-    /// Wait for the writer to finish this append.
-    ///
-    /// # Errors
-    /// Returns [`StoreError::WriterCrashed`] if the writer exits before sending
-    /// a reply, or any append error returned by the writer.
-    pub fn wait(self) -> AppendReply {
-        self.rx.recv().map_err(|_| StoreError::WriterCrashed)?
-    }
-
-    /// Check whether the append result is ready without blocking.
-    pub fn try_check(&self) -> Option<AppendReply> {
-        match self.rx.try_recv() {
-            Ok(value) => Some(value),
-            Err(flume::TryRecvError::Disconnected) => Some(Err(StoreError::WriterCrashed)),
-            Err(flume::TryRecvError::Empty) => None,
-        }
-    }
-
-    /// Expose the underlying receiver for optional async interop.
-    pub fn receiver(&self) -> &flume::Receiver<AppendReply> {
-        &self.rx
-    }
-}
-
-/// Nonblocking handle for a batch append result.
-pub struct BatchAppendTicket {
-    rx: flume::Receiver<BatchAppendReply>,
-}
-
-impl BatchAppendTicket {
-    /// Wait for the writer to finish this batch.
-    ///
-    /// # Errors
-    /// Returns [`StoreError::WriterCrashed`] if the writer exits before sending
-    /// a reply, or any batch-append error returned by the writer.
-    pub fn wait(self) -> BatchAppendReply {
-        self.rx.recv().map_err(|_| StoreError::WriterCrashed)?
-    }
-
-    /// Check whether the batch result is ready without blocking.
-    pub fn try_check(&self) -> Option<BatchAppendReply> {
-        match self.rx.try_recv() {
-            Ok(value) => Some(value),
-            Err(flume::TryRecvError::Disconnected) => Some(Err(StoreError::WriterCrashed)),
-            Err(flume::TryRecvError::Empty) => None,
-        }
-    }
-
-    /// Expose the underlying receiver for optional async interop.
-    pub fn receiver(&self) -> &flume::Receiver<BatchAppendReply> {
-        &self.rx
-    }
-}
-
-/// Producer-side staging buffer for batch submission.
-pub struct Outbox<'a> {
-    store: &'a Store<Open>,
-    fence_token: Option<u64>,
-    items: Vec<BatchAppendItem>,
-}
-
-impl<'a> Outbox<'a> {
-    fn new(store: &'a Store<Open>, fence_token: Option<u64>) -> Self {
-        Self {
-            store,
-            fence_token,
-            items: Vec::new(),
-        }
-    }
-
-    /// Stage a new batch item with default append options and no causation.
-    ///
-    /// # Errors
-    /// Returns any serialization or validation error raised while converting
-    /// the payload into a staged [`BatchAppendItem`].
-    pub fn stage(
-        &mut self,
-        coord: Coordinate,
-        kind: EventKind,
-        payload: &impl Serialize,
-    ) -> Result<&mut Self, StoreError> {
-        self.stage_with_options(coord, kind, payload, AppendOptions::default())
-    }
-
-    /// Stage a new batch item with explicit append options.
-    ///
-    /// # Errors
-    /// Returns any serialization or validation error raised while converting
-    /// the payload into a staged [`BatchAppendItem`].
-    pub fn stage_with_options(
-        &mut self,
-        coord: Coordinate,
-        kind: EventKind,
-        payload: &impl Serialize,
-        options: AppendOptions,
-    ) -> Result<&mut Self, StoreError> {
-        let item = BatchAppendItem::new(coord, kind, payload, options, CausationRef::None)?;
-        self.items.push(item);
-        Ok(self)
-    }
-
-    /// Stage a fully-formed batch item.
-    pub fn push_item(&mut self, item: BatchAppendItem) -> &mut Self {
-        self.items.push(item);
-        self
-    }
-
-    /// Drain the staged items into a blocking batch append.
-    ///
-    /// # Errors
-    /// Returns any enqueue, writer, fence, or batch-append error surfaced by
-    /// the underlying flush path.
-    pub fn flush(&mut self) -> Result<Vec<AppendReceipt>, StoreError> {
-        let items = std::mem::take(&mut self.items);
-        match self.fence_token {
-            Some(token) => self.store.submit_batch_with_fence(items, token)?.wait(),
-            None => self.store.append_batch(items),
-        }
-    }
-
-    /// Drain the staged items into a nonblocking batch submission.
-    ///
-    /// # Errors
-    /// Returns any enqueue, writer, or fence error surfaced while turning the
-    /// staged items into a batch submission ticket.
-    pub fn submit_flush(&mut self) -> Result<BatchAppendTicket, StoreError> {
-        let items = std::mem::take(&mut self.items);
-        match self.fence_token {
-            Some(token) => self.store.submit_batch_with_fence(items, token),
-            None => self.store.submit_batch(items),
-        }
-    }
-
-    /// Number of currently staged items.
-    pub fn len(&self) -> usize {
-        self.items.len()
-    }
-
-    /// True when no items are staged.
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-}
-
-/// Public visibility fence: writes become durable immediately but remain hidden
-/// until the fence commits.
-pub struct VisibilityFence<'a> {
-    store: &'a Store<Open>,
-    token: u64,
-    closed: bool,
-}
-
-impl<'a> VisibilityFence<'a> {
-    /// Submit a root-cause append under this fence.
-    ///
-    /// # Errors
-    /// Returns any serialization, enqueue, or writer error surfaced while
-    /// staging the fenced append.
-    pub fn submit(
-        &self,
-        coord: &Coordinate,
-        kind: EventKind,
-        payload: &impl Serialize,
-    ) -> Result<AppendTicket, StoreError> {
-        self.store
-            .submit_with_fence(coord, kind, payload, self.token)
-    }
-
-    /// Submit a reaction append under this fence.
-    ///
-    /// # Errors
-    /// Returns any serialization, enqueue, or writer error surfaced while
-    /// staging the fenced reaction append.
-    pub fn submit_reaction(
-        &self,
-        coord: &Coordinate,
-        kind: EventKind,
-        payload: &impl Serialize,
-        correlation_id: u128,
-        causation_id: u128,
-    ) -> Result<AppendTicket, StoreError> {
-        self.store.submit_reaction_with_fence(
-            coord,
-            kind,
-            payload,
-            correlation_id,
-            causation_id,
-            self.token,
-        )
-    }
-
-    /// Submit a batch append under this fence.
-    ///
-    /// # Errors
-    /// Returns any enqueue, writer, or fence-state error surfaced while
-    /// staging the fenced batch append.
-    pub fn submit_batch(
-        &self,
-        items: Vec<crate::store::contracts::BatchAppendItem>,
-    ) -> Result<BatchAppendTicket, StoreError> {
-        self.store.submit_batch_with_fence(items, self.token)
-    }
-
-    /// Build an outbox whose flush path uses this fence.
-    pub fn outbox(&self) -> Outbox<'_> {
-        Outbox::new(self.store, Some(self.token))
-    }
-
-    /// Publish all writes currently staged under this fence.
-    ///
-    /// # Errors
-    /// Returns [`StoreError::WriterCrashed`] if the writer exits before
-    /// acknowledging the fence commit, or any fence-commit error returned by
-    /// the writer.
-    pub fn commit(mut self) -> Result<(), StoreError> {
-        let (tx, rx) = flume::bounded(1);
-        self.store
-            .writer_handle()?
-            .tx
-            .send(WriterCommand::CommitVisibilityFence {
-                token: self.token,
-                respond: tx,
-            })
-            .map_err(|_| StoreError::WriterCrashed)?;
-        self.closed = true;
-        rx.recv().map_err(|_| StoreError::WriterCrashed)?
-    }
-
-    /// Cancel publication for this fence. Durable writes remain on disk but do
-    /// not become visible through the index.
-    ///
-    /// # Errors
-    /// Returns [`StoreError::WriterCrashed`] if the writer exits before
-    /// acknowledging the fence cancellation, or any fence-cancellation error
-    /// returned by the writer.
-    pub fn cancel(mut self) -> Result<(), StoreError> {
-        let (tx, rx) = flume::bounded(1);
-        self.store
-            .writer_handle()?
-            .tx
-            .send(WriterCommand::CancelVisibilityFence {
-                token: self.token,
-                respond: tx,
-            })
-            .map_err(|_| StoreError::WriterCrashed)?;
-        self.closed = true;
-        rx.recv().map_err(|_| StoreError::WriterCrashed)?
-    }
-}
-
-impl Drop for VisibilityFence<'_> {
-    fn drop(&mut self) {
-        if self.closed {
-            return;
-        }
-        let Some(writer) = self.store.writer.as_ref() else {
-            return;
-        };
-        let (tx, _rx) = flume::bounded(1);
-        let _ = writer.tx.send(WriterCommand::CancelVisibilityFence {
-            token: self.token,
-            respond: tx,
-        });
-    }
-}
 
 impl Store<Open> {
     /// Open a store at the given config's data directory. Creates the directory if absent.
@@ -420,7 +154,7 @@ impl Store<Open> {
         let reader = Arc::new(Reader::new(config.data_dir.clone(), config.fd_budget));
 
         // Cold start: checkpoint fast path or full segment scan.
-        // [SPEC:IMPLEMENTATION NOTES item 2 — segment naming, alphabetical scan]
+        // Segment files are named so lexicographic order matches replay order.
         let open_report = index_rebuild::open_index(
             &index,
             &reader,
@@ -473,11 +207,7 @@ impl Store<Open> {
             return Err(StoreError::WriterCrashed);
         }
         rx.recv().map_err(|_| StoreError::WriterCrashed)??;
-        Ok(VisibilityFence {
-            store: self,
-            token,
-            closed: false,
-        })
+        Ok(VisibilityFence::new(self, token))
     }
 
     /// Snapshot the current writer mailbox pressure.
@@ -503,11 +233,7 @@ impl Store<Open> {
         kind: EventKind,
         payload: &impl Serialize,
     ) -> Result<AppendTicket, StoreError> {
-        self.ensure_no_active_public_fence()?;
-        let event_id = crate::id::generate_v7_id();
-        self.submit_inner(
-            coord, kind, payload, event_id, event_id, None, None, None, 0, None,
-        )
+        self.submit_prepared(coord, kind, payload, AppendSubmission::root())
     }
 
     /// Nonblocking reaction append submission.
@@ -523,19 +249,11 @@ impl Store<Open> {
         correlation_id: u128,
         causation_id: u128,
     ) -> Result<AppendTicket, StoreError> {
-        self.ensure_no_active_public_fence()?;
-        let event_id = crate::id::generate_v7_id();
-        self.submit_inner(
+        self.submit_prepared(
             coord,
             kind,
             payload,
-            event_id,
-            correlation_id,
-            Some(causation_id),
-            None,
-            None,
-            0,
-            None,
+            AppendSubmission::reaction(correlation_id, causation_id),
         )
     }
 
@@ -550,35 +268,6 @@ impl Store<Open> {
     ) -> Result<BatchAppendTicket, StoreError> {
         self.ensure_no_active_public_fence()?;
         self.submit_batch_with_fence_impl(items, None)
-    }
-
-    fn submit_batch_with_fence(
-        &self,
-        items: Vec<crate::store::contracts::BatchAppendItem>,
-        token: u64,
-    ) -> Result<BatchAppendTicket, StoreError> {
-        self.submit_batch_with_fence_impl(items, Some(token))
-    }
-
-    fn submit_batch_with_fence_impl(
-        &self,
-        items: Vec<crate::store::contracts::BatchAppendItem>,
-        token: Option<u64>,
-    ) -> Result<BatchAppendTicket, StoreError> {
-        let (tx, rx) = flume::bounded(1);
-        let command = match token {
-            Some(token) => WriterCommand::FenceAppendBatch {
-                token,
-                items,
-                respond: tx,
-            },
-            None => WriterCommand::AppendBatch { items, respond: tx },
-        };
-        self.writer_handle()?
-            .tx
-            .send(command)
-            .map_err(|_| StoreError::WriterCrashed)?;
-        Ok(BatchAppendTicket { rx })
     }
 
     /// Attempt a root-cause submission without blocking if the writer is under pressure.
@@ -698,7 +387,6 @@ impl Store<Open> {
 
     /// WRITE: atomic batch append of multiple events.
     /// All events are committed together or none are visible.
-    /// [SPEC:src/store/mod.rs — append_batch]
     ///
     /// # Errors
     /// Returns `StoreError::BatchFailed` if any item fails validation, encoding, or write.
@@ -712,7 +400,6 @@ impl Store<Open> {
 
     /// WRITE: atomic batch append of reaction events.
     /// All events share the same correlation_id from the triggering event.
-    /// [SPEC:src/store/mod.rs — append_reaction_batch]
     ///
     /// # Errors
     /// Returns `StoreError::BatchFailed` if any item fails validation, encoding, or write.
@@ -750,7 +437,6 @@ impl Store<Open> {
 
     /// REACT: spawn a background thread running the subscribe→react→append loop.
     /// Returns a JoinHandle. The thread runs until the store is dropped (subscription closes).
-    /// \[SPEC:src/event/sourcing.rs — Reactive\<P\> glue pattern\]
     ///
     /// # Errors
     /// Returns `StoreError::Io` if the background thread cannot be spawned.
@@ -813,15 +499,13 @@ impl Store<Open> {
         let sub = self.subscribe_lossy(&Region::entity(entity));
         let store = Arc::clone(self);
         let entity_owned = entity.to_owned();
-        ProjectionWatcher {
+        ProjectionWatcher::new(
             sub,
             store,
-            entity: entity_owned,
+            entity_owned,
             freshness,
-            cached_state: None,
-            watermark: None,
-            _phantom: std::marker::PhantomData,
-        }
+            self.entity_generation(entity).unwrap_or(0),
+        )
     }
 
     /// WRITE: append with CAS, idempotency, custom correlation/causation.
@@ -847,205 +531,8 @@ impl Store<Open> {
             has_cas = opts.expected_sequence.is_some(),
             has_idempotency = opts.idempotency_key.is_some()
         );
-        let event_id = opts
-            .idempotency_key
-            .unwrap_or_else(crate::id::generate_v7_id);
-        let correlation_id = opts.correlation_id.unwrap_or(event_id);
-        self.submit_inner(
-            coord,
-            kind,
-            payload,
-            event_id,
-            correlation_id,
-            opts.causation_id,
-            opts.expected_sequence,
-            opts.idempotency_key,
-            opts.flags,
-            None,
-        )?
-        .wait()
-    }
-
-    /// Internal append path shared by all public write methods.
-    /// Serializes payload, constructs header+event, sends to writer, awaits receipt.
-    #[allow(clippy::too_many_arguments)] // internal helper consolidating 3 public methods
-    fn submit_inner(
-        &self,
-        coord: &Coordinate,
-        kind: EventKind,
-        payload: &impl Serialize,
-        event_id: u128,
-        correlation_id: u128,
-        causation_id: Option<u128>,
-        expected_sequence: Option<u32>,
-        idempotency_key: Option<u128>,
-        flags: u8,
-        fence_token: Option<u64>,
-    ) -> Result<AppendTicket, StoreError> {
-        if fence_token.is_none() {
-            self.ensure_no_active_public_fence()?;
-        }
-        // Group commit safety: batch > 1 requires idempotency keys for crash recovery.
-        if self.config.batch.group_commit_max_batch > 1 && idempotency_key.is_none() {
-            return Err(StoreError::IdempotencyRequired);
-        }
-        let payload_bytes =
-            rmp_serde::to_vec_named(payload).map_err(|e| StoreError::Serialization(Box::new(e)))?;
-        if payload_bytes.len() > self.config.single_append_max_bytes as usize {
-            return Err(StoreError::Configuration(format!(
-                "single append bytes {} exceeds max {}",
-                payload_bytes.len(),
-                self.config.single_append_max_bytes
-            )));
-        }
-        let payload_len = checked_payload_len(&payload_bytes)?;
-        let mut header = EventHeader::new(
-            event_id,
-            correlation_id,
-            causation_id,
-            self.config.now_us(),
-            crate::coordinate::DagPosition::root(),
-            payload_len,
-            kind,
-        );
-        if flags != 0 {
-            header = header.with_flags(flags);
-        }
-        let event = Event::new(header, payload_bytes);
-
-        let (tx, rx) = flume::bounded(1);
-        let command = match fence_token {
-            Some(token) => WriterCommand::FenceAppend {
-                token,
-                coord: coord.clone(),
-                event: Box::new(event),
-                kind,
-                guards: AppendGuards {
-                    correlation_id,
-                    causation_id,
-                    expected_sequence,
-                    idempotency_key,
-                },
-                respond: tx,
-            },
-            None => WriterCommand::Append {
-                coord: coord.clone(),
-                event: Box::new(event),
-                kind,
-                guards: AppendGuards {
-                    correlation_id,
-                    causation_id,
-                    expected_sequence,
-                    idempotency_key,
-                },
-                respond: tx,
-            },
-        };
-        self.writer_handle()?
-            .tx
-            .send(command)
-            .map_err(|_| StoreError::WriterCrashed)?;
-
-        Ok(AppendTicket { rx })
-    }
-
-    fn writer_handle(&self) -> Result<&WriterHandle, StoreError> {
-        self.writer.as_ref().ok_or(StoreError::WriterCrashed)
-    }
-
-    fn ensure_no_active_public_fence(&self) -> Result<(), StoreError> {
-        if self.index.active_visibility_fence().is_some() {
-            return Err(StoreError::VisibilityFenceActive);
-        }
-        Ok(())
-    }
-
-    fn submit_with_fence(
-        &self,
-        coord: &Coordinate,
-        kind: EventKind,
-        payload: &impl Serialize,
-        token: u64,
-    ) -> Result<AppendTicket, StoreError> {
-        let event_id = crate::id::generate_v7_id();
-        self.submit_inner(
-            coord,
-            kind,
-            payload,
-            event_id,
-            event_id,
-            None,
-            None,
-            None,
-            0,
-            Some(token),
-        )
-    }
-
-    fn submit_reaction_with_fence(
-        &self,
-        coord: &Coordinate,
-        kind: EventKind,
-        payload: &impl Serialize,
-        correlation_id: u128,
-        causation_id: u128,
-        token: u64,
-    ) -> Result<AppendTicket, StoreError> {
-        let event_id = crate::id::generate_v7_id();
-        self.submit_inner(
-            coord,
-            kind,
-            payload,
-            event_id,
-            correlation_id,
-            Some(causation_id),
-            None,
-            None,
-            0,
-            Some(token),
-        )
-    }
-
-    fn submit_pressure_gate(&self) -> Option<crate::outcome::Outcome<AppendTicket>> {
-        let writer = self.writer.as_ref()?;
-        let queued = writer.tx.len();
-        let threshold = self.pressure_retry_threshold();
-        if queued >= threshold {
-            return Some(crate::outcome::Outcome::retry(
-                10,
-                1,
-                1,
-                format!(
-                    "writer mailbox at {queued}/{} queued commands",
-                    self.config.writer.channel_capacity
-                ),
-            ));
-        }
-        None
-    }
-
-    fn submit_pressure_gate_batch(&self) -> Option<crate::outcome::Outcome<BatchAppendTicket>> {
-        let writer = self.writer.as_ref()?;
-        let queued = writer.tx.len();
-        let threshold = self.pressure_retry_threshold();
-        if queued >= threshold {
-            return Some(crate::outcome::Outcome::retry(
-                10,
-                1,
-                1,
-                format!(
-                    "writer mailbox at {queued}/{} queued commands",
-                    self.config.writer.channel_capacity
-                ),
-            ));
-        }
-        None
-    }
-
-    fn pressure_retry_threshold(&self) -> usize {
-        let capacity = self.config.writer.channel_capacity;
-        let pct = usize::from(self.config.writer.pressure_retry_threshold_pct);
-        capacity.saturating_mul(pct).div_ceil(100).max(1)
+        self.submit_prepared(coord, kind, payload, AppendSubmission::with_options(opts))?
+            .wait()
     }
 
     /// WRITE: apply a typestate transition — extracts kind+payload, delegates to append.
@@ -1239,12 +726,7 @@ impl<State> Store<State> {
         T: EventSourced + serde::Serialize + serde::de::DeserializeOwned + 'static,
         T::Input: projection_flow::ReplayInput,
     {
-        let current_generation = self.entity_generation(entity).unwrap_or(0);
-        if current_generation == last_seen_generation {
-            return Ok(None);
-        }
-        let projected = self.project(entity, freshness)?;
-        Ok(Some((current_generation, projected)))
+        projection_flow::project_if_changed(self, entity, last_seen_generation, freshness)
     }
 
     /// CONVENIENCE: sugar over index.stream() for exact entity match.
@@ -1308,123 +790,5 @@ impl<State> Drop for Store<State> {
             // This prevents data loss when Store is dropped without close().
             let _ = rx.recv_timeout(std::time::Duration::from_millis(100));
         }
-    }
-}
-
-/// Reactive projection watcher: emits updated projections when the entity
-/// receives new events. Created via [`Store::watch_projection`].
-///
-/// Pull-based: the caller drives the loop by calling [`recv()`](Self::recv).
-/// Each `recv()` blocks until a new event arrives for the entity, re-projects,
-/// and returns the updated state. Returns `None` when the store is dropped.
-pub struct ProjectionWatcher<T> {
-    sub: Subscription,
-    store: Arc<Store<Open>>,
-    entity: String,
-    freshness: Freshness,
-    cached_state: Option<Vec<u8>>,
-    watermark: Option<u64>,
-    _phantom: std::marker::PhantomData<T>,
-}
-
-#[allow(private_bounds)] // watcher delta replay uses the same internal replay lanes as Store::project
-impl<T> ProjectionWatcher<T>
-where
-    T: EventSourced + serde::Serialize + serde::de::DeserializeOwned + 'static,
-    T::Input: projection_flow::ReplayInput,
-{
-    /// Block until a new event arrives for the watched entity, then re-project
-    /// and return the updated state. Returns `None` if the store is dropped
-    /// (subscription channel closed) or if projection returns no state.
-    ///
-    /// # Errors
-    /// Returns `StoreError` if the projection fails (e.g., segment read error).
-    pub fn recv(&mut self) -> Result<Option<T>, StoreError> {
-        // Wait for any event on this entity's stream.
-        if self.sub.recv().is_none() {
-            return Ok(None); // store dropped
-        }
-        // Defense-in-depth: any of these conditions causes a full-projection
-        // fallback, so flipping the logic still produces a correct (if slower)
-        // result. The delta path is a performance optimization, not a
-        // correctness boundary. Incremental-apply tests are planned; until
-        // then, suppress the surviving mutations.
-        if self.cached_state.is_none() // mutants::skip — full-projection fallback preserves correctness
-            || !T::supports_incremental_apply() // mutants::skip
-            || !self.store.config.index.incremental_projection
-        // mutants::skip
-        {
-            return self.refresh_from_full_projection();
-        }
-
-        let Some(watermark) = self.watermark else {
-            return self.refresh_from_full_projection();
-        };
-        let mut delta_entries = self.store.index.stream_since(&self.entity, watermark);
-        let relevant_kinds = T::relevant_event_kinds();
-        if !relevant_kinds.is_empty() {
-            // mutants::skip — empty-list short-circuit is optimization-only
-            delta_entries.retain(|entry| relevant_kinds.contains(&entry.kind));
-        }
-        if delta_entries.is_empty() {
-            return self.deserialize_cached_state().map(Some);
-        }
-
-        let Some(bytes) = self.cached_state.as_ref() else {
-            return self.refresh_from_full_projection();
-        };
-        let mut state = match serde_json::from_slice::<T>(bytes) {
-            Ok(value) => value,
-            Err(_) => return self.refresh_from_full_projection(),
-        };
-        let positions: Vec<&crate::store::DiskPos> =
-            delta_entries.iter().map(|entry| &entry.disk_pos).collect();
-        let events = projection_flow::read_projection_events::<T>(&self.store.reader, &positions)?;
-        for event in events {
-            state.apply_event(&event);
-        }
-        let new_watermark = delta_entries
-            .last()
-            .map(|entry| entry.global_sequence)
-            .unwrap_or(watermark);
-        let encoded =
-            serde_json::to_vec(&state).map_err(|e| StoreError::Serialization(Box::new(e)))?;
-        self.cached_state = Some(encoded);
-        self.watermark = Some(new_watermark);
-        Ok(Some(state))
-    }
-
-    /// Expose the underlying subscription's receiver for async integration.
-    /// After receiving a notification, call `project()` on the store manually.
-    #[doc(hidden)]
-    pub fn subscription(&self) -> &Subscription {
-        &self.sub
-    }
-
-    fn refresh_from_full_projection(&mut self) -> Result<Option<T>, StoreError> {
-        let result = self.store.project::<T>(&self.entity, &self.freshness)?;
-        if let Some(ref value) = result {
-            self.cached_state = Some(
-                serde_json::to_vec(value).map_err(|e| StoreError::Serialization(Box::new(e)))?,
-            );
-            self.watermark = self
-                .store
-                .index
-                .stream(&self.entity)
-                .last()
-                .map(|entry| entry.global_sequence);
-        } else {
-            self.cached_state = None;
-            self.watermark = None;
-        }
-        Ok(result)
-    }
-
-    fn deserialize_cached_state(&self) -> Result<T, StoreError> {
-        let bytes = self
-            .cached_state
-            .as_ref()
-            .ok_or_else(|| StoreError::Configuration("projection watcher state missing".into()))?;
-        serde_json::from_slice(bytes).map_err(|e| StoreError::Serialization(Box::new(e)))
     }
 }

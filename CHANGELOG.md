@@ -4,7 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-_Nothing yet — next entries go here._
+### Changed
+- Root docs now treat `README.md` as the primary entrypoint and keep historical material out of the tracked repo
+- The public scan-configuration model now centers on `IndexTopology` instead of older layout/view compatibility naming
+- Projection replay naming now centers on `ReplayLane`, `JsonValueInput`, and `RawMsgpackInput`
+
+### Added
+- Root-doc truth surface centered on `README.md`, `GUIDE.md`, and `REFERENCE.md`
+- Parser-backed architecture linting in `tools/integrity/src/architecture_lints.rs`
+- Topology/replay/writer measurement surfaces in `benches/topology_matrix.rs`, `benches/replay_lanes.rs`, and `benches/writer_staging.rs`
+
+### Notes
+- Released sections below preserve the public names that shipped in those releases, even when newer unreleased work has renamed the live surface since then.
 
 ## [0.5.0] - 2026-04-13
 
@@ -177,9 +188,9 @@ _Nothing yet — next entries go here._
   seven removed-API identifiers (`RedbCache`, `LmdbCache`, `entity_locks`,
   `cache_map_size_bytes`, `with_cache_map_size_bytes`, `open_with_redb_cache`,
   `open_with_lmdb_cache`) are now structurally denied anywhere outside the
-  allowlist (`CHANGELOG.md`, `docs/spec/SPEC.md`, `docs/spec/SPEC_REGISTRY.md`,
-  `docs/adr/ADR-0003-cache-safety-assumptions.md`, `docs/audits/HICP_AUDIT_REPORT.md`,
-  `AGENTS.md`, the tool source itself). Any reintroduction via lazy copy-paste
+  allowlist (`CHANGELOG.md`, the historical spec snapshots,
+  `docs/adr/ADR-0003-cache-safety-assumptions.md`, the historical audit
+  snapshot, `AGENTS.md`, the tool source itself). Any reintroduction via lazy copy-paste
   from old docs fails `cargo xtask structural` (called by `cargo xtask ci`).
 - **Test hardening — variant matching, seeded fuzz, `GOLDEN_UPDATE` sentinel**
   (`tests/chaos_testing.rs`, `tests/fuzz_chaos_feedback.rs`, `tests/wire_format.rs`).

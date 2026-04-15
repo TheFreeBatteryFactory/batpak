@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Reader: reads events from segment files.
 /// Sealed segments: memory-mapped via `memmap2` for zero-copy reads.
 /// Active segment: LRU FD cache + pread (Unix) / seek+read (Windows).
-/// [SPEC:src/store/reader.rs]
-/// [SPEC:IMPLEMENTATION NOTES item 6 — Store is Send + Sync]
+/// Reader: low-level segment access used by replay and point reads.
+/// Internally synchronized so `Store` stays `Send + Sync`.
 pub(crate) struct Reader {
     data_dir: PathBuf,
     /// FD cache for the active segment only. Sealed segments use mmap.
@@ -59,7 +59,6 @@ pub(crate) struct ScannedIndexEntry {
 
 /// Cross-segment batch recovery state.
 /// Passed between segment scans to handle batches spanning segment boundaries.
-/// [SPEC:src/store/reader.rs — cross-segment batch recovery]
 #[derive(Default)]
 pub(crate) struct BatchRecoveryState {
     pub staged: Vec<ScannedIndexEntry>,

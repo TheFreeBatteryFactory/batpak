@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 // through Rust's `use` mechanism. The wire module just needs to exist in the crate.
 
 /// WaitCondition: what an Outcome::Pending is waiting for.
-/// [SPEC:src/outcome/wait.rs]
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -35,7 +34,6 @@ pub enum WaitCondition {
 
 /// CompensationAction: what to do when an error needs compensation.
 /// The writer persists this as data. Products implement the handler.
-/// [SPEC:src/outcome/wait.rs — CompensationAction]
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]

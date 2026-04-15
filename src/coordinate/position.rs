@@ -6,7 +6,6 @@ use std::fmt;
 /// depth/lane/sequence provide per-entity chain ordering.
 /// v1: depth=0, lane=0 always. Sequence is per-entity monotonic counter.
 /// Lane/depth vocabulary is scaffolding for future distributed fan-out.
-/// [SPEC:src/coordinate/position.rs]
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DagPosition {
@@ -122,7 +121,6 @@ impl fmt::Display for DagPosition {
 
 /// PartialOrd for causal ordering — not total because different lanes
 /// are incomparable, and different depths are incomparable.
-/// [SPEC:src/coordinate/position.rs — PartialOrd]
 impl PartialOrd for DagPosition {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         if self.lane != other.lane || self.depth != other.depth {

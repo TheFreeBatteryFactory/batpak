@@ -93,7 +93,7 @@
     - ART-STORE-READER
     - ART-STORE-CONFIG
 - id: INV-COLUMNAR-REPLACES-DASHMAP
-  statement: When IndexLayout is SoA, AoSoA, or SoAoS, the columnar ScanIndex replaces the by_fact and scope_entities DashMaps — no redundant data structures coexist.
+  statement: The scan index always keeps the base AoS by_fact and scope_entities maps, and may additionally fan out into SoA, SoAoS, and AoSoA64 overlays. IndexTopology is the live public model for enabling those overlays.
   artifacts:
     - ART-STORE-COLUMNAR
     - ART-STORE-CONFIG

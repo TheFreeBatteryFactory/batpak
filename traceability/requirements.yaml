@@ -10,7 +10,6 @@
     - ART-CI
     - ART-JUST
     - ART-XTASK
-    - ART-VERIFY
     - ART-DENY-CONFIG
 - id: REQ-TRACE-BIDIR
   summary: Important requirements, invariants, flows, and proving artifacts must link bidirectionally.

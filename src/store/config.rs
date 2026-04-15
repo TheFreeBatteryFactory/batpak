@@ -15,40 +15,12 @@ pub enum SyncMode {
     SyncData,
 }
 
-/// Memory layout strategy for the secondary query index.
+/// Explicit in-memory scan topology.
 ///
-/// - `AoS`: Default. No secondary index — queries use DashMap (struct-per-entry).
-///   Best for point lookups and write-heavy workloads.
-/// - `SoA`: Parallel sorted arrays per field. Replaces `by_fact` and `scope_entities`
-///   DashMaps. Best for scan queries (`by_fact`, `by_scope`). Up to 10x faster for
-///   analytical workloads.
-/// - `AoSoA8/16/64`: Legacy tiled-layout selectors preserved for compatibility.
-///   In the multi-view store they act as hints that enable the tiled overlay while the
-///   runtime maintains the unified AoSoA64 replay/scanning view.
-#[derive(Clone, Debug, Default)]
-pub enum IndexLayout {
-    /// Struct-per-entry in DashMap. Current behavior.
-    #[default]
-    AoS,
-    /// Parallel sorted arrays. Replaces by_fact + scope_entities DashMaps.
-    SoA,
-    /// Compatibility selector for the tiled overlay.
-    AoSoA8,
-    /// Compatibility selector for the tiled overlay.
-    AoSoA16,
-    /// Preferred tiled overlay selector.
-    AoSoA64,
-    /// Hybrid: AoS outer (entity groups via HashMap), SoA inner (events within
-    /// each entity stored as parallel arrays). Best for entity-local queries
-    /// (stream, project) where per-entity iteration should be cache-friendly.
-    /// Matches the ECS archetype pattern: entity lookup is O(1) hash,
-    /// event scan within entity is columnar.
-    SoAoS,
-}
-
-/// Independently activatable in-memory index overlays.
+/// Base AoS maps are always present. This type controls which additional
+/// overlays are materialized alongside them.
 #[derive(Clone, Debug)]
-pub struct ViewConfig {
+pub struct IndexTopology {
     /// Enable the SoA overlay for broad kind/scope scans.
     pub soa: bool,
     /// Enable the SoAoS entity-group overlay for entity-local queries.
@@ -57,22 +29,49 @@ pub struct ViewConfig {
     pub tiles64: bool,
 }
 
-impl ViewConfig {
-    /// Enable all currently supported overlays.
+impl IndexTopology {
+    /// Base AoS maps only.
+    pub fn aos() -> Self {
+        Self {
+            soa: false,
+            entity_groups: false,
+            tiles64: false,
+        }
+    }
+
+    /// Base AoS maps plus the broad-scan SoA overlay.
+    pub fn scan() -> Self {
+        Self {
+            soa: true,
+            entity_groups: false,
+            tiles64: false,
+        }
+    }
+
+    /// Base AoS maps plus the entity-local SoAoS overlay.
+    pub fn entity_local() -> Self {
+        Self {
+            soa: false,
+            entity_groups: true,
+            tiles64: false,
+        }
+    }
+
+    /// Base AoS maps plus the tiled AoSoA64 overlay.
+    pub fn tiled() -> Self {
+        Self {
+            soa: false,
+            entity_groups: false,
+            tiles64: true,
+        }
+    }
+
+    /// Base AoS maps plus every supported overlay.
     pub fn all() -> Self {
         Self {
             soa: true,
             entity_groups: true,
             tiles64: true,
-        }
-    }
-
-    /// Disable all optional overlays, leaving the base AoS maps only.
-    pub fn none() -> Self {
-        Self {
-            soa: false,
-            entity_groups: false,
-            tiles64: false,
         }
     }
 
@@ -95,9 +94,9 @@ impl ViewConfig {
     }
 }
 
-impl Default for ViewConfig {
+impl Default for IndexTopology {
     fn default() -> Self {
-        Self::all()
+        Self::aos()
     }
 }
 
@@ -175,10 +174,8 @@ impl Default for SyncConfig {
 /// Secondary query index layout, projection, and checkpoint configuration.
 #[derive(Clone, Debug)]
 pub struct IndexConfig {
-    /// Memory layout for the secondary query index.
-    pub layout: IndexLayout,
-    /// Optional overlay views that are maintained alongside the AoS base view.
-    pub views: ViewConfig,
+    /// Active in-memory scan topology.
+    pub topology: IndexTopology,
     /// Enable incremental projection apply (delta replay from cached watermark).
     pub incremental_projection: bool,
     /// Write an index checkpoint on close (and after compact) for fast cold start.
@@ -190,8 +187,7 @@ pub struct IndexConfig {
 impl Default for IndexConfig {
     fn default() -> Self {
         Self {
-            layout: IndexLayout::default(),
-            views: ViewConfig::default(),
+            topology: IndexTopology::default(),
             incremental_projection: false,
             enable_checkpoint: true,
             enable_mmap_index: true,
@@ -219,7 +215,7 @@ pub struct StoreConfig {
     pub writer: WriterConfig,
     /// fsync strategy and cadence.
     pub sync: SyncConfig,
-    /// Secondary query index layout, projection, and checkpoint configuration.
+    /// Secondary query index topology, projection, and checkpoint configuration.
     pub index: IndexConfig,
     /// Injectable clock for deterministic testing. Returns microseconds since epoch.
     /// None = std::time::SystemTime::now() (production default).
@@ -339,12 +335,6 @@ impl StoreConfig {
         self
     }
 
-    /// Set the optional multi-view overlay configuration.
-    pub fn with_views(mut self, views: ViewConfig) -> Self {
-        self.index.views = views;
-        self
-    }
-
     /// Set the per-subscriber broadcast channel capacity.
     pub fn with_broadcast_capacity(mut self, broadcast_capacity: usize) -> Self {
         self.broadcast_capacity = broadcast_capacity;
@@ -395,9 +385,9 @@ impl StoreConfig {
         self
     }
 
-    /// Set the memory layout for the secondary query index.
-    pub fn with_index_layout(mut self, index_layout: IndexLayout) -> Self {
-        self.index.layout = index_layout;
+    /// Set the explicit in-memory scan topology.
+    pub fn with_index_topology(mut self, index_topology: IndexTopology) -> Self {
+        self.index.topology = index_topology;
         self
     }
 

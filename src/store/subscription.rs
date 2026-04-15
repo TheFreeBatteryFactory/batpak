@@ -1,11 +1,10 @@
+use super::fanout::Notification;
 use crate::coordinate::Region;
-use crate::store::writer::Notification;
 use flume::Receiver;
 
 /// Subscription: push-based per-subscriber flume channel. Lossy.
 /// If subscriber is slow, bounded channel fills. Writer's retain() prunes.
 /// For guaranteed delivery, use Cursor instead.
-/// [SPEC:src/store/subscription.rs]
 pub struct Subscription {
     rx: Receiver<Notification>,
     region: Region,
@@ -42,7 +41,6 @@ impl Subscription {
     /// \[DEP:flume::Receiver::recv_async\] → `RecvFut<'_, T>`: Future
     /// ASYNC NOTE: This is for async event consumption. For Store methods
     /// (append, get, query), use spawn_blocking instead. Two different patterns.
-    /// [SPEC:src/store/subscription.rs — ASYNC NOTE]
     pub fn receiver(&self) -> &Receiver<Notification> {
         &self.rx
     }
@@ -82,7 +80,6 @@ impl SubscriptionOps {
 
     /// Transform notifications. The mapper returns Some(notification) to pass through,
     /// or None to skip. Chainable with filter/take.
-    /// [SPEC:src/store/subscription.rs — SubscriptionOps::map]
     pub fn map<F: Fn(&Notification) -> Option<Notification> + Send + 'static>(
         mut self,
         f: F,

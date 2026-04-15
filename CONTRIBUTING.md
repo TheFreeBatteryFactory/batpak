@@ -23,6 +23,7 @@ cargo xtask traceability
 cargo xtask structural
 cargo xtask pre-commit
 cargo xtask ci
+cargo xtask cover
 ```
 
 `just` recipes are wrappers around the same commands.
@@ -32,7 +33,7 @@ cargo xtask ci
 1. Make the change.
 2. Update docs, examples, traceability, and ADRs if the public surface or behavior changed.
 3. Run `cargo xtask pre-commit`.
-4. Run `cargo xtask preflight` before pushing. This runs CI inside the canonical devcontainer — bit-equivalent to the GH `Integrity (ubuntu-devcontainer)` job — so it eliminates "passes locally, fails CI" surprises that `cargo xtask ci` on a native host cannot catch (different toolchain, missing system deps, wrong env vars). Use `cargo xtask ci` as a faster inner-loop check during iterative development, but always finish with `preflight` before the push that matters.
+4. Run `cargo xtask preflight` before pushing. This enters the canonical devcontainer once, then runs CI, coverage, and docs from that single in-container proof session. It remains the closest local match to the GH `Integrity (ubuntu-devcontainer)` job, so it eliminates "passes locally, fails CI" surprises that `cargo xtask ci` on a native host cannot catch (different toolchain, missing system deps, wrong env vars). Use `cargo xtask ci` as a faster inner-loop check during iterative development, but always finish with `preflight` before the push that matters.
 
 ## Public Surface Rules
 
@@ -46,10 +47,10 @@ cargo xtask ci
 
 ## Docs And Release Hygiene
 
-- User-facing docs live in `guide/`
-- Deep reference docs live in `docs/reference/`
+- `README.md` is the primary repo entrypoint and should stay enough for orientation
+- `GUIDE.md` is the human-first usage surface
+- `REFERENCE.md` is the technical reference surface
 - ADRs live in `docs/adr/`
-- Specs and audit records live in `docs/spec/` and `docs/audits/`
 
 Before release-oriented changes, run:
 
@@ -57,3 +58,7 @@ Before release-oriented changes, run:
 cargo xtask docs
 cargo xtask release --dry-run
 ```
+
+Coverage artifacts are retained under `target/xtask-cover/last-run/` so failed
+or partial coverage runs can be inspected instead of disappearing into a temp
+directory.

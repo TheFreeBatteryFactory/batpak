@@ -1,3 +1,5 @@
+mod architecture_lints;
+
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use regex::Regex;
@@ -321,9 +323,7 @@ fn traceability_check() -> Result<()> {
 fn structural_check() -> Result<()> {
     let repo_root = repo_root()?;
     let tracked_files = tracked_repo_files(&repo_root)?;
-    check_for_absolute_paths(&repo_root, &tracked_files)?;
-    check_for_stale_references(&repo_root, &tracked_files)?;
-    check_release_hardening_patterns(&repo_root, &tracked_files)?;
+    architecture_lints::check(&repo_root, &tracked_files)?;
     check_allow_justifications(&repo_root)?;
     check_pub_items_have_references(&repo_root)?;
     check_ci_parity(&repo_root)?;
@@ -337,17 +337,17 @@ fn structural_check() -> Result<()> {
 ///
 /// This is the safety harness that catches the kind of drift we hit
 /// repeatedly during the v0.3 prep work: someone updates `.github/workflows/ci.yml`
-/// without updating `tools/xtask/src/main.rs` (or vice versa), and CI passes
+/// without updating the xtask source tree (or vice versa), and CI passes
 /// locally but fails on GitHub because the two pipelines run different
 /// commands. The check is purely mechanical:
 ///
 /// 1. Every `cargo xtask <subcommand>` referenced in `ci.yml` must exist
 ///    as an `XtaskCommand` variant in `tools/xtask/src/main.rs`.
 /// 2. Every tool installed via `taiki-e/install-action` in the workflow
-///    must also be installed by `cargo xtask setup` in `tools/xtask/src/main.rs`.
+///    must also be installed by `cargo xtask setup` in the xtask source tree.
 /// 3. The Dockerfile and the workflow must agree on tool versions for
 ///    `cargo-deny`, `cargo-llvm-cov`, `cargo-mutants`, `cargo-nextest`, and
-///    `mdbook` (the tools we care about pinning).
+///    `cargo-audit` (the tools we care about pinning).
 ///
 /// The implementation uses string-grep instead of YAML parsing to keep the
 /// dependency surface minimal and the failure messages legible. If the
@@ -359,6 +359,7 @@ fn check_ci_parity(repo_root: &Path) -> Result<()> {
         .context("read .github/workflows/ci.yml")?;
     let xtask_main = fs::read_to_string(repo_root.join("tools/xtask/src/main.rs"))
         .context("read tools/xtask/src/main.rs")?;
+    let xtask_sources = xtask_source_text(repo_root)?;
     let dockerfile = fs::read_to_string(repo_root.join(".devcontainer/Dockerfile"))
         .context("read .devcontainer/Dockerfile")?;
 
@@ -438,17 +439,17 @@ fn check_ci_parity(repo_root: &Path) -> Result<()> {
         // `{tool}@{version}`. Both checks together kill the
         // accidental-substring-match failure mode.
         let setup_key = format!("\"{tool}\"");
-        if !xtask_main.contains(&setup_key) {
+        if !xtask_sources.contains(&setup_key) {
             bail!(
                 "ci-parity: workflow installs `{tool}@{wf_ver}` via \
                  taiki-e/install-action but `cargo xtask setup` in \
-                 tools/xtask/src/main.rs does not list a `{setup_key}` entry. \
+                 tools/xtask/src/ does not list a `{setup_key}` entry. \
                  Either add it to setup or remove from the workflow."
             );
         }
         let xtask_pin_re = Regex::new(&format!(r"{tool}@(\d+(?:\.\d+)+)")).unwrap();
         let xtask_ver = xtask_pin_re
-            .captures(&xtask_main)
+            .captures(&xtask_sources)
             .and_then(|c| c.get(1))
             .map(|m| m.as_str().to_string());
         match xtask_ver {
@@ -456,7 +457,7 @@ fn check_ci_parity(repo_root: &Path) -> Result<()> {
                 bail!(
                     "ci-parity: tool `{tool}` is pinned to `{wf_ver}` in \
                      `.github/workflows/ci.yml` but `{x}` in `cargo xtask setup` \
-                     (tools/xtask/src/main.rs). Pick one version and update both."
+                     (tools/xtask/src/). Pick one version and update both."
                 );
             }
             None => {
@@ -478,7 +479,6 @@ fn check_ci_parity(repo_root: &Path) -> Result<()> {
         "cargo-audit",
         "cargo-llvm-cov",
         "cargo-mutants",
-        "mdbook",
     ];
     for tool in pinned_tools {
         let dock_pin_re = Regex::new(&format!(r"{tool}@(\d+(?:\.\d+)+)")).unwrap();
@@ -488,7 +488,7 @@ fn check_ci_parity(repo_root: &Path) -> Result<()> {
             .and_then(|c| c.get(1))
             .map(|m| m.as_str().to_string());
         let xtask_v = xtask_pin_re
-            .captures(&xtask_main)
+            .captures(&xtask_sources)
             .and_then(|c| c.get(1))
             .map(|m| m.as_str().to_string());
         match (dock_v, xtask_v) {
@@ -496,7 +496,7 @@ fn check_ci_parity(repo_root: &Path) -> Result<()> {
                 bail!(
                     "ci-parity: tool `{tool}` is pinned to `{d}` in \
                      `.devcontainer/Dockerfile` but `{x}` in `cargo xtask setup` \
-                     (tools/xtask/src/main.rs). Pick one version and update both."
+                     (tools/xtask/src/). Pick one version and update both."
                 );
             }
             (Some(_), None) => {
@@ -512,6 +512,18 @@ fn check_ci_parity(repo_root: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn xtask_source_text(repo_root: &Path) -> Result<String> {
+    let mut combined = String::new();
+    for path in files_with_extension(&repo_root.join("tools/xtask/src"), "rs") {
+        combined.push_str(
+            &fs::read_to_string(&path)
+                .with_context(|| format!("read {}", relative(repo_root, &path)))?,
+        );
+        combined.push('\n');
+    }
+    Ok(combined)
 }
 
 /// Assert that every `pub fn` declared in `impl Store { ... }` blocks in
@@ -649,183 +661,6 @@ fn check_store_pub_fn_coverage(repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn check_for_absolute_paths(repo_root: &Path, tracked_files: &[PathBuf]) -> Result<()> {
-    let absolute_windows = Regex::new(r"(^|[^A-Za-z])([A-Za-z]:\\)").unwrap();
-    let absolute_unix = Regex::new(r"(?m)(file://|/Users/|/home/|/opt/|/tmp/)").unwrap();
-    let allow = [
-        repo_root.join(".devcontainer/Dockerfile"),
-        repo_root.join("docs/audits/HICP_AUDIT_REPORT.md"),
-        repo_root.join("tools/integrity/src/main.rs"),
-    ];
-    for path in tracked_files {
-        if allow.iter().any(|allowed| allowed == path) {
-            continue;
-        }
-        let ext = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or_default();
-        let is_text = matches!(
-            ext,
-            "rs" | "toml" | "md" | "yml" | "yaml" | "json" | "sh" | "stderr"
-        ) || path.file_name().and_then(|s| s.to_str()) == Some("justfile");
-        if !is_text {
-            continue;
-        }
-        let content =
-            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        ensure(
-            !absolute_windows.is_match(&content),
-            format!(
-                "absolute Windows path leak in {}",
-                relative(repo_root, path)
-            ),
-        )?;
-        ensure(
-            !absolute_unix.is_match(&content),
-            format!("absolute Unix path leak in {}", relative(repo_root, path)),
-        )?;
-    }
-    Ok(())
-}
-
-fn check_for_stale_references(repo_root: &Path, tracked_files: &[PathBuf]) -> Result<()> {
-    let stale_terms = [
-        // Old test file names (renamed in repo flatten)
-        "self_benchmark.rs",
-        "quiet_stragglers.rs",
-        "bigbang_compliance.rs",
-        "coverage_gaps.rs",
-        // Old API name (replaced by AppendOptions::with_cas)
-        "with_expected_sequence",
-        // Deleted plan file
-        "plans-test-bench-reorganization",
-        // Old MSRV (updated to 1.92)
-        "MSRV is 1.75",
-        "MSRV: 1.75",
-        "MSRV 1.75",
-        // Removed in 0.3.0 — the integrity tool now flags any reappearance in
-        // non-allowlisted files. The allowlist below covers files that legitimately
-        // contain historical references (CHANGELOG, audit reports, SPEC snapshots,
-        // ADR archeology).
-        "RedbCache",
-        "LmdbCache",
-        "entity_locks",
-        "cache_map_size_bytes",
-        "with_cache_map_size_bytes",
-        "open_with_redb_cache",
-        "open_with_lmdb_cache",
-        // Pre-hardening public names and semantics.
-        "Freshness::BestEffort",
-        "subscribe(region)",
-        "cursor(region)",
-        "`test-support`",
-    ];
-    let allow = [
-        // Audit report legitimately documents historical state
-        repo_root.join("docs/audits/HICP_AUDIT_REPORT.md"),
-        // This file contains the terms as string literals
-        repo_root.join("tools/integrity/src/main.rs"),
-        // CHANGELOG documents the 0.3.0 removal of the cache backends
-        repo_root.join("CHANGELOG.md"),
-        // SPEC snapshots and ADR archeology contain historical API references
-        repo_root.join("docs/spec/SPEC.md"),
-        repo_root.join("docs/spec/SPEC_REGISTRY.md"),
-        repo_root.join("docs/adr/ADR-0003-cache-safety-assumptions.md"),
-        // AGENTS.md may legitimately mention removed concepts in historical context
-        repo_root.join("AGENTS.md"),
-        // Detector sources are allowed to mention banned terms as the thing they ban.
-        repo_root.join("build.rs"),
-    ];
-    for path in tracked_files {
-        if allow.iter().any(|allowed| allowed == path) {
-            continue;
-        }
-        let ext = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or_default();
-        if !matches!(ext, "md" | "rs" | "toml" | "yml" | "yaml" | "json" | "sh") {
-            continue;
-        }
-        let content =
-            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        for term in stale_terms {
-            ensure(
-                !content.contains(term),
-                format!(
-                    "stale reference `{term}` found in {}",
-                    relative(repo_root, path)
-                ),
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn check_release_hardening_patterns(repo_root: &Path, tracked_files: &[PathBuf]) -> Result<()> {
-    let historical_allow = [
-        repo_root.join("docs/audits/HICP_AUDIT_REPORT.md"),
-        repo_root.join("CHANGELOG.md"),
-        repo_root.join("tools/integrity/src/main.rs"),
-        repo_root.join("build.rs"),
-    ];
-    for path in tracked_files {
-        let rel = relative(repo_root, path);
-        let ext = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or_default();
-        let is_text = matches!(ext, "md" | "rs" | "toml" | "yml" | "yaml" | "json" | "sh");
-        if !is_text {
-            continue;
-        }
-        let content =
-            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-
-        if rel == "src/store/mod.rs" {
-            ensure(
-                !content.contains("pub fn subscribe("),
-                "structural-check: src/store/mod.rs still exports ambiguous `subscribe`",
-            )?;
-            ensure(
-                !content.contains("pub fn cursor("),
-                "structural-check: src/store/mod.rs still exports ambiguous `cursor`",
-            )?;
-        }
-
-        if rel.starts_with("src/store/") {
-            ensure(
-                !content.contains("index.ckpt.tmp"),
-                format!(
-                    "structural-check: fixed checkpoint temp-file pattern found in {}",
-                    rel
-                ),
-            )?;
-            ensure(
-                !content.contains(".tmp_{pid}_{n}"),
-                format!(
-                    "structural-check: fixed native-cache temp-file pattern found in {}",
-                    rel
-                ),
-            )?;
-        }
-
-        if historical_allow.iter().any(|allowed| allowed == path) {
-            continue;
-        }
-
-        ensure(
-            !content.contains("test-support"),
-            format!(
-                "structural-check: stale `test-support` reference found in {}",
-                rel
-            ),
-        )?;
-    }
-    Ok(())
-}
-
 fn check_allow_justifications(repo_root: &Path) -> Result<()> {
     for path in rust_files(&repo_root.join("src")) {
         let content = fs::read_to_string(&path)?;
@@ -890,11 +725,11 @@ fn collect_reference_text(repo_root: &Path) -> Result<BTreeSet<String>> {
     let mut files = rust_files(&repo_root.join("tests"));
     files.extend(rust_files(&repo_root.join("benches")));
     files.extend(rust_files(&repo_root.join("examples")));
-    files.extend(files_with_extension(&repo_root.join("guide/src"), "md"));
     files.push(repo_root.join("README.md"));
+    files.push(repo_root.join("GUIDE.md"));
+    files.push(repo_root.join("REFERENCE.md"));
     files.push(repo_root.join("CONTRIBUTING.md"));
     files.push(repo_root.join("AGENTS.md"));
-    files.push(repo_root.join("docs/reference/ARCHITECTURE.md"));
     for path in files {
         let content = fs::read_to_string(&path)?;
         for token in content.split(|ch: char| !ch.is_alphanumeric() && ch != '_') {

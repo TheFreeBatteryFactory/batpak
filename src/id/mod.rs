@@ -3,8 +3,7 @@ use std::hash::Hash;
 use std::str::FromStr;
 
 /// EntityIdType: Layer 0 trait. No uuid dep.
-/// All IDs are u128 internally. No Uuid in public API. [SPEC:src/id/mod.rs]
-/// [SPEC:RED FLAGS — DO NOT put uuid::Uuid in the public API]
+/// All IDs are `u128` internally. Keep `uuid::Uuid` out of the public API.
 pub trait EntityIdType:
     Copy + Clone + Eq + Hash + fmt::Debug + fmt::Display + FromStr + Send + Sync + 'static
 {

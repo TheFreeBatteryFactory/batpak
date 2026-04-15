@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
 const KIND: EventKind = EventKind::custom(0xF, 0x31);
+const NOISE_KIND: EventKind = EventKind::custom(0xF, 0x32);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CounterDelta {
@@ -22,7 +23,7 @@ struct ValueCounter {
 }
 
 impl EventSourced for ValueCounter {
-    type Input = ValueInput;
+    type Input = JsonValueInput;
 
     fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
         if events.is_empty() {
@@ -82,7 +83,7 @@ impl EventSourced for RawCounter {
 // Compile-time assertions: replay mode selection and payload type aliases work correctly.
 const _: () = assert!(matches!(
     <RawMsgpackInput as ProjectionInput>::MODE,
-    ProjectionMode::RawMsgpack
+    ReplayLane::RawMsgpack
 ));
 
 // ProjectionPayload and ProjectionEvent resolve to the correct concrete types.
@@ -180,6 +181,127 @@ fn raw_watch_projection_emits_updated_state() {
     let store = match Arc::try_unwrap(store) {
         Ok(store) => store,
         Err(_) => panic!("PROPERTY: raw watch test should release all Arc clones before close"),
+    };
+    store.close().expect("close");
+}
+
+#[test]
+fn raw_watch_projection_matches_project_if_changed_after_relevant_append() {
+    let (store, _dir) = seeded_store();
+    let baseline_generation = store
+        .entity_generation("entity:raw-proj")
+        .expect("seeded entity generation");
+    let mut watcher =
+        Arc::clone(&store).watch_projection::<RawCounter>("entity:raw-proj", Freshness::Consistent);
+    let coord = Coordinate::new("entity:raw-proj", "scope:test").expect("coord");
+
+    store
+        .append(
+            &coord,
+            KIND,
+            &CounterDelta {
+                amount: 4,
+                label: "parity".to_owned(),
+            },
+        )
+        .expect("append parity event");
+
+    let watched = watcher
+        .recv()
+        .expect("watch projection recv")
+        .expect("watch projection state");
+    let projected = store
+        .project_if_changed::<RawCounter>(
+            "entity:raw-proj",
+            baseline_generation,
+            &Freshness::Consistent,
+        )
+        .expect("project if changed")
+        .expect("changed projection")
+        .1
+        .expect("projection state");
+
+    assert_eq!(
+        watched, projected,
+        "PROPERTY: watch_projection and project_if_changed must share the same projection semantics \
+         after a relevant event.\n\
+         Investigate: src/store/mod.rs ProjectionWatcher::recv + src/store/projection_flow.rs."
+    );
+
+    drop(watcher);
+    let store = match Arc::try_unwrap(store) {
+        Ok(store) => store,
+        Err(_) => {
+            panic!("PROPERTY: raw parity watch test should release all Arc clones before close")
+        }
+    };
+    store.close().expect("close");
+}
+
+#[test]
+fn raw_watch_projection_matches_project_if_changed_after_irrelevant_append() {
+    let (store, _dir) = seeded_store();
+    let baseline_generation = store
+        .entity_generation("entity:raw-proj")
+        .expect("seeded entity generation");
+    let baseline_state = store
+        .project::<RawCounter>("entity:raw-proj", &Freshness::Consistent)
+        .expect("baseline project")
+        .expect("baseline state");
+    let mut watcher =
+        Arc::clone(&store).watch_projection::<RawCounter>("entity:raw-proj", Freshness::Consistent);
+    let coord = Coordinate::new("entity:raw-proj", "scope:test").expect("coord");
+
+    store
+        .append(
+            &coord,
+            NOISE_KIND,
+            &CounterDelta {
+                amount: 999,
+                label: "noise".to_owned(),
+            },
+        )
+        .expect("append irrelevant event");
+
+    let watched = watcher
+        .recv()
+        .expect("watch projection recv")
+        .expect("watch projection state");
+    let changed = store
+        .project_if_changed::<RawCounter>(
+            "entity:raw-proj",
+            baseline_generation,
+            &Freshness::Consistent,
+        )
+        .expect("project if changed")
+        .expect("changed projection");
+    let projected = changed.1.expect("projection state");
+
+    assert_eq!(
+        watched, baseline_state,
+        "PROPERTY: an irrelevant event may advance generation, but the watched raw projection must \
+         keep the same folded state.\n\
+         Investigate: src/store/mod.rs ProjectionWatcher::recv + RawCounter::relevant_event_kinds."
+    );
+    assert_eq!(
+        watched, projected,
+        "PROPERTY: watch_projection and project_if_changed must agree even when the entity changes \
+         but the projection filter rejects the new event.\n\
+         Investigate: src/store/mod.rs ProjectionWatcher::recv + src/store/projection_flow.rs."
+    );
+    assert!(
+        changed.0 > baseline_generation,
+        "entity generation should still advance on the irrelevant append"
+    );
+
+    drop(watcher);
+    let store = match Arc::try_unwrap(store) {
+        Ok(store) => store,
+        Err(_) => {
+            panic!(
+                "PROPERTY: raw irrelevant parity test should release all Arc clones before close"
+            )
+        }
     };
     store.close().expect("close");
 }

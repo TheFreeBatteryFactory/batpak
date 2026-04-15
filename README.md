@@ -2,6 +2,10 @@
 
 Sync-first event sourcing for Rust: append-only log, causal metadata, policy gates, projections, subscriptions, and typestate-friendly workflows without an async runtime.
 
+This README is the primary entrypoint. If you only read one document, read
+this one. The rest of the docs should exist to go deeper, not to replace the
+front door.
+
 ## Start In 5 Minutes
 
 ```bash
@@ -35,8 +39,22 @@ store.close()?;
 ## Pick Your Lane
 
 - User lane: `cargo build`, `cargo test`, `cargo run --example quickstart`
-- Maintainer lane: `cargo xtask doctor`, `cargo xtask ci`, `cargo xtask preflight` (gold standard before pushing)
-- Perf lane: `cargo xtask bench --surface neutral|native [--save|--compare]`
+- Maintainer lane: `cargo xtask doctor`, `cargo xtask ci`, `cargo xtask preflight` (gold standard before pushing; one canonical devcontainer proof session)
+- Perf lane: `cargo xtask bench --surface neutral|native [--save|--compare|--compile]`
+- Coverage lane: `cargo xtask cover [--ci|--json|--threshold N]`
+
+## Mental Model
+
+Think about batpak in five layers:
+
+- `Coordinate`: who and where
+- `Event`: what happened
+- `Gate` / `Receipt`: may this happen
+- `Pipeline`: approve then commit
+- `Store`: persist, query, replay, subscribe
+
+The runtime stays sync on purpose. Async integration happens around it, not
+inside it.
 
 ## What You Get
 
@@ -51,14 +69,34 @@ store.close()?;
 - `close(self) -> Closed` for explicit durable shutdown; `Drop` is best-effort only
 - Query/read operations yield `StoredEvent<serde_json::Value>` at the storage boundary
 
+## Projection Lanes
+
+`JsonValueInput` is the ergonomic default replay lane. Start there when you want
+the clearest projection code and easiest onboarding.
+
+`RawMsgpackInput` is the performance lane. Use it when replay cost matters and
+you want to deserialize directly from MessagePack bytes inside the projection.
+
+- `cargo run --example event_sourced_counter` shows the default JSON lane
+- `cargo run --example raw_projection_counter` shows the raw replay lane
+
+The current `benches/replay_lanes.rs` quick surface consistently shows raw
+replay ahead of `JsonValueInput` on the 1k-event counter-shaped workload, so
+raw replay should be treated as real engineering value, not as an obscure
+trick.
+
 ## Docs
 
-- [Guide](guide/src/SUMMARY.md)
-- [Architecture reference](docs/reference/ARCHITECTURE.md)
-- [Tuning reference](docs/reference/TUNING.md)
-- [Contributing](CONTRIBUTING.md)
-- [Agent guide](AGENTS.md)
-- [Specification](docs/spec/SPEC.md)
+Keep the live docs small and root-first:
+
+- [GUIDE.md](GUIDE.md) for workflows and usage patterns
+- [REFERENCE.md](REFERENCE.md) for architecture, tuning, topology, replay lanes, and invariants
+- [CONTRIBUTING.md](CONTRIBUTING.md) for repo workflow
+- [CHANGELOG.md](CHANGELOG.md) for release history
+- [AGENTS.md](AGENTS.md) for agent-facing repo guidance
+
+The goal is one real front door plus a small handful of actual docs, not a
+maze of half-authoritative pages.
 
 ## Features
 
@@ -71,11 +109,21 @@ store.close()?;
 cargo xtask doctor
 cargo xtask ci
 cargo xtask docs
-cargo xtask preflight    # full CI inside the devcontainer (gold standard for "ready to push")
+cargo xtask preflight    # CI + coverage + docs in one canonical devcontainer session
 cargo xtask perf-gates   # hardware-dependent perf tests (run on demand only)
+cargo xtask cover        # coverage feedback with retained artifacts under target/xtask-cover/last-run
 ```
 
 `just` remains available as shorthand, but `cargo xtask` is the canonical command surface.
+
+## Docs Policy
+
+- Keep the README as the main human and agent entrypoint.
+- Keep `GUIDE.md` for workflows and usage.
+- Keep `REFERENCE.md` for technical truth that would bloat the README.
+
+That gives us one smart front door plus a few deliberate root-level docs,
+instead of a sprawl or a single unreadable wall of text.
 
 ## License
 

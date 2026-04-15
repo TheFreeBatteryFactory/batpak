@@ -4,7 +4,6 @@ use std::fmt;
 /// Denial: returned by a Gate when it rejects a proposal.
 /// Separate from OutcomeError. Library does NOT auto-store denials.
 /// Products decide whether to persist denials as events.
-/// [SPEC:src/guard/denial.rs]
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 // NOTE: Denial does NOT derive Deserialize. The gate field is &'static str which

@@ -249,15 +249,14 @@ impl SequenceGate {
     }
 }
 
-/// StoreIndex: in-memory 2D index + auxiliaries. NOT persisted — rebuilt from segments on cold start.
-/// [SPEC:src/store/index.rs]
+/// StoreIndex: in-memory 2D index + auxiliaries. Not persisted; rebuilt from segments on cold start.
 /// [DEP:dashmap::DashMap] — see DEPENDENCY SURFACE for deadlock warnings
 pub(crate) struct StoreIndex {
     /// Primary: entity -> ordered events. [DEP:dashmap::DashMap::get_mut] for insert.
     streams: DashMap<Arc<str>, BTreeMap<ClockKey, Arc<IndexEntry>>>,
-    /// Scan index: either DashMap-based (AoS) or columnar (SoA/AoSoA).
-    /// Handles by_fact and scope queries. When columnar, the DashMaps inside
-    /// ScanIndex::Maps are replaced by contiguous arrays.
+    /// Base AoS scan maps plus optional overlay views.
+    /// Handles by_fact and scope queries while keeping the live topology honest:
+    /// the base maps always exist and configured overlays fan out in parallel.
     pub(crate) scan: ScanIndex,
     /// Point lookup: event_id -> entry. O(1) get by ID.
     by_id: DashMap<u128, Arc<IndexEntry>>,
@@ -275,8 +274,7 @@ pub(crate) struct StoreIndex {
 }
 
 /// ClockKey: BTreeMap key. Ord: wall_ms-first, then clock, then uuid tiebreak.
-/// wall_ms enables global causal ordering across entities (HLC layer 1).
-/// [SPEC:IMPLEMENTATION NOTES item 1]
+/// `wall_ms` enables global causal ordering across entities (HLC layer 1).
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClockKey {
@@ -676,7 +674,6 @@ impl StoreIndex {
     }
 
     /// Atomic batch insert: all entries become visible together.
-    /// [SPEC:src/store/index.rs — insert_batch]
     pub(crate) fn insert_batch(&self, entries: Vec<IndexEntry>) {
         if entries.is_empty() {
             return;
@@ -870,21 +867,6 @@ impl StoreIndex {
             .unwrap_or_default()
     }
 
-    pub(crate) fn stream_since(&self, entity: &str, watermark: u64) -> Vec<IndexEntry> {
-        let visibility = self.sequence.snapshot();
-        self.streams
-            .get(entity)
-            .map(|r| {
-                r.value()
-                    .values()
-                    .filter(|arc| arc.global_sequence > watermark)
-                    .filter(|arc| visibility.is_visible(arc.global_sequence))
-                    .map(|arc| arc.as_ref().clone())
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     pub(crate) fn query(&self, region: &crate::coordinate::Region) -> Vec<IndexEntry> {
         let visibility = self.sequence.snapshot();
         // Region query strategy:
@@ -1069,8 +1051,8 @@ impl StoreIndex {
     /// and **must** be `commit()`-ed to publish entries and restore the
     /// allocator. Forgetting to commit leaves the index unpublished — the
     /// `Drop` impl emits a debug-mode panic to catch this in tests.
-    pub(crate) fn layout_name(&self) -> &'static str {
-        self.scan.layout_name()
+    pub(crate) fn topology_name(&self) -> &'static str {
+        self.scan.topology_name()
     }
 
     pub(crate) fn tile_count(&self) -> usize {

@@ -2,7 +2,7 @@
 
 use batpak::coordinate::KindFilter;
 use batpak::prelude::*;
-use batpak::store::{Store, StoreConfig, ViewConfig};
+use batpak::store::{IndexTopology, Store, StoreConfig};
 use proptest::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use tempfile::TempDir;
@@ -73,19 +73,9 @@ fn event_kind(spec: &AppendSpec) -> EventKind {
     EventKind::custom(spec.category, spec.type_id)
 }
 
-fn store_config(dir: &TempDir, views: ViewConfig) -> StoreConfig {
+fn store_config(dir: &TempDir, topology: IndexTopology) -> StoreConfig {
     StoreConfig::new(dir.path())
-        .with_views(views)
-        .with_index_layout(IndexLayout::AoS)
-        .with_enable_checkpoint(false)
-        .with_enable_mmap_index(false)
-        .with_sync_every_n_events(64)
-}
-
-fn compatibility_tiled_config(dir: &TempDir, layout: IndexLayout) -> StoreConfig {
-    StoreConfig::new(dir.path())
-        .with_views(ViewConfig::none())
-        .with_index_layout(layout)
+        .with_index_topology(topology)
         .with_enable_checkpoint(false)
         .with_enable_mmap_index(false)
         .with_sync_every_n_events(64)
@@ -232,13 +222,11 @@ proptest! {
     #[test]
     fn all_view_topologies_return_identical_query_results(specs in arb_append_specs()) {
         let configs = vec![
-            ("aos", store_config(&TempDir::new().expect("temp dir"), ViewConfig::none())),
-            ("soa-only", store_config(&TempDir::new().expect("temp dir"), ViewConfig::none().with_soa(true))),
-            ("entity-groups-only", store_config(&TempDir::new().expect("temp dir"), ViewConfig::none().with_entity_groups(true))),
-            ("tiles-only", store_config(&TempDir::new().expect("temp dir"), ViewConfig::none().with_tiles64(true))),
-            ("all-views", store_config(&TempDir::new().expect("temp dir"), ViewConfig::all())),
-            ("compat-aosoa8", compatibility_tiled_config(&TempDir::new().expect("temp dir"), IndexLayout::AoSoA8)),
-            ("compat-aosoa16", compatibility_tiled_config(&TempDir::new().expect("temp dir"), IndexLayout::AoSoA16)),
+            ("aos", store_config(&TempDir::new().expect("temp dir"), IndexTopology::aos())),
+            ("scan", store_config(&TempDir::new().expect("temp dir"), IndexTopology::scan())),
+            ("entity-local", store_config(&TempDir::new().expect("temp dir"), IndexTopology::entity_local())),
+            ("tiled", store_config(&TempDir::new().expect("temp dir"), IndexTopology::tiled())),
+            ("all", store_config(&TempDir::new().expect("temp dir"), IndexTopology::all())),
         ];
 
         let mut snapshots = Vec::new();
@@ -261,11 +249,11 @@ proptest! {
     #[test]
     fn reopened_view_topologies_return_identical_query_results(specs in arb_append_specs()) {
         let configs = vec![
-            ("aos", store_config(&TempDir::new().expect("temp dir"), ViewConfig::none())),
-            ("soa-only", store_config(&TempDir::new().expect("temp dir"), ViewConfig::none().with_soa(true))),
-            ("entity-groups-only", store_config(&TempDir::new().expect("temp dir"), ViewConfig::none().with_entity_groups(true))),
-            ("tiles-only", store_config(&TempDir::new().expect("temp dir"), ViewConfig::none().with_tiles64(true))),
-            ("all-views", store_config(&TempDir::new().expect("temp dir"), ViewConfig::all())),
+            ("aos", store_config(&TempDir::new().expect("temp dir"), IndexTopology::aos())),
+            ("scan", store_config(&TempDir::new().expect("temp dir"), IndexTopology::scan())),
+            ("entity-local", store_config(&TempDir::new().expect("temp dir"), IndexTopology::entity_local())),
+            ("tiled", store_config(&TempDir::new().expect("temp dir"), IndexTopology::tiled())),
+            ("all", store_config(&TempDir::new().expect("temp dir"), IndexTopology::all())),
         ];
 
         let mut snapshots = Vec::new();

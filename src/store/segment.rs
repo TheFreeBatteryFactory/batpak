@@ -7,7 +7,6 @@ use std::io::{Read, Seek, SeekFrom, Write};
 /// Segment file format: magic(4) + header_len(4 BE) + header(msgpack) + frames
 /// Frame: \[len:u32 BE\]\[crc32:u32 BE\]\[msgpack\]
 /// Files named: {segment_id:06}.fbat. Sequential u64.
-/// [SPEC:src/store/segment.rs]
 pub const SEGMENT_MAGIC: &[u8; 4] = b"FBAT";
 /// File extension used for all segment files (without the leading dot).
 pub const SEGMENT_EXTENSION: &str = "fbat";
@@ -75,7 +74,7 @@ pub struct CompactionResult {
 }
 
 /// frame_encode: serialize data to msgpack, wrap in \[len:u32 BE\]\[crc32:u32 BE\]\[msgpack\]
-/// \[SPEC:WIRE FORMAT DECISIONS — ALWAYS rmp_serde::to_vec_named()\]
+/// Segment payloads are always encoded with `rmp_serde::to_vec_named()`.
 /// \[DEP:rmp_serde::to_vec_named\] → `Result<Vec<u8>, encode::Error>`
 /// \[DEP:crc32fast::hash\] → u32
 ///

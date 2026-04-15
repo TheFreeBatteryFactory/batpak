@@ -19,7 +19,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@mdbook
       - uses: Swatinem/rust-cache@v2
       - name: Run Criterion surface
         run: cargo xtask bench --surface ${{ matrix.surface }}

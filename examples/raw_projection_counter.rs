@@ -9,6 +9,11 @@
 //! projection chooses batpak's raw replay lane instead of eagerly decoding
 //! each payload into `serde_json::Value`.
 //!
+//! Reach for this lane when replay cost matters and your projection can own
+//! the MessagePack decoding step directly. The current quick replay-lane bench
+//! in this repo consistently shows this pattern ahead of the JSON replay lane
+//! on the 1k-event counter-shaped workload.
+//!
 //! Run: `cargo run --example raw_projection_counter`
 
 use batpak::prelude::*;
@@ -94,6 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Raw replay projection state:");
         println!("  value:        {}", state.value);
         println!("  total_events: {}", state.total_events);
+        println!("  replay lane:  RawMsgpackInput (performance lane)");
     }
 
     store.close()?;

@@ -15,6 +15,7 @@
   kind: tool
   paths:
     - tools/integrity/src/main.rs
+    - tools/integrity/src/architecture_lints.rs
 - id: ART-TRACEABILITY
   kind: registry
   paths:
@@ -26,10 +27,12 @@
   kind: tool
   paths:
     - tools/integrity/src/main.rs
+    - tools/integrity/src/architecture_lints.rs
 - id: ART-STRUCTURAL-CHECK
   kind: tool
   paths:
     - tools/integrity/src/main.rs
+    - tools/integrity/src/architecture_lints.rs
 - id: ART-PUB-ALLOWLIST
   kind: registry
   paths:
@@ -46,10 +49,13 @@
   kind: workflow
   paths:
     - tools/xtask/src/main.rs
-- id: ART-VERIFY
-  kind: workflow
-  paths:
-    - scripts/verify-all.sh
+    - tools/xtask/src/commands.rs
+    - tools/xtask/src/bench.rs
+    - tools/xtask/src/coverage.rs
+    - tools/xtask/src/devcontainer.rs
+    - tools/xtask/src/docs.rs
+    - tools/xtask/src/preflight.rs
+    - tools/xtask/src/util.rs
 - id: ART-DENY-CONFIG
   kind: dependency-policy
   paths:
@@ -88,6 +94,7 @@
   kind: source
   paths:
     - src/store/projection_flow.rs
+    - src/store/watch.rs
 - id: ART-STORE-MAINTENANCE
   kind: source
   paths:
@@ -107,7 +114,10 @@
 - id: ART-STORE-WRITER
   kind: source
   paths:
+    - src/store/fanout.rs
     - src/store/writer.rs
+    - src/store/staging.rs
+    - src/store/control_plane.rs
 - id: ART-STORE-REBUILD
   kind: source
   paths:
@@ -142,6 +152,7 @@
   paths:
     - tests/projection_cache.rs
     - tests/store_projection_wiring.rs
+    - tests/raw_projection_mode.rs
 - id: ART-STORE-ADVANCED
   kind: tests
   paths:
@@ -163,6 +174,7 @@
   kind: tests
   paths:
     - tests/replay_consistency.rs
+    - tests/raw_projection_mode.rs
 - id: ART-DETERMINISTIC-CONCURRENCY-TESTS
   kind: tests
   paths:
@@ -203,11 +215,13 @@
   kind: tests
   paths:
     - tests/unified_red.rs
+    - tests/index_topology.rs
 - id: ART-CONTROL-PLANE-TESTS
   kind: tests
   paths:
     - tests/control_plane_surface.rs
     - tests/mmap_cold_start.rs
+    - tests/writer_command_flow.rs
 - id: ART-GROUP-COMMIT-TESTS
   kind: tests
   paths:
@@ -224,10 +238,8 @@
   kind: docs
   paths:
     - README.md
+    - GUIDE.md
+    - REFERENCE.md
     - CONTRIBUTING.md
     - AGENTS.md
-    - guide/book.toml
-    - guide/src/SUMMARY.md
-    - guide/src/control-plane.md
-    - guide/src/subscriptions.md
     - templates/minimal-app/Cargo.toml

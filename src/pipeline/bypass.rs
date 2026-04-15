@@ -1,5 +1,4 @@
 /// BypassReason: products implement this to justify skipping gates.
-/// [SPEC:src/pipeline/bypass.rs]
 pub trait BypassReason: Send + Sync {
     /// Returns the short name identifying this bypass reason.
     fn name(&self) -> &'static str;

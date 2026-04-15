@@ -318,7 +318,7 @@ pub(crate) fn diagnostics<State>(store: &Store<State>) -> StoreDiagnostics {
                 queue_len: 0,
                 capacity: 0,
             }),
-        index_layout: store.index.layout_name(),
+        index_topology: store.index.topology_name(),
         tile_count: store.index.tile_count(),
         open_report: store.open_report.clone(),
     }

@@ -4,7 +4,6 @@ pub mod transition;
 pub use transition::Transition;
 
 /// define_state_machine!: generates a sealed marker trait + zero-sized state structs.
-/// [SPEC:src/typestate/mod.rs — 99 LOC of macros]
 ///
 /// Usage:
 ///   define_state_machine!(LockState { Acquired, Released });
@@ -34,7 +33,6 @@ macro_rules! define_state_machine {
 }
 
 /// define_typestate!: generates a PhantomData wrapper for typed state machines.
-/// [SPEC:src/typestate/mod.rs]
 ///
 /// Usage:
 ///   define_typestate!(Lock<S: LockState> { holder: String });

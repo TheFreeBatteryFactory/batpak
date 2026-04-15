@@ -1,4 +1,4 @@
-use crate::event::{Event, EventSourced, ProjectionInput, RawMsgpackInput, ValueInput};
+use crate::event::{Event, EventSourced, JsonValueInput, ProjectionInput, RawMsgpackInput};
 use crate::store::columnar::CachedProjectionSlot;
 use crate::store::index::DiskPos;
 use crate::store::index::ProjectionReplayPlan;
@@ -41,19 +41,118 @@ pub(crate) enum ProjectionStrategy {
     DirectReplay,
 }
 
+#[derive(Debug, Clone)]
+struct ReplayContext {
+    plan: ProjectionReplayPlan,
+    cache_key: Vec<u8>,
+    watermark: u64,
+    cached_at_us: i64,
+    type_id: TypeId,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedProjection {
+    replay: ReplayContext,
+    group_local_slot: Option<CachedProjectionSlot>,
+    group_local_fresh: bool,
+}
+
+#[derive(Debug, Clone)]
+enum ProjectionPreparation {
+    Empty,
+    Planned(PreparedProjection),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReplayExecution<'a> {
+    entity: &'a str,
+    freshness: &'a Freshness,
+    replay: &'a ReplayContext,
+    started_at: std::time::Instant,
+}
+
+#[derive(Debug, Clone)]
+enum ProjectionDispatch {
+    Empty,
+    GroupLocalHit {
+        slot: CachedProjectionSlot,
+        replay: ReplayContext,
+    },
+    GroupLocalIncremental {
+        slot: CachedProjectionSlot,
+        replay: ReplayContext,
+    },
+    ExternalCacheThenReplay {
+        replay: ReplayContext,
+    },
+    DirectReplay {
+        replay: ReplayContext,
+    },
+}
+
+impl ProjectionDispatch {
+    fn strategy(&self) -> ProjectionStrategy {
+        match self {
+            Self::Empty => ProjectionStrategy::Empty,
+            Self::GroupLocalHit { .. } => ProjectionStrategy::GroupLocalHit,
+            Self::GroupLocalIncremental { .. } => ProjectionStrategy::GroupLocalIncremental,
+            Self::ExternalCacheThenReplay { .. } => ProjectionStrategy::ExternalCacheThenReplay,
+            Self::DirectReplay { .. } => ProjectionStrategy::DirectReplay,
+        }
+    }
+}
+
+impl PreparedProjection {
+    fn dispatch<T: EventSourced>(
+        self,
+        incremental_enabled: bool,
+        cache_is_noop: bool,
+    ) -> ProjectionDispatch {
+        let strategy = compute_strategy(
+            self.group_local_slot.as_ref(),
+            self.group_local_fresh,
+            T::supports_incremental_apply(),
+            incremental_enabled,
+            cache_is_noop,
+        );
+
+        match (strategy, self.group_local_slot) {
+            (ProjectionStrategy::GroupLocalHit, Some(slot)) => ProjectionDispatch::GroupLocalHit {
+                slot,
+                replay: self.replay,
+            },
+            (ProjectionStrategy::GroupLocalIncremental, Some(slot)) => {
+                ProjectionDispatch::GroupLocalIncremental {
+                    slot,
+                    replay: self.replay,
+                }
+            }
+            (ProjectionStrategy::ExternalCacheThenReplay, _) => {
+                ProjectionDispatch::ExternalCacheThenReplay {
+                    replay: self.replay,
+                }
+            }
+            (ProjectionStrategy::DirectReplay, _) => ProjectionDispatch::DirectReplay {
+                replay: self.replay,
+            },
+            (ProjectionStrategy::Empty, _) => ProjectionDispatch::Empty,
+            // `compute_strategy()` only selects group-local strategies when a slot exists.
+            _ => ProjectionDispatch::DirectReplay {
+                replay: self.replay,
+            },
+        }
+    }
+}
+
 /// Pure function: decide which projection strategy to use from known metadata.
 /// No I/O, no side effects — makes the decision tree unit-testable.
 fn compute_strategy(
-    has_replay_plan: bool,
     group_local_slot: Option<&CachedProjectionSlot>,
     is_group_local_fresh: bool,
     supports_incremental: bool,
     incremental_enabled: bool,
     cache_is_noop: bool,
 ) -> ProjectionStrategy {
-    if !has_replay_plan {
-        return ProjectionStrategy::Empty;
-    }
     if group_local_slot.is_some() {
         if is_group_local_fresh {
             return ProjectionStrategy::GroupLocalHit;
@@ -80,7 +179,7 @@ pub(crate) trait ReplayInput: ProjectionInput {
     ) -> Result<Event<Self::Payload>, StoreError>;
 }
 
-impl ReplayInput for ValueInput {
+impl ReplayInput for JsonValueInput {
     fn read_batch(
         reader: &crate::store::reader::Reader,
         positions: &[&DiskPos],
@@ -110,17 +209,6 @@ impl ReplayInput for RawMsgpackInput {
     ) -> Result<Event<Self::Payload>, StoreError> {
         reader.read_event_raw_only(pos)
     }
-}
-
-pub(crate) fn read_projection_events<T>(
-    reader: &crate::store::reader::Reader,
-    positions: &[&DiskPos],
-) -> Result<Vec<Event<<T::Input as ProjectionInput>::Payload>>, StoreError>
-where
-    T: EventSourced,
-    T::Input: ReplayInput,
-{
-    <T::Input as ReplayInput>::read_batch(reader, positions)
 }
 
 pub(crate) fn projection_cache_key<T>(entity: &str) -> Vec<u8>
@@ -154,6 +242,38 @@ where
     T::Input: ReplayInput,
 {
     project_inner::<T, T::Input, State>(store, entity, freshness, None)
+}
+
+pub(crate) fn project_with_generation<T, State>(
+    store: &Store<State>,
+    entity: &str,
+    freshness: &Freshness,
+) -> Result<(u64, Option<T>), StoreError>
+where
+    T: EventSourced + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    T::Input: ReplayInput,
+{
+    let generation = store.entity_generation(entity).unwrap_or(0);
+    let projected = project::<T, State>(store, entity, freshness)?;
+    Ok((generation, projected))
+}
+
+pub(crate) fn project_if_changed<T, State>(
+    store: &Store<State>,
+    entity: &str,
+    last_seen_generation: u64,
+    freshness: &Freshness,
+) -> Result<Option<(u64, Option<T>)>, StoreError>
+where
+    T: EventSourced + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    T::Input: ReplayInput,
+{
+    let current_generation = store.entity_generation(entity).unwrap_or(0);
+    if current_generation == last_seen_generation {
+        return Ok(None);
+    }
+    let projected = project::<T, State>(store, entity, freshness)?;
+    Ok(Some((current_generation, projected)))
 }
 
 /// Same as `project()` but captures per-phase timings into `out`.
@@ -200,106 +320,96 @@ where
 
     // 1a: Build replay plan
     let relevant_kinds = T::relevant_event_kinds();
-    let replay_plan = store.index.projection_replay_plan(entity, relevant_kinds);
-    let has_replay_plan = replay_plan.is_some();
+    let preparation = match store.index.projection_replay_plan(entity, relevant_kinds) {
+        None => ProjectionPreparation::Empty,
+        Some(plan) => {
+            let t_cache_key = std::time::Instant::now();
+            let replay = ReplayContext {
+                watermark: plan.watermark,
+                cached_at_us: store.config.now_us(),
+                type_id: TypeId::of::<T>(),
+                cache_key: projection_cache_key::<T>(entity),
+                plan,
+            };
+            if let Some(t) = timings.as_deref_mut() {
+                t.cache_key_build_us = t_cache_key.elapsed().as_micros() as u64;
+            }
+
+            // Fire prefetch early so I/O overlaps with group-local CPU work.
+            let t_prefetch = std::time::Instant::now();
+            if store.cache.capabilities().supports_prefetch {
+                let predicted_meta = projection::CacheMeta {
+                    watermark: replay.watermark,
+                    cached_at_us: replay.cached_at_us,
+                };
+                if let Err(error) = store.cache.prefetch(&replay.cache_key, predicted_meta) {
+                    tracing::warn!("cache prefetch failed (non-fatal): {error}");
+                }
+            }
+            if let Some(t) = timings.as_deref_mut() {
+                t.prefetch_us = t_prefetch.elapsed().as_micros() as u64;
+            }
+
+            let t_group = std::time::Instant::now();
+            let group_local_slot = store.index.cached_projection(entity, replay.type_id);
+            let group_local_fresh = group_local_slot
+                .as_ref()
+                .map(|slot| match freshness {
+                    Freshness::Consistent => {
+                        slot.watermark == replay.watermark
+                            && slot.generation == replay.plan.generation
+                    }
+                    Freshness::MaybeStale { max_stale_ms } => {
+                        let age_us = replay.cached_at_us.saturating_sub(slot.cached_at_us).max(0);
+                        age_us < (*max_stale_ms as i64) * 1000
+                            && slot.generation == replay.plan.generation
+                            && slot.watermark <= replay.watermark
+                    }
+                })
+                .unwrap_or(false);
+            if let Some(t) = timings.as_deref_mut() {
+                t.group_local_lookup_us = t_group.elapsed().as_micros() as u64;
+            }
+
+            ProjectionPreparation::Planned(PreparedProjection {
+                replay,
+                group_local_slot,
+                group_local_fresh,
+            })
+        }
+    };
     if let Some(t) = timings.as_deref_mut() {
         t.plan_build_us = t_start.elapsed().as_micros() as u64;
     }
 
-    // Early-out metadata (only meaningful when replay plan exists).
-    let (watermark, entity_generation, cached_at_us, type_id, cache_key) =
-        if let Some(ref plan) = replay_plan {
-            let wm = plan.watermark;
-            let gen = plan.generation;
-            let ts = store.config.now_us();
-            let tid = TypeId::of::<T>();
-
-            // 1b: Cache key construction
-            let t_cache_key = std::time::Instant::now();
-            let ck = projection_cache_key::<T>(entity);
-            if let Some(t) = timings.as_deref_mut() {
-                t.cache_key_build_us = t_cache_key.elapsed().as_micros() as u64;
-            }
-            (wm, gen, ts, tid, ck)
-        } else {
-            // Values unused when strategy is Empty; provide defaults to avoid Option overhead.
-            (0, 0, 0, TypeId::of::<T>(), Vec::new())
-        };
-
-    // 1c: Fire prefetch early so I/O overlaps with group-local CPU work.
-    // On warm path (group-local hit), the prefetch is wasted (one stat).
-    // On cold path (group-local miss), the I/O may already be done by the
-    // time execute_external_cache_path needs the result.
-    let t_prefetch = std::time::Instant::now();
-    if has_replay_plan && store.cache.capabilities().supports_prefetch {
-        let predicted_meta = projection::CacheMeta {
-            watermark,
-            cached_at_us,
-        };
-        if let Err(error) = store.cache.prefetch(&cache_key, predicted_meta) {
-            tracing::warn!("cache prefetch failed (non-fatal): {error}");
-        }
-    }
-    if let Some(t) = timings.as_deref_mut() {
-        t.prefetch_us = t_prefetch.elapsed().as_micros() as u64;
-    }
-
-    // 1d: Group-local cache slot + freshness
-    let t_group = std::time::Instant::now();
-    let group_local_slot = if has_replay_plan {
-        store.index.cached_projection(entity, type_id)
-    } else {
-        None
-    };
-    let is_group_local_fresh = group_local_slot
-        .as_ref()
-        .map(|slot| match freshness {
-            Freshness::Consistent => {
-                slot.watermark == watermark && slot.generation == entity_generation
-            }
-            Freshness::MaybeStale { max_stale_ms } => {
-                let age_us = cached_at_us.saturating_sub(slot.cached_at_us).max(0);
-                age_us < (*max_stale_ms as i64) * 1000
-                    && slot.generation == entity_generation
-                    && slot.watermark <= watermark
-            }
-        })
-        .unwrap_or(false);
-    if let Some(t) = timings.as_deref_mut() {
-        t.group_local_lookup_us = t_group.elapsed().as_micros() as u64;
-    }
-
     // ── Phase 2: Compute strategy ─────────────────────────────────────
 
-    let strategy = compute_strategy(
-        has_replay_plan,
-        group_local_slot.as_ref(),
-        is_group_local_fresh,
-        T::supports_incremental_apply(),
-        store.config.index.incremental_projection,
-        store.cache.capabilities().is_noop,
-    );
+    let dispatch = match preparation {
+        ProjectionPreparation::Empty => ProjectionDispatch::Empty,
+        ProjectionPreparation::Planned(prepared) => prepared.dispatch::<T>(
+            store.config.index.incremental_projection,
+            store.cache.capabilities().is_noop,
+        ),
+    };
 
     tracing::debug!(
         target: "batpak::flow",
         flow = "project",
         entity,
-        ?strategy,
+        strategy = ?dispatch.strategy(),
     );
 
     // ── Phase 3: Dispatch ─────────────────────────────────────────────
 
-    match strategy {
-        ProjectionStrategy::Empty => {
+    match dispatch {
+        ProjectionDispatch::Empty => {
             if let Some(t) = timings.as_deref_mut() {
                 t.total_us = t_start.elapsed().as_micros() as u64;
             }
             Ok(None)
         }
 
-        ProjectionStrategy::GroupLocalHit => {
-            // compute_strategy only returns GroupLocalHit when slot is Some + fresh.
-            let slot = group_local_slot.expect("GroupLocalHit requires a slot");
+        ProjectionDispatch::GroupLocalHit { slot, replay } => {
             match serde_json::from_slice::<T>(&slot.bytes) {
                 Ok(value) => {
                     if let Some(t) = timings.as_deref_mut() {
@@ -312,30 +422,26 @@ where
                         entity,
                         "group-local projection cache deserialize failed (falling back): {e}"
                     );
-                    // Fallback: full replay (skip external cache since we already had a slot).
-                    let plan = replay_plan.expect("GroupLocalHit requires a plan");
                     execute_full_replay::<T, I, State>(
                         store,
-                        entity,
-                        &plan,
-                        &cache_key,
-                        watermark,
-                        cached_at_us,
-                        type_id,
-                        t_start,
+                        ReplayExecution {
+                            entity,
+                            freshness,
+                            replay: &replay,
+                            started_at: t_start,
+                        },
                         &mut timings,
                     )
                 }
             }
         }
 
-        ProjectionStrategy::GroupLocalIncremental => {
-            let slot = group_local_slot.expect("GroupLocalIncremental requires a slot");
-            let plan = replay_plan.expect("GroupLocalIncremental requires a plan");
+        ProjectionDispatch::GroupLocalIncremental { slot, replay } => {
             match serde_json::from_slice::<T>(&slot.bytes) {
                 Ok(mut cached_state) => {
                     let cached_watermark = slot.watermark;
-                    for item in plan
+                    for item in replay
+                        .plan
                         .items
                         .iter()
                         .filter(|i| i.global_sequence > cached_watermark)
@@ -346,18 +452,18 @@ where
                     // Store back to both caches.
                     if let Ok(new_bytes) = serde_json::to_vec(&cached_state) {
                         let new_meta = projection::CacheMeta {
-                            watermark,
-                            cached_at_us,
+                            watermark: replay.watermark,
+                            cached_at_us: replay.cached_at_us,
                         };
-                        if let Err(e) = store.cache.put(&cache_key, &new_bytes, new_meta) {
+                        if let Err(e) = store.cache.put(&replay.cache_key, &new_bytes, new_meta) {
                             tracing::warn!("incremental cache put failed: {e}");
                         }
                         let _ = store.index.store_cached_projection(
                             entity,
-                            type_id,
+                            replay.type_id,
                             new_bytes,
-                            watermark,
-                            cached_at_us,
+                            replay.watermark,
+                            replay.cached_at_us,
                         );
                     }
                     if let Some(t) = timings.as_deref_mut() {
@@ -372,67 +478,52 @@ where
                     );
                     execute_full_replay::<T, I, State>(
                         store,
-                        entity,
-                        &plan,
-                        &cache_key,
-                        watermark,
-                        cached_at_us,
-                        type_id,
-                        t_start,
+                        ReplayExecution {
+                            entity,
+                            freshness,
+                            replay: &replay,
+                            started_at: t_start,
+                        },
                         &mut timings,
                     )
                 }
             }
         }
 
-        ProjectionStrategy::ExternalCacheThenReplay => {
-            let plan = replay_plan.expect("ExternalCacheThenReplay requires a plan");
+        ProjectionDispatch::ExternalCacheThenReplay { replay } => {
             execute_external_cache_path::<T, I, State>(
                 store,
-                entity,
-                &plan,
-                &cache_key,
-                freshness,
-                watermark,
-                cached_at_us,
-                type_id,
-                t_start,
+                ReplayExecution {
+                    entity,
+                    freshness,
+                    replay: &replay,
+                    started_at: t_start,
+                },
                 &mut timings,
             )
         }
 
-        ProjectionStrategy::DirectReplay => {
-            let plan = replay_plan.expect("DirectReplay requires a plan");
-            execute_full_replay::<T, I, State>(
-                store,
+        ProjectionDispatch::DirectReplay { replay } => execute_full_replay::<T, I, State>(
+            store,
+            ReplayExecution {
                 entity,
-                &plan,
-                &cache_key,
-                watermark,
-                cached_at_us,
-                type_id,
-                t_start,
-                &mut timings,
-            )
-        }
+                freshness,
+                replay: &replay,
+                started_at: t_start,
+            },
+            &mut timings,
+        ),
     }
 }
 
 /// External cache probe with incremental apply and fresh-hit paths, then fallback to full replay.
 // cold path -- keep out of the hot dispatch to reduce instruction cache pressure
 #[inline(never)]
-// as_micros() -> u64 cannot overflow in practice; extracted helper needs all parent context
-#[allow(clippy::cast_possible_truncation, clippy::too_many_arguments)]
+// as_micros() -> u64 cannot overflow in practice
+#[allow(clippy::cast_possible_truncation)]
 fn execute_external_cache_path<T, I, State>(
     store: &Store<State>,
-    entity: &str,
-    replay_plan: &ProjectionReplayPlan,
-    cache_key: &[u8],
-    freshness: &Freshness,
-    watermark: u64,
-    cached_at_us: i64,
-    type_id: TypeId,
-    t_start: std::time::Instant,
+    execution: ReplayExecution<'_>,
     timings: &mut Option<&mut ProjectionTimings>,
 ) -> Result<Option<T>, StoreError>
 where
@@ -443,13 +534,13 @@ where
     // External cache probe
 
     let t_ext = std::time::Instant::now();
-    match store.cache.get(cache_key) {
+    match store.cache.get(&execution.replay.cache_key) {
         Ok(Some((bytes, meta))) => {
             if let Some(t) = timings.as_deref_mut() {
                 t.external_cache_probe_us = t_ext.elapsed().as_micros() as u64;
             }
-            let is_fresh = match freshness {
-                Freshness::Consistent => meta.watermark == watermark,
+            let is_fresh = match execution.freshness {
+                Freshness::Consistent => meta.watermark == execution.replay.watermark,
                 Freshness::MaybeStale { max_stale_ms } => {
                     let age_us = store
                         .config
@@ -465,7 +556,9 @@ where
                 && store.config.index.incremental_projection
             {
                 let cached_watermark = meta.watermark;
-                let delta_entries: Vec<_> = replay_plan
+                let delta_entries: Vec<_> = execution
+                    .replay
+                    .plan
                     .items
                     .iter()
                     .filter(|item| item.global_sequence > cached_watermark)
@@ -477,27 +570,31 @@ where
                     }
                     if let Ok(new_bytes) = serde_json::to_vec(&cached_state) {
                         let new_meta = projection::CacheMeta {
-                            watermark,
-                            cached_at_us,
+                            watermark: execution.replay.watermark,
+                            cached_at_us: execution.replay.cached_at_us,
                         };
-                        if let Err(e) = store.cache.put(cache_key, &new_bytes, new_meta) {
+                        if let Err(e) =
+                            store
+                                .cache
+                                .put(&execution.replay.cache_key, &new_bytes, new_meta)
+                        {
                             tracing::warn!("incremental cache put failed: {e}");
                         }
                         let _ = store.index.store_cached_projection(
-                            entity,
-                            type_id,
+                            execution.entity,
+                            execution.replay.type_id,
                             new_bytes,
-                            watermark,
-                            cached_at_us,
+                            execution.replay.watermark,
+                            execution.replay.cached_at_us,
                         );
                     }
                     if let Some(t) = timings.as_deref_mut() {
-                        t.total_us = t_start.elapsed().as_micros() as u64;
+                        t.total_us = execution.started_at.elapsed().as_micros() as u64;
                     }
                     return Ok(Some(cached_state));
                 }
                 tracing::warn!(
-                    entity,
+                    execution.entity,
                     "incremental projection deser failed, falling back to full replay"
                 );
             }
@@ -506,14 +603,14 @@ where
                 match serde_json::from_slice::<T>(&bytes) {
                     Ok(value) => {
                         let _ = store.index.store_cached_projection(
-                            entity,
-                            type_id,
+                            execution.entity,
+                            execution.replay.type_id,
                             bytes,
                             meta.watermark,
                             meta.cached_at_us,
                         );
                         if let Some(t) = timings.as_deref_mut() {
-                            t.total_us = t_start.elapsed().as_micros() as u64;
+                            t.total_us = execution.started_at.elapsed().as_micros() as u64;
                         }
                         return Ok(Some(value));
                     }
@@ -537,33 +634,17 @@ where
     }
 
     // Fallback: full replay
-    execute_full_replay::<T, I, State>(
-        store,
-        entity,
-        replay_plan,
-        cache_key,
-        watermark,
-        cached_at_us,
-        type_id,
-        t_start,
-        timings,
-    )
+    execute_full_replay::<T, I, State>(store, execution, timings)
 }
 
 /// Full replay from disk: batch-read events, fold, and store back to cache.
 // cold path -- keep out of the hot dispatch to reduce instruction cache pressure
 #[inline(never)]
-// as_micros() -> u64 cannot overflow in practice; extracted helper needs all parent context
-#[allow(clippy::cast_possible_truncation, clippy::too_many_arguments)]
+// as_micros() -> u64 cannot overflow in practice
+#[allow(clippy::cast_possible_truncation)]
 fn execute_full_replay<T, I, State>(
     store: &Store<State>,
-    entity: &str,
-    replay_plan: &ProjectionReplayPlan,
-    cache_key: &[u8],
-    watermark: u64,
-    cached_at_us: i64,
-    type_id: TypeId,
-    t_start: std::time::Instant,
+    execution: ReplayExecution<'_>,
     timings: &mut Option<&mut ProjectionTimings>,
 ) -> Result<Option<T>, StoreError>
 where
@@ -574,7 +655,9 @@ where
     // Uses the projection's replay-input lane, which always skips Coordinate
     // construction and may leave payloads as raw MessagePack bytes.
     let t_disk = std::time::Instant::now();
-    let positions: Vec<&crate::store::DiskPos> = replay_plan
+    let positions: Vec<&crate::store::DiskPos> = execution
+        .replay
+        .plan
         .items
         .iter()
         .map(|item| &item.disk_pos)
@@ -594,7 +677,7 @@ where
 
     if result.is_none() && !events.is_empty() {
         tracing::debug!(
-            entity,
+            execution.entity,
             event_count = events.len(),
             "projection returned None despite non-empty filtered event stream"
         );
@@ -605,24 +688,24 @@ where
     if let Some(ref value) = result {
         if let Ok(bytes) = serde_json::to_vec(value) {
             let meta = projection::CacheMeta {
-                watermark,
-                cached_at_us,
+                watermark: execution.replay.watermark,
+                cached_at_us: execution.replay.cached_at_us,
             };
-            if let Err(error) = store.cache.put(cache_key, &bytes, meta) {
+            if let Err(error) = store.cache.put(&execution.replay.cache_key, &bytes, meta) {
                 tracing::warn!("cache put failed (non-fatal): {error}");
             }
             let _ = store.index.store_cached_projection(
-                entity,
-                type_id,
+                execution.entity,
+                execution.replay.type_id,
                 bytes,
-                watermark,
-                cached_at_us,
+                execution.replay.watermark,
+                execution.replay.cached_at_us,
             );
         }
     }
     if let Some(t) = timings.as_deref_mut() {
         t.cache_store_us = t_store.elapsed().as_micros() as u64;
-        t.total_us = t_start.elapsed().as_micros() as u64;
+        t.total_us = execution.started_at.elapsed().as_micros() as u64;
     }
 
     Ok(result)
@@ -639,7 +722,7 @@ mod tests {
     struct Counter;
 
     impl EventSourced for Counter {
-        type Input = crate::event::ValueInput;
+        type Input = crate::event::JsonValueInput;
 
         fn apply_event(&mut self, _event: &Event<serde_json::Value>) {}
 
@@ -772,16 +855,6 @@ mod tests {
 
     #[test]
     fn compute_strategy_exhaustive() {
-        // No replay plan -> Empty regardless of other inputs
-        assert_eq!(
-            compute_strategy(false, None, false, false, false, false),
-            ProjectionStrategy::Empty,
-        );
-        assert_eq!(
-            compute_strategy(false, None, true, true, true, true),
-            ProjectionStrategy::Empty,
-        );
-
         let slot = CachedProjectionSlot {
             bytes: vec![],
             watermark: 42,
@@ -791,57 +864,61 @@ mod tests {
 
         // Slot present + fresh -> GroupLocalHit
         assert_eq!(
-            compute_strategy(true, Some(&slot), true, false, false, false),
+            compute_strategy(Some(&slot), true, false, false, false),
             ProjectionStrategy::GroupLocalHit,
         );
         assert_eq!(
-            compute_strategy(true, Some(&slot), true, true, true, true),
+            compute_strategy(Some(&slot), true, true, true, true),
             ProjectionStrategy::GroupLocalHit,
         );
 
         // Slot present + stale + incremental supported + enabled -> GroupLocalIncremental
         assert_eq!(
-            compute_strategy(true, Some(&slot), false, true, true, false),
+            compute_strategy(Some(&slot), false, true, true, false),
             ProjectionStrategy::GroupLocalIncremental,
         );
         assert_eq!(
-            compute_strategy(true, Some(&slot), false, true, true, true),
+            compute_strategy(Some(&slot), false, true, true, true),
             ProjectionStrategy::GroupLocalIncremental,
+        );
+
+        // Slot present + stale + incremental disabled -> falls through to cache check
+        assert_eq!(
+            compute_strategy(Some(&slot), false, true, false, false),
+            ProjectionStrategy::ExternalCacheThenReplay,
+        );
+        assert_eq!(
+            compute_strategy(Some(&slot), false, true, false, true),
+            ProjectionStrategy::DirectReplay,
         );
 
         // Slot present + stale + incremental NOT supported -> falls through to cache check
         assert_eq!(
-            compute_strategy(true, Some(&slot), false, false, true, false),
+            compute_strategy(Some(&slot), false, false, false, false),
             ProjectionStrategy::ExternalCacheThenReplay,
         );
         assert_eq!(
-            compute_strategy(true, Some(&slot), false, true, false, false),
+            compute_strategy(Some(&slot), false, false, true, false),
             ProjectionStrategy::ExternalCacheThenReplay,
         );
         assert_eq!(
-            compute_strategy(true, Some(&slot), false, false, false, false),
-            ProjectionStrategy::ExternalCacheThenReplay,
-        );
-
-        // Slot present + stale + incremental NOT supported + noop cache -> DirectReplay
-        assert_eq!(
-            compute_strategy(true, Some(&slot), false, false, false, true),
+            compute_strategy(Some(&slot), false, false, false, true),
             ProjectionStrategy::DirectReplay,
         );
 
         // No slot + noop cache -> DirectReplay
         assert_eq!(
-            compute_strategy(true, None, false, false, false, true),
+            compute_strategy(None, false, false, false, true),
             ProjectionStrategy::DirectReplay,
         );
 
         // No slot + real cache -> ExternalCacheThenReplay
         assert_eq!(
-            compute_strategy(true, None, false, false, false, false),
+            compute_strategy(None, false, false, false, false),
             ProjectionStrategy::ExternalCacheThenReplay,
         );
         assert_eq!(
-            compute_strategy(true, None, false, true, true, false),
+            compute_strategy(None, false, true, true, false),
             ProjectionStrategy::ExternalCacheThenReplay,
         );
     }

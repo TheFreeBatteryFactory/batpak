@@ -25,6 +25,7 @@
 
 use batpak::outcome::wait::{CompensationAction, WaitCondition};
 use batpak::prelude::*;
+use serde::Serialize;
 
 fn golden_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
@@ -68,6 +69,12 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+#[derive(Serialize)]
+struct BatchPayloadShape {
+    alpha: u8,
+    beta: u16,
+}
+
 // --- Coordinate round-trip ---
 
 #[test]
@@ -84,6 +91,29 @@ fn coordinate_msgpack_round_trip() {
     );
 
     check_or_update_golden("coordinate_v1.hex", &bytes);
+}
+
+#[test]
+fn batch_append_item_uses_named_msgpack_payloads() {
+    let coord = Coordinate::new("entity:test", "scope:test").expect("valid coord");
+    let payload = BatchPayloadShape { alpha: 7, beta: 42 };
+    let item = BatchAppendItem::new(
+        coord,
+        EventKind::custom(0xF, 9),
+        &payload,
+        AppendOptions::default(),
+        CausationRef::None,
+    )
+    .expect("serialize batch payload");
+    let expected = rmp_serde::to_vec_named(&payload).expect("serialize expected named payload");
+
+    assert_eq!(
+        item.payload_bytes, expected,
+        "WIRE FORMAT: BatchAppendItem payload encoding drifted from named MessagePack.\n\
+         Investigate: src/store/contracts.rs BatchAppendItem::new.\n\
+         Common causes: rmp_serde::to_vec used instead of to_vec_named.\n\
+         Run: cargo test --test wire_format batch_append_item_uses_named_msgpack_payloads"
+    );
 }
 
 // --- EventHeader ---

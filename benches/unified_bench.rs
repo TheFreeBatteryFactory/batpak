@@ -1,10 +1,9 @@
-//! Unified benchmarks for Tier 1+2 enhancements.
-//! Group commit, IndexLayout (AoS/SoA/AoSoA), incremental projection, mmap reads.
+//! Unified benchmarks for group commit, topology choices, and incremental replay.
 
 mod common;
 
 use batpak::prelude::*;
-use batpak::store::{Freshness, Store, StoreConfig, SyncMode};
+use batpak::store::{Freshness, IndexTopology, Store, StoreConfig, SyncMode};
 use common::{apply_profile, throughput_elements, BenchProfile};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use tempfile::TempDir;
@@ -19,7 +18,7 @@ struct BenchCounter {
 }
 
 impl EventSourced for BenchCounter {
-    type Input = batpak::prelude::ValueInput;
+    type Input = batpak::prelude::JsonValueInput;
 
     fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
         if events.is_empty() {
@@ -59,10 +58,10 @@ fn open_store_with_batch(batch: u32) -> (Store, TempDir, Coordinate, EventKind) 
     (store, dir, coord, kind)
 }
 
-fn open_store_with_layout(layout: IndexLayout) -> (Store, TempDir) {
+fn open_store_with_topology(topology: IndexTopology) -> (Store, TempDir) {
     let dir = TempDir::new().expect("temp dir");
     let config = StoreConfig::new(dir.path())
-        .with_index_layout(layout)
+        .with_index_topology(topology)
         .with_sync_every_n_events(10_000);
     (Store::open(config).expect("open"), dir)
 }
@@ -111,25 +110,24 @@ fn bench_group_commit(c: &mut Criterion) {
 }
 
 // ===========================================================================
-// INDEX LAYOUT: AoS vs SoA vs AoSoA8 by_fact query speed
+// INDEX TOPOLOGY: aos vs scan vs tiled by_fact query speed
 // ===========================================================================
 
-fn bench_layout_by_fact(c: &mut Criterion) {
-    let mut group = c.benchmark_group("layout_by_fact");
+fn bench_topology_by_fact(c: &mut Criterion) {
+    let mut group = c.benchmark_group("topology_by_fact");
     apply_profile(&mut group, BenchProfile::Quick);
 
     let kind = EventKind::custom(0xF, 1);
     let coord = Coordinate::new("bench:layout", "bench:scope").expect("coord");
 
-    // Populate three stores with different layouts
-    let layouts: Vec<(&str, IndexLayout)> = vec![
-        ("aos", IndexLayout::AoS),
-        ("soa", IndexLayout::SoA),
-        ("aosoa8", IndexLayout::AoSoA8),
+    let topologies: Vec<(&str, IndexTopology)> = vec![
+        ("aos", IndexTopology::aos()),
+        ("scan", IndexTopology::scan()),
+        ("tiled", IndexTopology::tiled()),
     ];
 
-    for (name, layout) in &layouts {
-        let (store, _dir) = open_store_with_layout(layout.clone());
+    for (name, topology) in &topologies {
+        let (store, _dir) = open_store_with_topology(topology.clone());
         for i in 0u32..1_000 {
             store
                 .append(&coord, kind, &serde_json::json!({"i": i}))
@@ -146,7 +144,7 @@ fn bench_layout_by_fact(c: &mut Criterion) {
             warmup.len(),
             1_000,
             "BENCH SETUP: expected 1000 events from by_fact before \
-             measurement, got {}. Layout: {name}.",
+             measurement, got {}. Topology: {name}.",
             warmup.len()
         );
 
@@ -232,7 +230,7 @@ fn bench_incremental_projection(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_group_commit,
-    bench_layout_by_fact,
+    bench_topology_by_fact,
     bench_incremental_projection
 );
 criterion_main!(benches);

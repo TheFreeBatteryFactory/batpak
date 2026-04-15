@@ -1,4 +1,5 @@
 .claude/
+.codex/
 /target/
 /Cargo.lock
 /.artifacts/
@@ -8,6 +9,7 @@
 /guide/book/
 *.profraw
 *.log
+/ci_output.txt
 *.swp
 *.swo
 *~

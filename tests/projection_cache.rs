@@ -278,7 +278,7 @@ mod native_tests {
         count: u32,
     }
     impl EventSourced for Counter {
-        type Input = batpak::prelude::ValueInput;
+        type Input = batpak::prelude::JsonValueInput;
 
         fn from_events(events: &[batpak::prelude::Event<serde_json::Value>]) -> Option<Self> {
             Some(Counter {
@@ -424,7 +424,7 @@ struct MaybeStaleCounter {
     count: u32,
 }
 impl batpak::prelude::EventSourced for MaybeStaleCounter {
-    type Input = batpak::prelude::ValueInput;
+    type Input = batpak::prelude::JsonValueInput;
 
     fn from_events(events: &[batpak::prelude::Event<serde_json::Value>]) -> Option<Self> {
         Some(MaybeStaleCounter {

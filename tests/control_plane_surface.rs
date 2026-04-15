@@ -6,8 +6,8 @@ use batpak::store::cursor::{CursorWorkerAction, CursorWorkerConfig, CursorWorker
 use batpak::store::subscription::ScanSubscriptionOps;
 use batpak::store::Freshness;
 use batpak::store::{
-    AppendOptions, AppendTicket, BatchAppendItem, BatchAppendTicket, Notification, ReadOnly, Store,
-    StoreConfig, StoreError, SyncConfig, ViewConfig, VisibilityFence, WriterPressure,
+    AppendOptions, AppendTicket, BatchAppendItem, BatchAppendTicket, IndexTopology, Notification,
+    ReadOnly, Store, StoreConfig, StoreError, SyncConfig, VisibilityFence, WriterPressure,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -22,7 +22,7 @@ struct CounterProjection {
 }
 
 impl EventSourced for CounterProjection {
-    type Input = batpak::prelude::ValueInput;
+    type Input = batpak::prelude::JsonValueInput;
 
     fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
         if events.is_empty() {
@@ -70,12 +70,7 @@ fn control_plane_surface_smoke() {
     let config = test_config(&dir)
         .with_writer_pressure_retry_threshold_pct(60)
         .with_enable_mmap_index(true)
-        .with_views(
-            ViewConfig::none()
-                .with_soa(true)
-                .with_entity_groups(true)
-                .with_tiles64(true),
-        );
+        .with_index_topology(IndexTopology::all());
     let store = Store::open(config).expect("open store");
 
     let coord = Coordinate::new("entity:control", "scope:test").expect("coord");
@@ -374,7 +369,7 @@ fn control_plane_surface_smoke() {
     };
     let visible_before_close = store.by_fact(kind).len();
     store.close().expect("close");
-    let _all_views = ViewConfig::all();
+    let _all_topology = IndexTopology::all();
     let native_cache_dir = dir.path().join("native-cache");
     let _native_ro: Store<ReadOnly> =
         Store::open_read_only_with_native_cache(test_config(&dir), &native_cache_dir)
@@ -513,6 +508,39 @@ fn fence_drop_without_commit_auto_cancels() {
     );
 
     store.close().expect("close store");
+}
+
+#[test]
+fn shutdown_with_live_fence_cancels_pending_fence_work() {
+    let dir = TempDir::new().expect("temp dir");
+    let store = Store::open(test_config(&dir)).expect("open store");
+    let coord = Coordinate::new("entity:fence-shutdown", "scope:test").expect("coord");
+    let kind = KIND_COUNTER;
+
+    let ticket = {
+        let fence = store.begin_visibility_fence().expect("begin fence");
+        let ticket = fence
+            .submit(&coord, kind, &serde_json::json!({"fenced": "shutdown"}))
+            .expect("submit fenced work");
+        let _fence = std::mem::ManuallyDrop::new(fence);
+        ticket
+    };
+
+    store.close().expect("close store");
+
+    assert!(
+        matches!(ticket.wait(), Err(StoreError::VisibilityFenceCancelled)),
+        "PROPERTY: shutting down with a still-live visibility fence must cancel its pending work \
+         rather than silently committing or hanging."
+    );
+
+    let reopened = Store::open(test_config(&dir)).expect("reopen store");
+    assert_eq!(
+        reopened.by_fact(kind).len(),
+        0,
+        "PROPERTY: shutdown-cancelled fence writes must stay invisible after reopen."
+    );
+    reopened.close().expect("close reopened");
 }
 
 #[test]

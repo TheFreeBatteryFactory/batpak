@@ -16,7 +16,6 @@ pub enum BatchStage {
 }
 
 /// StoreError: every error the store can produce.
-/// [SPEC:src/store/error.rs — StoreError variants]
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum StoreError {

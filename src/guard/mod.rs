@@ -9,7 +9,6 @@ pub use receipt::Receipt;
 /// `Gate<Ctx>`: a predicate that evaluates a context and either permits or denies.
 /// Gates are PREDICATES, not transformers. No I/O, no mutation, pure.
 /// Ctx is product-defined. Library is generic over it.
-/// [SPEC:src/guard/mod.rs]
 pub trait Gate<Ctx>: Send + Sync {
     /// Returns a unique, human-readable identifier for this gate.
     fn name(&self) -> &'static str;

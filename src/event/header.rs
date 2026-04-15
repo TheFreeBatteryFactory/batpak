@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 
 /// EventHeader: metadata for every event. Store generates this — users don't call new directly.
 /// repr(C) for deterministic field ordering (NOT a wire format — msgpack handles serialization).
-/// [SPEC:src/event/header.rs]
 #[repr(C)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventHeader {

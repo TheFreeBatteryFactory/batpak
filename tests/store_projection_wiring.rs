@@ -69,7 +69,7 @@ fn project_calls_prefetch_only_when_supported() {
     }
 
     impl EventSourced for Counter {
-        type Input = batpak::prelude::ValueInput;
+        type Input = batpak::prelude::JsonValueInput;
 
         fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
             Some(Counter {

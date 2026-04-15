@@ -1083,6 +1083,7 @@ fn batch_publish_atomicity_concurrent_reader_sees_zero_or_all() {
     use std::sync::atomic::{AtomicBool, Ordering as MemOrd};
     use std::sync::Arc;
     use std::thread;
+    use std::time::{Duration, Instant};
 
     let tmp = tempfile::tempdir().expect("create temp dir for concurrent atomicity test");
     let coord = Coordinate::new("concurrent_atom", "scope").expect("valid coordinate");
@@ -1100,12 +1101,14 @@ fn batch_publish_atomicity_concurrent_reader_sees_zero_or_all() {
     }
 
     let stop = Arc::new(AtomicBool::new(false));
+    let baseline_seen = Arc::new(AtomicBool::new(false));
     let region = Region::entity("concurrent_atom");
 
     // Reader thread: hammer query() until told to stop, recording every
     // distinct count we observe along the way.
     let r_store = Arc::clone(&store);
     let r_stop = Arc::clone(&stop);
+    let r_baseline_seen = Arc::clone(&baseline_seen);
     let r_region = region.clone();
     let reader = thread::Builder::new()
         .name("atomic-batch-reader".into())
@@ -1114,13 +1117,29 @@ fn batch_publish_atomicity_concurrent_reader_sees_zero_or_all() {
             while !r_stop.load(MemOrd::Acquire) {
                 let count = r_store.query(&r_region).len();
                 observations.insert(count);
+                if count == pre_count {
+                    r_baseline_seen.store(true, MemOrd::Release);
+                }
             }
             // One final read after the stop signal so we always include the
             // post-writer terminal state in the observations.
-            observations.insert(r_store.query(&r_region).len());
+            let final_count = r_store.query(&r_region).len();
+            observations.insert(final_count);
+            if final_count == pre_count {
+                r_baseline_seen.store(true, MemOrd::Release);
+            }
             observations
         })
         .expect("spawn reader thread");
+
+    let baseline_deadline = Instant::now() + Duration::from_secs(1);
+    while !baseline_seen.load(MemOrd::Acquire) && Instant::now() < baseline_deadline {
+        thread::yield_now();
+    }
+    assert!(
+        baseline_seen.load(MemOrd::Acquire),
+        "PROPERTY: reader must observe the pre-batch baseline before the writer starts hammering batches."
+    );
 
     // Writer thread: many back-to-back batch appends. Run on this thread so
     // we don't have to deal with sharing the Store as Arc both ways.

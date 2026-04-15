@@ -16,7 +16,6 @@ exclude = [
     ".github/**",
     "AGENTS.md",
     "docs/**",
-    "guide/**",
     "scripts/**",
     "templates/**",
     "tools/**",
@@ -64,6 +63,9 @@ fastrand = "2"
 serial_test = "3.4.0"
 loom = "0.7"
 tracing-subscriber = { version = "0.3", features = ["fmt", "std"] }
+
+[build-dependencies]
+syn = { version = "2", features = ["full", "visit"] }
 
 [lints.clippy]
 dbg_macro = "deny"
@@ -114,6 +116,26 @@ harness = false
 
 [[bench]]
 name = "batch_throughput"
+harness = false
+
+[[bench]]
+name = "writer_staging"
+harness = false
+
+[[bench]]
+name = "writer_batch_staging"
+harness = false
+
+[[bench]]
+name = "replay_lanes"
+harness = false
+
+[[bench]]
+name = "topology_matrix"
+harness = false
+
+[[bench]]
+name = "topology_write_cost"
 harness = false
 
 # Profile settings (NOT in .cargo/config.toml — they're ignored there)

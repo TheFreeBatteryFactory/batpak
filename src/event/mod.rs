@@ -11,15 +11,14 @@ pub use hash::HashChain;
 pub use header::EventHeader;
 pub use kind::EventKind;
 pub use sourcing::{
-    EventSourced, ProjectionEvent, ProjectionInput, ProjectionMode, ProjectionPayload,
-    RawMsgpackInput, Reactive, ValueInput,
+    EventSourced, JsonValueInput, ProjectionEvent, ProjectionInput, ProjectionPayload,
+    RawMsgpackInput, Reactive, ReplayLane,
 };
 
 use crate::coordinate::Coordinate;
 use serde::{Deserialize, Serialize};
 
 /// `Event<P>`: header + payload + optional hash chain.
-/// [SPEC:src/event/mod.rs]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Event<P> {
     /// Metadata describing the event's identity, timing, and position.
@@ -32,7 +31,7 @@ pub struct Event<P> {
 
 /// `StoredEvent<P>`: what store.get() returns. Coordinate + Event.
 /// store.get() returns StoredEvent<serde_json::Value> because segments are
-/// schema-free MessagePack. [SPEC:src/event/mod.rs]
+/// schema-free MessagePack.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredEvent<P> {
     /// Stream coordinate (entity + segment) where this event is stored.

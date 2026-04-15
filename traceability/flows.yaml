@@ -64,7 +64,7 @@
     - ART-STORE-PROJECTION-FLOW
     - ART-UNIFIED-TESTS
 - id: FLOW-BATCH-APPEND
-  summary: Atomic batch append validates limits, acquires entity locks in sorted order, writes BEGIN marker, event frames, COMMIT marker, fsyncs, then atomically publishes to in-memory index.
+  summary: Atomic batch append validates limits, preflights batch idempotency, writes BEGIN marker, event frames, COMMIT marker, fsyncs, then atomically publishes to the in-memory index.
   artifacts:
     - ART-STORE-MOD
     - ART-STORE-CONTRACTS

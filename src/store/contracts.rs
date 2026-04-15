@@ -43,7 +43,7 @@ impl BatchAppendItem {
         causation: CausationRef,
     ) -> Result<Self, StoreError> {
         let payload_bytes =
-            rmp_serde::to_vec(payload).map_err(|e| StoreError::Serialization(Box::new(e)))?;
+            rmp_serde::to_vec_named(payload).map_err(|e| StoreError::Serialization(Box::new(e)))?;
         Ok(Self {
             coord,
             kind,
@@ -66,7 +66,6 @@ pub struct AppendReceipt {
 }
 
 /// AppendOptions: CAS, idempotency, custom correlation/causation.
-/// [SPEC:src/store/contracts.rs — AppendOptions]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AppendOptions {
     /// Expected entity sequence for compare-and-swap; `None` skips the CAS check.
@@ -78,7 +77,7 @@ pub struct AppendOptions {
     /// ID of the event that caused this append; `None` for root-cause events.
     pub causation_id: Option<u128>,
     /// EventHeader flags (FLAG_REQUIRES_ACK, FLAG_TRANSACTIONAL, FLAG_REPLAY).
-    /// Default: 0 (no flags). [SPEC:src/event/header.rs — Flag bit constants]
+    /// Default: 0 (no flags); uses the same bit layout as `EventHeader::flags`.
     pub flags: u8,
 }
 

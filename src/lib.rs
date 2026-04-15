@@ -67,7 +67,6 @@ pub mod store;
 pub mod typestate;
 /// Module declarations in DEPENDENCY ORDER:
 /// wire → coordinate → outcome → event → guard → pipeline → store → typestate → id → prelude
-/// [SPEC:src/lib.rs — Module declarations in DEPENDENCY ORDER]
 /// Serde serialization helpers.
 pub mod wire; // serde helpers — no deps, must come first
 

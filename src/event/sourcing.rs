@@ -8,7 +8,7 @@ mod sealed {
 /// Internal-friendly marker describing which replay lane the store should use
 /// for a projection. This stays tiny and data-oriented on purpose.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProjectionMode {
+pub enum ReplayLane {
     /// Decode projection payloads into `serde_json::Value`.
     Value,
     /// Keep projection payloads as raw MessagePack bytes.
@@ -24,18 +24,18 @@ pub trait ProjectionInput: sealed::Sealed + Send + Sync + 'static {
     /// Payload type produced by the store for this replay mode.
     type Payload: Clone + Send + Sync + 'static;
     /// Replay lane selected for this projection input type.
-    const MODE: ProjectionMode;
+    const MODE: ReplayLane;
 }
 
 /// Default projection replay mode: payloads are decoded into `serde_json::Value`.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct ValueInput;
+pub struct JsonValueInput;
 
-impl sealed::Sealed for ValueInput {}
+impl sealed::Sealed for JsonValueInput {}
 
-impl ProjectionInput for ValueInput {
+impl ProjectionInput for JsonValueInput {
     type Payload = serde_json::Value;
-    const MODE: ProjectionMode = ProjectionMode::Value;
+    const MODE: ReplayLane = ReplayLane::Value;
 }
 
 /// Raw replay mode: payloads remain in their original MessagePack bytes.
@@ -46,7 +46,7 @@ impl sealed::Sealed for RawMsgpackInput {}
 
 impl ProjectionInput for RawMsgpackInput {
     type Payload = Vec<u8>;
-    const MODE: ProjectionMode = ProjectionMode::RawMsgpack;
+    const MODE: ReplayLane = ReplayLane::RawMsgpack;
 }
 
 /// Convenience alias for the payload shape used by a projection type.
@@ -58,7 +58,7 @@ pub type ProjectionEvent<T> = Event<ProjectionPayload<T>>;
 /// `EventSourced`: backward-looking fold. Replay events to reconstruct state.
 ///
 /// The associated `Input` selects the replay decode lane. The default and
-/// most ergonomic choice is [`ValueInput`], which preserves the current
+/// most ergonomic choice is [`JsonValueInput`], which preserves the current
 /// `serde_json::Value` projection behavior. Implement [`RawMsgpackInput`] only
 /// when the projection benefits from operating directly on raw MessagePack
 /// payload bytes.
@@ -98,7 +98,6 @@ pub trait EventSourced: Sized {
 
 /// `Reactive<P>`: forward-looking counterpart. See event → maybe emit derived events.
 /// Products compose: subscribe + react + append (7 lines of glue).
-/// [SPEC:src/event/sourcing.rs]
 ///
 /// # Manual Glue Pattern
 /// ```no_run

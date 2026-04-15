@@ -3,7 +3,7 @@
 mod common;
 
 use batpak::prelude::*;
-use batpak::store::{Freshness, Store, StoreConfig, ViewConfig};
+use batpak::store::{Freshness, IndexTopology, Store, StoreConfig};
 use common::{apply_profile, throughput_elements, BenchProfile};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use tempfile::TempDir;
@@ -14,7 +14,7 @@ struct Counter {
 }
 
 impl EventSourced for Counter {
-    type Input = batpak::prelude::ValueInput;
+    type Input = batpak::prelude::JsonValueInput;
 
     fn apply_event(&mut self, _event: &Event<serde_json::Value>) {
         self.count += 1;
@@ -156,7 +156,7 @@ fn bench_projection_lanes(c: &mut Criterion) {
 
     let replay_dir = TempDir::new().expect("create replay temp dir");
     let replay_config = StoreConfig::new(replay_dir.path())
-        .with_views(ViewConfig::none())
+        .with_index_topology(IndexTopology::aos())
         .with_enable_checkpoint(false)
         .with_enable_mmap_index(false);
     let replay_store = Store::open(replay_config).expect("open replay store");

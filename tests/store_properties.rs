@@ -579,7 +579,7 @@ struct StrictCounter {
 }
 
 impl EventSourced for StrictCounter {
-    type Input = batpak::prelude::ValueInput;
+    type Input = batpak::prelude::JsonValueInput;
 
     fn from_events(events: &[Event<serde_json::Value>]) -> Option<Self> {
         if events.is_empty() {

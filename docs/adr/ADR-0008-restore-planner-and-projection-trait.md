@@ -25,7 +25,7 @@ on-load summary synthesis.
 ### Projection Trait
 `EventSourced<P>` replaced with `EventSourced` using an associated
 `Input: ProjectionInput` type. Two built-in input modes:
-- `ValueInput`: payload decoded to `serde_json::Value` (default)
+- `JsonValueInput`: payload decoded to `serde_json::Value` (default)
 - `RawMsgpackInput`: payload stays as raw `Vec<u8>` bytes
 
 The `ProjectionInput` trait is sealed — no external implementations.
