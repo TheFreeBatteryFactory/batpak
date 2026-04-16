@@ -1513,3 +1513,37 @@ fn batch_wall_ms_monotonic_under_regressing_clock() {
          invariant by inserting batch items at a lower BTreeMap key."
     );
 }
+
+#[test]
+fn outbox_stage_with_causation_links_item_to_prior_item() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let store = Store::open(StoreConfig::new(tmp.path())).expect("open store");
+    let coord = Coordinate::new("entity:causation", "scope:test").expect("valid coordinate");
+
+    let receipts = store
+        .outbox()
+        .stage_with_causation(
+            coord.clone(),
+            EventKind::DATA,
+            &serde_json::json!({"step": 0}),
+            CausationRef::None,
+        )
+        .expect("stage first item")
+        .stage_with_causation(
+            coord.clone(),
+            EventKind::DATA,
+            &serde_json::json!({"step": 1}),
+            CausationRef::PriorItem(0),
+        )
+        .expect("stage second item with causation link")
+        .flush()
+        .expect("flush outbox");
+
+    assert_eq!(receipts.len(), 2);
+    let second = store.get(receipts[1].event_id).expect("fetch second event");
+    assert_eq!(
+        second.event.header.causation_id,
+        Some(receipts[0].event_id),
+        "second item causation_id must resolve to first item event_id"
+    );
+}

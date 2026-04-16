@@ -17,7 +17,7 @@ pub enum CausationRef {
 
 impl CausationRef {
     /// Returns true when causation should fall back to the append options field.
-    pub const fn uses_options_fallback(self) -> bool {
+    pub(crate) const fn uses_options_fallback(self) -> bool {
         matches!(self, Self::None)
     }
 
