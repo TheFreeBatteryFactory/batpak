@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! [MAGIC: b"FBATCK"]   — 6 bytes, identifies the file type
-//! [version: u16 LE]    — v2 fallback or v3 current
+//! [version: u16 LE]    — v2/v3 fallback or v4 current
 //! [crc32: u32 LE]      — CRC32 of the msgpack body that follows
 //! [msgpack body]        — versioned checkpoint body serialised via rmp_serde
 //! ```
@@ -720,11 +720,11 @@ mod tests {
         assert_eq!(routing.entry_count, 16);
         assert!(
             !routing.entity_runs.is_empty(),
-            "v3 checkpoints must persist entity-run summaries"
+            "v4 checkpoints must persist entity-run summaries"
         );
         assert!(
             !routing.chunks.is_empty(),
-            "v3 checkpoints must persist chunk summaries"
+            "v4 checkpoints must persist chunk summaries"
         );
     }
 
