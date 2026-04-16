@@ -101,6 +101,9 @@ Compatibility stays additive:
 - checkpoint v3 loads with root `lane=0` / `depth=0`
 - mmap v1/v2 loads with root `lane=0` / `depth=0`
 
+The full operator procedure for upgrades, mixed-version fleets, and rollback
+posture lives in [`REFERENCE.md`](REFERENCE.md).
+
 Caller control stays intentionally narrow: `AppendPositionHint` only supplies
 `lane` and `depth`. The writer still owns `wall_ms`, `counter`, and `sequence`.
 

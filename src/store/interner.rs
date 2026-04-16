@@ -56,6 +56,15 @@ impl InternId {
         self.0
     }
 
+    /// Returns the ID as a `usize` index suitable for table lookups.
+    ///
+    /// The inner `u32` is a 1-based index; this cast is always lossless because
+    /// `u32::MAX` (≈4 B) is well within `usize` range on all supported targets.
+    #[inline]
+    pub(crate) fn to_usize(self) -> usize {
+        usize::try_from(self.0).expect("u32 intern IDs fit in usize on supported targets")
+    }
+
     /// Returns the sentinel ID (slot 0, empty string). Used as a placeholder
     /// when the interner is not available (e.g., in test constructors).
     #[cfg(test)]
@@ -207,7 +216,7 @@ impl StringInterner {
     #[cfg(test)]
     pub(crate) fn resolve(&self, id: InternId) -> Option<Arc<str>> {
         let rev = self.reverse.read();
-        rev.get(id.0 as usize).map(Arc::clone)
+        rev.get(id.to_usize()).map(Arc::clone)
     }
 
     /// Return the number of interned strings, **excluding** the sentinel.

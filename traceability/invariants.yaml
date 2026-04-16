@@ -119,6 +119,13 @@
   artifacts:
     - ART-STORE-PROJECTION-FLOW
     - ART-UNIFIED-TESTS
+- id: INV-REPLAY-LANE-SELECTION
+  statement: Projection replay lane selection stays sealed to the built-in `ProjectionInput` modes, with `ReplayLane` naming the live default-vs-raw split and `RawMsgpackInput` remaining a real throughput lane rather than doc-only decoration.
+  artifacts:
+    - ART-EVENT-SOURCING
+    - ART-PROJECTION-TESTS
+    - ART-REPLAY-TESTS
+    - ART-ADR-RESTORE-PLANNER
 - id: INV-BATCH-ATOMIC-VISIBILITY
   statement: Batch append events are invisible to queries, cursors, and subscriptions until the entire batch is committed, fsynced, and atomically published via SequenceGate::publish(). All read methods filter by visible_sequence. No partial batch is ever observable. Proved by loom model and concurrent-read integration test.
   artifacts:
@@ -126,12 +133,19 @@
     - ART-STORE-INDEX
     - ART-STORE-WRITER
     - ART-BATCH-TESTS
+    - ART-SUBSCRIPTION-TESTS
     - ART-DETERMINISTIC-CONCURRENCY-TESTS
 - id: INV-BATCH-CRASH-RECOVERY
   statement: Incomplete batches (BEGIN without matching COMMIT) are discarded during cold-start segment scan. Cross-segment batch state persists across segment boundaries to handle batches spanning rotation points.
   artifacts:
     - ART-STORE-READER
     - ART-BATCH-TESTS
+- id: INV-PREPARED-BATCH-STAGING-EQUIVALENCE
+  statement: Prepared-batch staging and fresh batch construction must commit, reopen, and publish the same runtime-visible outcomes; reused staged packets may optimize allocation but must not alter persisted or replayed semantics.
+  artifacts:
+    - ART-STORE-WRITER
+    - ART-STORE-CONTRACTS
+    - ART-BATCH-STAGING-REGRESSION
 - id: INV-POSITION-HINT-PERSISTENCE
   statement: Append position hints may supply only DAG lane/depth; writer-owned HLC wall/counter and sequence remain authoritative, and non-root lane/depth must survive live commit, mmap reopen, checkpoint reopen, SIDX-backed reconstruction, and full rebuild.
   artifacts:
@@ -142,6 +156,16 @@
     - ART-STORE-CHECKPOINT
     - ART-STORE-MMAP-INDEX
     - ART-DAG-POSITION-HINT-TESTS
+    - ART-ADR-POSITION-HINTS
+    - ART-DX-DOCS
+    - ART-RELEASE-HISTORY
+- id: INV-SIDX-TIMESTAMP-US-APPROXIMATION
+  statement: SIDX-accelerated cold start reconstructs timestamp_us from persisted wall_ms to the nearest millisecond; this best-effort value is suitable for age/display APIs but is not a sub-millisecond ordering contract.
+  artifacts:
+    - ART-EVENT-SOURCING
+    - ART-STORE-SIDX
+    - ART-STORE-REBUILD
+    - ART-DX-DOCS
 - id: INV-FAULT-INJECT-GATED
   statement: Fault injection infrastructure (InjectionPoint, FaultInjector trait, maybe_inject hooks) is compiled only under the dangerous-test-hooks feature gate and has zero cost in production builds.
   artifacts:

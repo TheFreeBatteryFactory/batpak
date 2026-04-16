@@ -124,7 +124,13 @@ impl<'a> Outbox<'a> {
         kind: EventKind,
         payload: &impl Serialize,
     ) -> Result<&mut Self, StoreError> {
-        self.stage_with_options(coord, kind, payload, AppendOptions::default())
+        self.stage_with_options_and_causation(
+            coord,
+            kind,
+            payload,
+            AppendOptions::default(),
+            CausationRef::None,
+        )
     }
 
     /// Stage a new batch item with explicit append options.
@@ -139,7 +145,44 @@ impl<'a> Outbox<'a> {
         payload: &impl Serialize,
         options: AppendOptions,
     ) -> Result<&mut Self, StoreError> {
-        let item = BatchAppendItem::new(coord, kind, payload, options, CausationRef::None)?;
+        self.stage_with_options_and_causation(coord, kind, payload, options, CausationRef::None)
+    }
+
+    /// Stage a new batch item with explicit causation and default append options.
+    ///
+    /// # Errors
+    /// Returns any serialization or validation error raised while converting
+    /// the payload into a staged [`BatchAppendItem`].
+    pub fn stage_with_causation(
+        &mut self,
+        coord: Coordinate,
+        kind: EventKind,
+        payload: &impl Serialize,
+        causation: CausationRef,
+    ) -> Result<&mut Self, StoreError> {
+        self.stage_with_options_and_causation(
+            coord,
+            kind,
+            payload,
+            AppendOptions::default(),
+            causation,
+        )
+    }
+
+    /// Stage a new batch item with explicit append options and causation.
+    ///
+    /// # Errors
+    /// Returns any serialization or validation error raised while converting
+    /// the payload into a staged [`BatchAppendItem`].
+    pub fn stage_with_options_and_causation(
+        &mut self,
+        coord: Coordinate,
+        kind: EventKind,
+        payload: &impl Serialize,
+        options: AppendOptions,
+        causation: CausationRef,
+    ) -> Result<&mut Self, StoreError> {
+        let item = BatchAppendItem::new(coord, kind, payload, options, causation)?;
         self.items.push(item);
         Ok(self)
     }

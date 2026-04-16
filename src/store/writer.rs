@@ -19,7 +19,7 @@ use crate::store::staging::{
     PreparedBatch, PreparedBatchInternedIds, PreparedBatchItem, StagedCommitMeta,
     StagedCommitTiming, StagedCommittedEvent,
 };
-use crate::store::{AppendReceipt, BatchStage, StoreConfig, StoreError};
+use crate::store::{AppendReceipt, StoreConfig, StoreError};
 use flume::{Receiver, Sender};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -30,6 +30,23 @@ use tracing::{debug, info, trace};
 const BATCH_MARKER_ENTITY: &str = "_batch";
 /// Scope name for batch system markers (BEGIN/COMMIT). Not user-visible.
 const BATCH_MARKER_SCOPE: &str = "_system";
+
+#[derive(Clone, Copy, Debug)]
+enum BatchFailureStage {
+    Validation,
+    Encoding,
+    Writing,
+    Syncing,
+}
+
+fn batch_failed(
+    item_index: usize,
+    stage: BatchFailureStage,
+    source: impl Into<Box<StoreError>>,
+) -> StoreError {
+    tracing::debug!(item_index, ?stage, "batch failure surfaced");
+    StoreError::batch_failed(item_index, source)
+}
 
 /// WriterCommand: messages sent to the background writer thread via flume.
 /// All respond channels use `flume::Sender`: sync send from the writer, async recv from callers.
@@ -130,11 +147,13 @@ impl WriterHandle {
         let idx = Arc::clone(index);
         let rdr = Arc::clone(reader);
 
+        const FNV_1A_BASIS: u64 = 0xcbf29ce484222325;
+        const FNV_1A_PRIME: u64 = 0x100000001b3;
         let thread_name = format!("batpak-writer-{:08x}", {
-            let mut h: u64 = 0xcbf29ce484222325; // FNV-1a basis
+            let mut h: u64 = FNV_1A_BASIS;
             for b in config.data_dir.to_string_lossy().bytes() {
                 h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3); // FNV-1a prime
+                h = h.wrapping_mul(FNV_1A_PRIME);
             }
             h
         });
@@ -386,7 +405,10 @@ struct CommandResult {
     must_sync_before_continue: bool,
     exit_writer: bool,
     deferred_reply: DeferredReply,
-    enter_shutdown_drain: bool,
+    /// Some = enter shutdown drain after this command; carries the reply sender directly.
+    /// Replaces the previous (enter_shutdown_drain: bool, DeferredReply::Shutdown) pair,
+    /// which required an unreachable!() at the call site to extract the sender.
+    shutdown_drain_respond: Option<Sender<Result<(), StoreError>>>,
     enter_group_commit_drain: bool,
 }
 
@@ -398,7 +420,7 @@ impl CommandResult {
             must_sync_before_continue: false,
             exit_writer: false,
             deferred_reply: DeferredReply::None,
-            enter_shutdown_drain: false,
+            shutdown_drain_respond: None,
             enter_group_commit_drain: false,
         }
     }
@@ -427,10 +449,9 @@ impl CommandResult {
         self
     }
 
-    fn enter_shutdown_drain(mut self, deferred_reply: DeferredReply) -> Self {
+    fn enter_shutdown_drain(mut self, respond: Sender<Result<(), StoreError>>) -> Self {
         self.exit_writer = true;
-        self.enter_shutdown_drain = true;
-        self.deferred_reply = deferred_reply;
+        self.shutdown_drain_respond = Some(respond);
         self
     }
 
@@ -591,10 +612,7 @@ fn writer_loop(
 
     for cmd in runtime.rx.iter() {
         let result = state.execute_command(WriterLoopPhase::Main, cmd);
-        if result.enter_shutdown_drain {
-            let DeferredReply::Shutdown { respond } = result.deferred_reply else {
-                unreachable!("shutdown drain must carry a shutdown reply sender");
-            };
+        if let Some(respond) = result.shutdown_drain_respond {
             let shutdown_result = drain_shutdown_queue(
                 &mut state,
                 runtime.rx,
@@ -666,7 +684,7 @@ fn settle_command_result(
 
     LoopOutcome {
         break_loop: result.break_after_reply,
-        exit_writer: result.exit_writer && !result.enter_shutdown_drain,
+        exit_writer: result.exit_writer && result.shutdown_drain_respond.is_none(),
         sync_event_delta: result.sync_event_delta,
         enter_group_commit_drain: result.enter_group_commit_drain,
     }
@@ -825,8 +843,7 @@ impl WriterState<'_> {
                 }
             },
             WriterCommand::Shutdown { respond } => match phase {
-                WriterLoopPhase::Main => CommandResult::immediate(0)
-                    .enter_shutdown_drain(DeferredReply::Shutdown { respond }),
+                WriterLoopPhase::Main => CommandResult::immediate(0).enter_shutdown_drain(respond),
                 WriterLoopPhase::GroupCommitDrain => CommandResult::immediate(0)
                     .with_sync(DeferredReply::Shutdown { respond })
                     .break_after_reply()
@@ -975,8 +992,8 @@ impl WriterState<'_> {
     /// was needed. On rotation, the SIDX collector is reset, the old segment
     /// is sealed, segment_id is advanced, and the reader is notified.
     ///
-    /// Callers needing batch-specific error context should wrap with
-    /// `.map_err(|e| StoreError::BatchFailed { ... })`.
+    /// Callers needing batch-specific error context should wrap errors with
+    /// the writer-local `batch_failed(...)` helper.
     fn maybe_rotate_segment(&mut self) -> Result<bool, StoreError> {
         if !self
             .active_segment
@@ -1005,36 +1022,34 @@ impl WriterState<'_> {
     /// STEPs 1-2: Validate batch size, total bytes, and reject CAS in batches.
     fn validate_batch(&self, items: &[BatchAppendItem]) -> Result<(), StoreError> {
         if items.len() > self.config.batch.max_size as usize {
-            return Err(StoreError::BatchFailed {
-                item_index: 0,
-                stage: BatchStage::Validation,
-                source: Box::new(StoreError::Configuration(format!(
+            return Err(batch_failed(
+                0,
+                BatchFailureStage::Validation,
+                StoreError::Configuration(format!(
                     "batch size {} exceeds max {}",
                     items.len(),
                     self.config.batch.max_size
-                ))),
-            });
+                )),
+            ));
         }
-        let total_bytes: usize = items.iter().map(|i| i.payload_bytes.len()).sum();
+        let total_bytes: usize = items.iter().map(|i| i.payload_bytes().len()).sum();
         if total_bytes > self.config.batch.max_bytes as usize {
-            return Err(StoreError::BatchFailed {
-                item_index: 0,
-                stage: BatchStage::Validation,
-                source: Box::new(StoreError::Configuration(format!(
+            return Err(batch_failed(
+                0,
+                BatchFailureStage::Validation,
+                StoreError::Configuration(format!(
                     "batch bytes {} exceeds max {}",
                     total_bytes, self.config.batch.max_bytes
-                ))),
-            });
+                )),
+            ));
         }
         for (idx, item) in items.iter().enumerate() {
-            if item.options.expected_sequence.is_some() {
-                return Err(StoreError::BatchFailed {
-                    item_index: idx,
-                    stage: BatchStage::Validation,
-                    source: Box::new(StoreError::Configuration(
-                        "CAS not supported in batch append (v1)".into(),
-                    )),
-                });
+            if item.options().expected_sequence.is_some() {
+                return Err(batch_failed(
+                    idx,
+                    BatchFailureStage::Validation,
+                    StoreError::Configuration("CAS not supported in batch append (v1)".into()),
+                ));
             }
         }
         Ok(())
@@ -1050,7 +1065,7 @@ impl WriterState<'_> {
         let mut cached_receipts: Vec<Option<AppendReceipt>> = vec![None; items.len()];
         let mut cached_count = 0usize;
         for (idx, item) in items.iter().enumerate() {
-            if let Some(key) = item.options.idempotency_key {
+            if let Some(key) = item.options().idempotency_key {
                 if let Some(entry) = self.index.get_by_id(key) {
                     cached_receipts[idx] = Some(AppendReceipt {
                         event_id: entry.event_id,
@@ -1070,16 +1085,16 @@ impl WriterState<'_> {
             ));
         }
         if cached_count > 0 {
-            return Err(StoreError::BatchFailed {
-                item_index: cached_receipts
+            return Err(batch_failed(
+                cached_receipts
                     .iter()
                     .position(|r| r.is_none())
                     .unwrap_or(0),
-                stage: BatchStage::Validation,
-                source: Box::new(StoreError::Configuration(
+                BatchFailureStage::Validation,
+                StoreError::Configuration(
                     "partial batch replay: some items already committed, some not".into(),
-                )),
-            });
+                ),
+            ));
         }
         Ok(None)
     }
@@ -1119,8 +1134,8 @@ impl WriterState<'_> {
         // above). Header `timestamp_us` and the IndexEntry `wall_ms` are both
         // derived from this one capture.
         let now_us = self.config.now_us();
-        #[allow(clippy::cast_sign_loss)] // timestamp_us is always positive (from SystemTime)
-        let now_ms = (now_us / 1000) as u64;
+        let now_ms = u64::try_from(now_us / 1000)
+            .expect("invariant: timestamp_us is always positive (from SystemTime)");
 
         for (idx, item) in prepared.items().iter().enumerate() {
             let entity = Arc::clone(item.entity_arc());
@@ -1165,22 +1180,12 @@ impl WriterState<'_> {
 
             let event_id = uuid::Uuid::now_v7().as_u128();
 
-            let causation_id = match item.causation() {
-                CausationRef::None => item.options().causation_id,
-                CausationRef::Absolute(id) => Some(id),
-                CausationRef::PriorItem(prior_idx) => {
-                    if prior_idx >= idx {
-                        return Err(StoreError::BatchFailed {
-                            item_index: idx,
-                            stage: BatchStage::Validation,
-                            source: Box::new(StoreError::Configuration(
-                                "PriorItem causation must reference earlier batch item".into(),
-                            )),
-                        });
-                    }
-                    Some(computed[prior_idx].event_id())
-                }
-            };
+            let causation_id = item
+                .causation()
+                .resolve(item.options().causation_id, idx, |prior_idx| {
+                    computed[prior_idx].event_id()
+                })
+                .map_err(|e| batch_failed(idx, BatchFailureStage::Validation, e))?;
 
             // Compute event_hash NOW (eager hash invariant — see fn doc).
             #[cfg(feature = "blake3")]
@@ -1232,13 +1237,14 @@ impl WriterState<'_> {
         item_index_for_error: usize,
     ) -> Result<u64, StoreError> {
         let now_us = self.config.now_us();
+        let now_ms = u64::try_from(now_us / 1000)
+            .expect("invariant: timestamp_us is always positive (from SystemTime)");
         let header = EventHeader::new(
             batch_id as u128,
             batch_id as u128,
             None,
             now_us,
-            #[allow(clippy::cast_sign_loss)] // timestamp_us is always positive (from SystemTime)
-            DagPosition::child_at(0, (now_us / 1000) as u64, 0),
+            DagPosition::child_at(0, now_ms, 0),
             payload_size,
             kind,
         );
@@ -1248,27 +1254,16 @@ impl WriterState<'_> {
             entity: BATCH_MARKER_ENTITY,
             scope: BATCH_MARKER_SCOPE,
         };
-        let frame = segment::frame_encode(&payload).map_err(|e| StoreError::BatchFailed {
-            item_index: item_index_for_error,
-            stage: BatchStage::Encoding,
-            source: Box::new(e),
-        })?;
+        let frame = segment::frame_encode(&payload)
+            .map_err(|e| batch_failed(item_index_for_error, BatchFailureStage::Encoding, e))?;
 
         self.maybe_rotate_segment()
-            .map_err(|e| StoreError::BatchFailed {
-                item_index: item_index_for_error,
-                stage: BatchStage::Syncing,
-                source: Box::new(e),
-            })?;
+            .map_err(|e| batch_failed(item_index_for_error, BatchFailureStage::Syncing, e))?;
 
-        let offset =
-            self.active_segment
-                .write_frame(&frame)
-                .map_err(|e| StoreError::BatchFailed {
-                    item_index: item_index_for_error,
-                    stage: BatchStage::Writing,
-                    source: Box::new(e),
-                })?;
+        let offset = self
+            .active_segment
+            .write_frame(&frame)
+            .map_err(|e| batch_failed(item_index_for_error, BatchFailureStage::Writing, e))?;
         Ok(offset)
     }
 
@@ -1327,12 +1322,11 @@ impl WriterState<'_> {
         // STEP 4: Set event header position with HLC wall clock.
         // Ensure wall_ms is monotonically non-decreasing per entity to prevent
         // BTreeMap reordering on clock regression.
-        #[allow(clippy::cast_sign_loss)] // timestamp_us is always positive (from SystemTime)
-        let raw_ms = (event.header.timestamp_us / 1000) as u64;
+        let raw_ms = u64::try_from(event.header.timestamp_us / 1000)
+            .expect("invariant: timestamp_us is always positive (from SystemTime)");
         let last_ms = latest.as_ref().map(|entry| entry.wall_ms).unwrap_or(0);
         let now_ms = raw_ms.max(last_ms);
-        let position =
-            DagPosition::with_hlc(now_ms, 0, guards.dag_depth, guards.dag_lane, clock);
+        let position = DagPosition::with_hlc(now_ms, 0, guards.dag_depth, guards.dag_lane, clock);
         event.header.position = position;
         event.header.event_kind = kind;
         event.header.correlation_id = correlation_id;
@@ -1374,8 +1368,8 @@ impl WriterState<'_> {
         let disk_pos = DiskPos {
             segment_id: *self.segment_id,
             offset,
-            #[allow(clippy::cast_possible_truncation)] // checked_payload_len already verified < u32::MAX
-            length: frame.len() as u32,
+            length: u32::try_from(frame.len())
+                .expect("invariant: frame length bounded by segment_max_bytes, well within u32"),
         };
         let meta = StagedCommitMeta::new(
             event.header.event_id,
@@ -1499,9 +1493,8 @@ impl WriterState<'_> {
         let computed = self.precompute_batch_items(prepared, first_seq)?;
 
         // STEP 8: Write SYSTEM_BATCH_BEGIN marker. Stores batch count in payload_size.
-        // batch_max_size validation guarantees items.len() <= u32::MAX.
-        #[allow(clippy::cast_possible_truncation)]
-        let batch_count = prepared.len() as u32;
+        let batch_count = u32::try_from(prepared.len())
+            .expect("invariant: batch_max_size validated at submit time, always < u32::MAX");
         let marker_offset =
             self.write_batch_marker_frame(batch_id, EventKind::SYSTEM_BATCH_BEGIN, batch_count, 0)?;
         trace!(batch_id, offset = marker_offset, "batch marker written");
@@ -1561,11 +1554,7 @@ impl WriterState<'_> {
 
         self.active_segment
             .sync_with_mode(&self.config.sync.mode)
-            .map_err(|e| StoreError::BatchFailed {
-                item_index: prepared.len() - 1,
-                stage: BatchStage::Syncing,
-                source: Box::new(e),
-            })?;
+            .map_err(|e| batch_failed(prepared.len() - 1, BatchFailureStage::Syncing, e))?;
 
         // STEP 12/14: Materialize all post-write projections in one pass.
         let artifacts = self.materialize_batch_commit_artifacts(prepared, &computed, &receipts);
@@ -1584,8 +1573,11 @@ impl WriterState<'_> {
         // STEP 13: Insert all entries into the in-memory index, then publish
         // atomically. Entries occupy [first_seq, first_seq + items.len()).
         self.index.insert_batch(artifacts.entries);
-        #[allow(clippy::cast_possible_truncation)] // prepared.len() bounded by batch_max_size (u32)
-        let publish_up_to = first_seq + prepared.len() as u64;
+        let publish_up_to = first_seq
+            + u64::from(
+                u32::try_from(prepared.len())
+                    .expect("invariant: batch_max_size validated at submit time, always < u32::MAX"),
+            );
 
         if let Some(fence) = fence {
             self.index
@@ -1623,11 +1615,7 @@ impl WriterState<'_> {
             // write, index, and broadcast all share one source of truth.
             let event = staged
                 .borrowed_frame_event(item.payload_bytes())
-                .map_err(|e| StoreError::BatchFailed {
-                    item_index: idx,
-                    stage: BatchStage::Encoding,
-                    source: Box::new(e),
-                })?;
+                .map_err(|e| batch_failed(idx, BatchFailureStage::Encoding, e))?;
 
             // Encode frame.
             let frame_payload = FramePayloadRef {
@@ -1635,37 +1623,25 @@ impl WriterState<'_> {
                 entity: staged.entity(),
                 scope: staged.scope(),
             };
-            let frame =
-                segment::frame_encode(&frame_payload).map_err(|e| StoreError::BatchFailed {
-                    item_index: idx,
-                    stage: BatchStage::Encoding,
-                    source: Box::new(e),
-                })?;
+            let frame = segment::frame_encode(&frame_payload)
+                .map_err(|e| batch_failed(idx, BatchFailureStage::Encoding, e))?;
 
             // Check segment rotation.
             self.maybe_rotate_segment()
-                .map_err(|e| StoreError::BatchFailed {
-                    item_index: idx,
-                    stage: BatchStage::Syncing,
-                    source: Box::new(e),
-                })?;
+                .map_err(|e| batch_failed(idx, BatchFailureStage::Syncing, e))?;
 
             // Write frame.
-            let offset =
-                self.active_segment
-                    .write_frame(&frame)
-                    .map_err(|e| StoreError::BatchFailed {
-                        item_index: idx,
-                        stage: BatchStage::Writing,
-                        source: Box::new(e),
-                    })?;
+            let offset = self
+                .active_segment
+                .write_frame(&frame)
+                .map_err(|e| batch_failed(idx, BatchFailureStage::Writing, e))?;
 
             // Build receipt (index update happens after all writes succeed).
             let disk_pos = DiskPos {
                 segment_id: *self.segment_id,
                 offset,
-                #[allow(clippy::cast_possible_truncation)] // frame size bounded by segment_max_bytes
-                length: frame.len() as u32,
+                length: u32::try_from(frame.len())
+                    .expect("invariant: frame size bounded by segment_max_bytes (64 MB), within u32"),
             };
             receipts.push(AppendReceipt {
                 event_id: staged.event_id(),

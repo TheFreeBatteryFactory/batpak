@@ -1,4 +1,6 @@
 use crate::coordinate::Coordinate;
+use crate::event::header::SidxReconstructionFields;
+use crate::store::config::duration_micros;
 use crate::store::index::{DiskPos, IndexEntry, RoutingSummary, StoreIndex};
 use crate::store::interner::StringInterner;
 use crate::store::reader::Reader;
@@ -151,7 +153,6 @@ impl<'a> RestorePlanner<'a> {
 /// 1. Try mmap snapshot (`index.fbati`) → if valid, restore + replay tail.
 /// 2. Try checkpoint (`index.ckpt`) → if valid, restore + replay tail.
 /// 3. Fall back to full segment rebuild (parallel SIDX on sealed + sequential active).
-#[allow(clippy::cast_possible_truncation)] // as_micros() -> u64: overflow at ~584,942 years
 pub(crate) fn open_index(
     index: &StoreIndex,
     reader: &Reader,
@@ -184,7 +185,7 @@ pub(crate) fn open_index(
         },
         restored_entries: plan.restored_entries,
         tail_entries: plan.tail_entries,
-        elapsed_us: t0.elapsed().as_micros() as u64,
+        elapsed_us: duration_micros(t0.elapsed()),
     })
 }
 
@@ -268,16 +269,16 @@ fn scanned_entries_from_sidx_footer(
                     .cloned()
                     .ok_or_else(|| StoreError::ser_msg("SIDX scope_idx out of range"))?;
                 scanned.push(crate::store::reader::ScannedIndexEntry {
-                    header: crate::event::EventHeader::from_sidx(
-                        entry.event_id,
-                        entry.correlation_id,
-                        (entry.causation_id != 0).then_some(entry.causation_id),
-                        entry.wall_ms,
-                        entry.clock,
-                        entry.dag_lane,
-                        entry.dag_depth,
-                        kind,
-                    ),
+                    header: crate::event::EventHeader::from_sidx(SidxReconstructionFields {
+                        event_id: entry.event_id,
+                        correlation_id: entry.correlation_id,
+                        causation_id: (entry.causation_id != 0).then_some(entry.causation_id),
+                        wall_ms: entry.wall_ms,
+                        clock: entry.clock,
+                        lane: entry.dag_lane,
+                        depth: entry.dag_depth,
+                        event_kind: kind,
+                    }),
                     entity,
                     scope,
                     hash_chain: crate::event::HashChain {
@@ -285,8 +286,8 @@ fn scanned_entries_from_sidx_footer(
                         event_hash: entry.event_hash,
                     },
                     segment_id,
-                    offset: entry.frame_offset,
-                    length: entry.frame_length,
+                    offset: entry.to_disk_pos(segment_id).offset,
+                    length: entry.to_disk_pos(segment_id).length,
                     global_sequence: Some(entry.global_sequence),
                 });
             }
@@ -408,12 +409,12 @@ fn collect_tail_entries(
     Ok(rebuilt_entries)
 }
 
-// Complex return type justified: internal planner helper, not public API.
-#[allow(clippy::type_complexity)]
+type RebuildResult = (RestoreSource, Vec<IndexEntry>, Vec<String>, u64, usize);
+
 fn collect_rebuild_entries(
     reader: &Reader,
     data_dir: &Path,
-) -> Result<(RestoreSource, Vec<IndexEntry>, Vec<String>, u64, usize), StoreError> {
+) -> Result<RebuildResult, StoreError> {
     let entries = segment_paths(data_dir)?;
     let configured_active_segment = reader.active_segment_id();
     let active_segment_id = (configured_active_segment != 0).then_some(configured_active_segment);

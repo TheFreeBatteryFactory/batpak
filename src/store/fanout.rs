@@ -1,4 +1,4 @@
-use crate::coordinate::Coordinate;
+use crate::coordinate::{Coordinate, DagPosition};
 use crate::event::{EventKind, StoredEvent};
 use flume::{Receiver, Sender, TrySendError};
 use parking_lot::Mutex;
@@ -35,6 +35,8 @@ pub struct Notification {
     pub kind: EventKind,
     /// Global sequence number assigned to this event at commit time.
     pub sequence: u64,
+    /// Committed DAG position for the event.
+    pub position: DagPosition,
 }
 
 impl<T: Clone> FanoutList<T> {

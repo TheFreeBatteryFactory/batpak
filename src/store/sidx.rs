@@ -164,6 +164,10 @@ pub(crate) struct SidxEntry {
 }
 
 impl SidxEntry {
+    pub(crate) fn to_disk_pos(&self, segment_id: u64) -> crate::store::DiskPos {
+        crate::store::DiskPos::new(segment_id, self.frame_offset, self.frame_length)
+    }
+
     /// Serialise this entry into `buf`, which must be exactly [`ENTRY_SIZE`] bytes.
     ///
     /// All multi-byte integers are written in little-endian byte order.
@@ -405,10 +409,8 @@ impl SidxEntryCollector {
         if let Some(&idx) = self.string_map.get(s) {
             return idx;
         }
-        // Saturating truncation: segments can never accumulate 4B unique strings.
-        #[allow(clippy::cast_possible_truncation)]
-        // string table bounded by segment size, always < u32::MAX
-        let idx = self.strings.len() as u32;
+        let idx = u32::try_from(self.strings.len())
+            .expect("invariant: SIDX string table is bounded by segment size, well under u32::MAX");
         self.strings.push(s.to_owned());
         self.string_map.insert(s.to_owned(), idx);
         idx

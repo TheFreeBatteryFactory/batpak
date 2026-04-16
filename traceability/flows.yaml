@@ -12,6 +12,7 @@
     - ART-STORE-MOD
     - ART-STORE-PROPERTIES
     - ART-DAG-POSITION-HINT-TESTS
+    - ART-ADR-POSITION-HINTS
 - id: FLOW-APPEND-REACTION
   summary: Causal follow-up appends preserve correlation and causation IDs while emitting distinct telemetry.
   artifacts:
@@ -30,10 +31,11 @@
     - ART-STORE-ANCESTORS
     - ART-STORE-ADVANCED
 - id: FLOW-PROJECT
-  summary: Project checks cache capability, optionally prefetches, validates freshness, and replays on miss.
+  summary: Project checks cache capability, optionally prefetches, validates freshness, and replays on miss through the sealed replay-lane contract (`JsonValueInput` default lane vs `RawMsgpackInput` raw lane).
   artifacts:
     - ART-PROJECTION
     - ART-STORE-PROJECTION-FLOW
+    - ART-EVENT-SOURCING
     - ART-PROJECTION-TESTS
     - ART-OBSERVABILITY-TESTS
 - id: FLOW-REACT
@@ -65,11 +67,13 @@
     - ART-STORE-PROJECTION-FLOW
     - ART-UNIFIED-TESTS
 - id: FLOW-BATCH-APPEND
-  summary: Atomic batch append validates limits, preflights batch idempotency, writes BEGIN marker, event frames, COMMIT marker, fsyncs, then atomically publishes to the in-memory index.
+  summary: Atomic batch append validates limits, preflights idempotency, normalizes fresh or prepared items through the same staging packets, writes BEGIN marker, event frames, COMMIT marker, fsyncs, then atomically publishes to the in-memory index.
   artifacts:
     - ART-STORE-MOD
     - ART-STORE-CONTRACTS
+    - ART-STORE-WRITER
     - ART-BATCH-TESTS
+    - ART-BATCH-STAGING-REGRESSION
     - ART-STORE-READER
 - id: FLOW-BATCH-RECOVERY
   summary: Cold-start segment scan stages batch frames until COMMIT marker confirmed; incomplete batches (missing COMMIT) are discarded. State persists across segment boundaries.

@@ -9,17 +9,18 @@
     clippy::needless_borrows_for_generic_args,
     clippy::disallowed_methods // test harness uses thread::spawn for chaos probes
 )]
-//! Fuzz + Chaos Feedback Loop: the library dogfoods its own Gate system
-//! to evaluate fuzz and chaos testing results. Performance scores gate
-//! whether extended load fuzz/chaos runs are launched.
+//! Fuzz + Chaos Feedback Loop: the library uses its guard primitives as a
+//! reusable harness to evaluate fuzz and chaos testing results.
+//! Performance scores here are screening signals for extended load probes,
+//! not standalone production authority.
 //!
 //! PROVES: LAW-001 (No Fake Success), LAW-005 (Resilience Under Chaos)
 //! DEFENDS: FM-013 (Coverage Mirage), FM-019 (Chaos Gap)
 //! INVARIANTS: INV-STATE (state machine), INV-CONC (concurrent), INV-TEMP (temporal)
 //!
-//! This is the quadratic feedback loop:
+//! This is the feedback loop:
 //!   1. Run fuzz + chaos probes
-//!   2. Feed results through Gate system
+//!   2. Feed results through the guard harness
 //!   3. If all gates pass, launch extended load fuzz + chaos
 //!   4. Extended results feed back through stricter gates
 //!

@@ -93,13 +93,7 @@ impl PreparedBatchBuilder {
     }
 
     pub(crate) fn push_item(&mut self, item: BatchAppendItem) -> Result<(), StoreError> {
-        let BatchAppendItem {
-            coord,
-            kind,
-            payload_bytes,
-            options,
-            causation,
-        } = item;
+        let (coord, kind, payload_bytes, options, causation) = item.into_parts();
         self.push_shared_parts(
             coord.entity_arc(),
             coord.scope_arc(),
@@ -407,6 +401,7 @@ impl StagedCommittedEvent {
             coord: self.coord().clone(),
             kind: self.meta.kind,
             sequence: self.meta.global_sequence,
+            position: self.position(),
         }
     }
 

@@ -149,9 +149,14 @@ pub fn join_all<T>(outcomes: Vec<Outcome<T>>) -> Outcome<Vec<T>> {
                         };
                     }
                     Outcome::Batch(_) => {
-                        // join_all always returns Ok, Err, Cancelled, Retry, or Pending —
-                        // never Batch. This arm is unreachable by construction.
-                        unreachable!("join_all never returns Batch — it always returns Ok or an early-exit variant");
+                        return Outcome::Err(OutcomeError {
+                            kind: ErrorKind::Internal,
+                            message: "join_all: recursive join produced a nested Batch — \
+                                      batch outcomes must not appear inside join_all input"
+                                .into(),
+                            compensation: None,
+                            retryable: false,
+                        });
                     }
                 }
             }
@@ -161,14 +166,18 @@ pub fn join_all<T>(outcomes: Vec<Outcome<T>>) -> Outcome<Vec<T>> {
 }
 
 /// join_any: first Ok wins. If all fail, last Err wins.
-#[allow(clippy::wildcard_enum_match_arm)] // Retry/Pending/Cancelled are intentional pass-through
+/// Retry, Pending, and Cancelled propagate immediately — they signal
+/// structural conditions that make further iteration meaningless.
 pub fn join_any<T>(outcomes: Vec<Outcome<T>>) -> Outcome<T> {
     let mut last_err = None;
     for outcome in outcomes {
         match outcome {
             Outcome::Ok(v) => return Outcome::Ok(v),
             Outcome::Err(e) => last_err = Some(e),
-            other => return other, // Retry/Pending/Cancelled propagate immediately
+            ret @ (Outcome::Retry { .. }
+            | Outcome::Pending { .. }
+            | Outcome::Cancelled { .. }
+            | Outcome::Batch(_)) => return ret,
         }
     }
     match last_err {

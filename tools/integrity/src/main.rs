@@ -8,6 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use syn::visit::Visit;
 use syn::Item;
 use walkdir::WalkDir;
 
@@ -434,6 +435,20 @@ fn check_ci_parity(repo_root: &Path) -> Result<()> {
             "11/12", "12/12",
         ],
     )?;
+    assert_workflow_list_values(
+        ".github/workflows/ci.yml",
+        &ci_yml,
+        "features",
+        &[
+            "",
+            "--features blake3",
+            "--features dangerous-test-hooks",
+            "--no-default-features",
+            "--no-default-features --features blake3",
+            "--no-default-features --features dangerous-test-hooks",
+            "--all-features",
+        ],
+    )?;
     ensure(
         release_yml.contains("bash ./scripts/run-in-devcontainer.sh 'cargo xtask release --dry-run'"),
         "ci-parity: `.github/workflows/release.yml` must run `cargo xtask release --dry-run` through `scripts/run-in-devcontainer.sh`.",
@@ -776,15 +791,16 @@ fn check_store_pub_fn_coverage(repo_root: &Path) -> Result<()> {
 }
 
 fn check_allow_justifications(repo_root: &Path) -> Result<()> {
-    for path in rust_files(&repo_root.join("src")) {
+    let mut paths = rust_files(&repo_root.join("src"));
+    paths.extend(rust_files(&repo_root.join("tools/xtask/src")));
+    paths.extend(rust_files(&repo_root.join("tools/integrity/src")));
+    paths.push(repo_root.join("build.rs"));
+    for path in paths {
         let content = fs::read_to_string(&path)?;
         let lines: Vec<&str> = content.lines().collect();
         for (index, line) in lines.iter().enumerate() {
             let trimmed = line.trim();
-            if trimmed.starts_with("#![allow") {
-                continue;
-            }
-            if trimmed.starts_with("#[allow(") {
+            if trimmed.starts_with("#![allow(") || trimmed.starts_with("#[allow(") {
                 let justified = trimmed.contains("//")
                     || index
                         .checked_sub(1)
@@ -824,7 +840,7 @@ fn check_pub_items_have_references(repo_root: &Path) -> Result<()> {
             ensure(
                 reference_space.contains(&name),
                 format!(
-                    "public item `{}` from {} has no reference in tests/benches/examples/docs",
+                    "public item `{}` from {} has no coarse witness reference in tests/benches/examples/docs",
                     name,
                     relative(repo_root, &path)
                 ),
@@ -856,34 +872,89 @@ fn collect_reference_text(repo_root: &Path) -> Result<BTreeSet<String>> {
 }
 
 fn public_item_names(file: &syn::File) -> Vec<String> {
-    let mut names = Vec::new();
-    for item in &file.items {
-        match item {
-            Item::Fn(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
-                names.push(item.sig.ident.to_string());
-            }
-            Item::Struct(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
-                names.push(item.ident.to_string());
-            }
-            Item::Enum(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
-                names.push(item.ident.to_string());
-            }
-            Item::Trait(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
-                names.push(item.ident.to_string());
-            }
-            Item::Type(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
-                names.push(item.ident.to_string());
-            }
-            Item::Const(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
-                names.push(item.ident.to_string());
-            }
-            Item::Mod(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
-                names.push(item.ident.to_string());
-            }
-            _ => {}
+    let mut collector = PublicItemCollector::default();
+    collector.visit_file(file);
+    collector.names.into_iter().collect()
+}
+
+#[derive(Default)]
+struct PublicItemCollector {
+    names: BTreeSet<String>,
+}
+
+impl PublicItemCollector {
+    fn record_visibility(&mut self, vis: &syn::Visibility, name: impl Into<String>) {
+        if matches!(vis, syn::Visibility::Public(_)) {
+            self.names.insert(name.into());
         }
     }
-    names
+
+    fn record_use_tree(&mut self, tree: &syn::UseTree) {
+        match tree {
+            syn::UseTree::Name(name) => {
+                self.names.insert(name.ident.to_string());
+            }
+            syn::UseTree::Rename(rename) => {
+                self.names.insert(rename.rename.to_string());
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    self.record_use_tree(item);
+                }
+            }
+            syn::UseTree::Path(path) => self.record_use_tree(&path.tree),
+            syn::UseTree::Glob(_) => {}
+        }
+    }
+}
+
+impl Visit<'_> for PublicItemCollector {
+    fn visit_item_fn(&mut self, node: &syn::ItemFn) {
+        self.record_visibility(&node.vis, node.sig.ident.to_string());
+        syn::visit::visit_item_fn(self, node);
+    }
+
+    fn visit_item_struct(&mut self, node: &syn::ItemStruct) {
+        self.record_visibility(&node.vis, node.ident.to_string());
+        syn::visit::visit_item_struct(self, node);
+    }
+
+    fn visit_item_enum(&mut self, node: &syn::ItemEnum) {
+        self.record_visibility(&node.vis, node.ident.to_string());
+        syn::visit::visit_item_enum(self, node);
+    }
+
+    fn visit_item_trait(&mut self, node: &syn::ItemTrait) {
+        self.record_visibility(&node.vis, node.ident.to_string());
+        syn::visit::visit_item_trait(self, node);
+    }
+
+    fn visit_item_type(&mut self, node: &syn::ItemType) {
+        self.record_visibility(&node.vis, node.ident.to_string());
+        syn::visit::visit_item_type(self, node);
+    }
+
+    fn visit_item_const(&mut self, node: &syn::ItemConst) {
+        self.record_visibility(&node.vis, node.ident.to_string());
+        syn::visit::visit_item_const(self, node);
+    }
+
+    fn visit_item_mod(&mut self, node: &syn::ItemMod) {
+        self.record_visibility(&node.vis, node.ident.to_string());
+        syn::visit::visit_item_mod(self, node);
+    }
+
+    fn visit_item_use(&mut self, node: &syn::ItemUse) {
+        if matches!(node.vis, syn::Visibility::Public(_)) {
+            self.record_use_tree(&node.tree);
+        }
+        syn::visit::visit_item_use(self, node);
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &syn::ImplItemFn) {
+        self.record_visibility(&node.vis, node.sig.ident.to_string());
+        syn::visit::visit_impl_item_fn(self, node);
+    }
 }
 
 fn tracked_repo_files(repo_root: &Path) -> Result<Vec<PathBuf>> {
@@ -974,5 +1045,55 @@ fn ensure(condition: bool, message: impl Into<String>) -> Result<()> {
         Ok(())
     } else {
         bail!(message.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_item_names_collects_async_use_const_type_and_mod() {
+        let source = r#"
+            pub const FLAG: u8 = 1;
+            pub type Alias = u64;
+            pub mod nested {}
+            pub use crate::store::StoreError as PublicStoreError;
+
+            pub struct Thing;
+            impl Thing {
+                pub async fn subscribe(&self) {}
+            }
+        "#;
+
+        let file = syn::parse_file(source).expect("parse source");
+        let names = public_item_names(&file);
+
+        assert!(names.contains(&"FLAG".to_string()));
+        assert!(names.contains(&"Alias".to_string()));
+        assert!(names.contains(&"nested".to_string()));
+        assert!(names.contains(&"PublicStoreError".to_string()));
+        assert!(names.contains(&"subscribe".to_string()));
+    }
+
+    #[test]
+    fn workflow_list_values_parses_feature_matrix_strings() {
+        let workflow = r#"
+matrix:
+  features:
+    - ""
+    - "--features blake3"
+    - "--all-features"
+"#;
+
+        let values = workflow_list_values(workflow, "features").expect("parse values");
+        assert_eq!(
+            values,
+            vec![
+                "".to_string(),
+                "--features blake3".to_string(),
+                "--all-features".to_string()
+            ]
+        );
     }
 }

@@ -64,10 +64,20 @@
   kind: manifest
   paths:
     - Cargo.toml
+- id: ART-RELEASE-HISTORY
+  kind: release-history
+  paths:
+    - CHANGELOG.md
 - id: ART-BUILD-RS
   kind: detector
   paths:
     - build.rs
+- id: ART-EVENT-SOURCING
+  kind: source
+  paths:
+    - src/event/mod.rs
+    - src/event/sourcing.rs
+    - src/event/header.rs
 - id: ART-STORE-MOD
   kind: source
   paths:
@@ -191,6 +201,14 @@
   kind: adr
   paths:
     - docs/adr/ADR-0007-control-plane-and-fast-start.md
+- id: ART-ADR-RESTORE-PLANNER
+  kind: adr
+  paths:
+    - docs/adr/ADR-0008-restore-planner-and-projection-trait.md
+- id: ART-ADR-POSITION-HINTS
+  kind: adr
+  paths:
+    - docs/adr/ADR-0009-position-hints-and-artifact-upgrades.md
 - id: ART-STORE-INTERNER
   kind: source
   paths:
@@ -234,10 +252,18 @@
   kind: tests
   paths:
     - tests/atomic_batch.rs
+- id: ART-BATCH-STAGING-REGRESSION
+  kind: tests
+  paths:
+    - tests/batch_staging_regression.rs
 - id: ART-DAG-POSITION-HINT-TESTS
   kind: tests
   paths:
     - tests/dag_position_hint.rs
+- id: ART-SUBSCRIPTION-TESTS
+  kind: tests
+  paths:
+    - tests/subscription_ops.rs
 - id: ART-DX-DOCS
   kind: docs
   paths:

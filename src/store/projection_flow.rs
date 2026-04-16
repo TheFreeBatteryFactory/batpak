@@ -1,5 +1,6 @@
 use crate::event::{Event, EventSourced, JsonValueInput, ProjectionInput, RawMsgpackInput};
 use crate::store::columnar::CachedProjectionSlot;
+use crate::store::config::duration_micros;
 use crate::store::index::DiskPos;
 use crate::store::index::ProjectionReplayPlan;
 use crate::store::{projection, Freshness, Store, StoreError};
@@ -293,7 +294,6 @@ where
 }
 
 /// Shared projection executor. Optional timing sink gated behind `timings.is_some()`.
-#[allow(clippy::cast_possible_truncation)] // as_micros() -> u64: overflow at ~584,942 years
 fn project_inner<T, I, State>(
     store: &Store<State>,
     entity: &str,
@@ -332,7 +332,7 @@ where
                 plan,
             };
             if let Some(t) = timings.as_deref_mut() {
-                t.cache_key_build_us = t_cache_key.elapsed().as_micros() as u64;
+                t.cache_key_build_us = duration_micros(t_cache_key.elapsed());
             }
 
             // Fire prefetch early so I/O overlaps with group-local CPU work.
@@ -347,7 +347,7 @@ where
                 }
             }
             if let Some(t) = timings.as_deref_mut() {
-                t.prefetch_us = t_prefetch.elapsed().as_micros() as u64;
+                t.prefetch_us = duration_micros(t_prefetch.elapsed());
             }
 
             let t_group = std::time::Instant::now();
@@ -368,7 +368,7 @@ where
                 })
                 .unwrap_or(false);
             if let Some(t) = timings.as_deref_mut() {
-                t.group_local_lookup_us = t_group.elapsed().as_micros() as u64;
+                t.group_local_lookup_us = duration_micros(t_group.elapsed());
             }
 
             ProjectionPreparation::Planned(PreparedProjection {
@@ -379,7 +379,7 @@ where
         }
     };
     if let Some(t) = timings.as_deref_mut() {
-        t.plan_build_us = t_start.elapsed().as_micros() as u64;
+        t.plan_build_us = duration_micros(t_start.elapsed());
     }
 
     // ── Phase 2: Compute strategy ─────────────────────────────────────
@@ -404,7 +404,7 @@ where
     match dispatch {
         ProjectionDispatch::Empty => {
             if let Some(t) = timings.as_deref_mut() {
-                t.total_us = t_start.elapsed().as_micros() as u64;
+                t.total_us = duration_micros(t_start.elapsed());
             }
             Ok(None)
         }
@@ -413,7 +413,7 @@ where
             match serde_json::from_slice::<T>(&slot.bytes) {
                 Ok(value) => {
                     if let Some(t) = timings.as_deref_mut() {
-                        t.total_us = t_start.elapsed().as_micros() as u64;
+                        t.total_us = duration_micros(t_start.elapsed());
                     }
                     Ok(Some(value))
                 }
@@ -467,7 +467,7 @@ where
                         );
                     }
                     if let Some(t) = timings.as_deref_mut() {
-                        t.total_us = t_start.elapsed().as_micros() as u64;
+                        t.total_us = duration_micros(t_start.elapsed());
                     }
                     Ok(Some(cached_state))
                 }
@@ -519,8 +519,6 @@ where
 /// External cache probe with incremental apply and fresh-hit paths, then fallback to full replay.
 // cold path -- keep out of the hot dispatch to reduce instruction cache pressure
 #[inline(never)]
-// as_micros() -> u64 cannot overflow in practice
-#[allow(clippy::cast_possible_truncation)]
 fn execute_external_cache_path<T, I, State>(
     store: &Store<State>,
     execution: ReplayExecution<'_>,
@@ -537,7 +535,7 @@ where
     match store.cache.get(&execution.replay.cache_key) {
         Ok(Some((bytes, meta))) => {
             if let Some(t) = timings.as_deref_mut() {
-                t.external_cache_probe_us = t_ext.elapsed().as_micros() as u64;
+                t.external_cache_probe_us = duration_micros(t_ext.elapsed());
             }
             let is_fresh = match execution.freshness {
                 Freshness::Consistent => meta.watermark == execution.replay.watermark,
@@ -589,7 +587,7 @@ where
                         );
                     }
                     if let Some(t) = timings.as_deref_mut() {
-                        t.total_us = execution.started_at.elapsed().as_micros() as u64;
+                        t.total_us = duration_micros(execution.started_at.elapsed());
                     }
                     return Ok(Some(cached_state));
                 }
@@ -610,7 +608,7 @@ where
                             meta.cached_at_us,
                         );
                         if let Some(t) = timings.as_deref_mut() {
-                            t.total_us = execution.started_at.elapsed().as_micros() as u64;
+                            t.total_us = duration_micros(execution.started_at.elapsed());
                         }
                         return Ok(Some(value));
                     }
@@ -622,12 +620,12 @@ where
         }
         Ok(None) => {
             if let Some(t) = timings.as_deref_mut() {
-                t.external_cache_probe_us = t_ext.elapsed().as_micros() as u64;
+                t.external_cache_probe_us = duration_micros(t_ext.elapsed());
             }
         }
         Err(e) => {
             if let Some(t) = timings.as_deref_mut() {
-                t.external_cache_probe_us = t_ext.elapsed().as_micros() as u64;
+                t.external_cache_probe_us = duration_micros(t_ext.elapsed());
             }
             tracing::warn!("cache get failed (falling back to replay): {e}");
         }
@@ -640,8 +638,6 @@ where
 /// Full replay from disk: batch-read events, fold, and store back to cache.
 // cold path -- keep out of the hot dispatch to reduce instruction cache pressure
 #[inline(never)]
-// as_micros() -> u64 cannot overflow in practice
-#[allow(clippy::cast_possible_truncation)]
 fn execute_full_replay<T, I, State>(
     store: &Store<State>,
     execution: ReplayExecution<'_>,
@@ -664,7 +660,7 @@ where
         .collect();
     let events = I::read_batch(&store.reader, &positions)?;
     if let Some(t) = timings.as_deref_mut() {
-        t.disk_read_us = t_disk.elapsed().as_micros() as u64;
+        t.disk_read_us = duration_micros(t_disk.elapsed());
         // No separate extraction step -- replay lanes return Event directly.
         t.event_extract_us = 0;
     }
@@ -672,7 +668,7 @@ where
     let t_fold = std::time::Instant::now();
     let result = T::from_events(&events);
     if let Some(t) = timings.as_deref_mut() {
-        t.replay_fold_us = t_fold.elapsed().as_micros() as u64;
+        t.replay_fold_us = duration_micros(t_fold.elapsed());
     }
 
     if result.is_none() && !events.is_empty() {
@@ -704,8 +700,8 @@ where
         }
     }
     if let Some(t) = timings.as_deref_mut() {
-        t.cache_store_us = t_store.elapsed().as_micros() as u64;
-        t.total_us = execution.started_at.elapsed().as_micros() as u64;
+        t.cache_store_us = duration_micros(t_store.elapsed());
+        t.total_us = duration_micros(execution.started_at.elapsed());
     }
 
     Ok(result)

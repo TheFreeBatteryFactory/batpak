@@ -173,10 +173,34 @@ Compatibility rules:
 - checkpoint v3 restores missing `dag_lane` / `dag_depth` as `0`
 - mmap v1/v2 restores missing `dag_lane` / `dag_depth` as `0`
 - full frame scan remains the source of truth when an optimization artifact is missing, stale, or structurally incompatible
+- SIDX-accelerated cold start reconstructs `timestamp_us` as `wall_ms * 1000`, so it is best-effort to the nearest millisecond (±999 µs), not a sub-millisecond replay guarantee
 
 Position hints are persistence-affecting, not just API sugar: non-root
 `lane`/`depth` must survive live append, mmap reopen, checkpoint reopen, SIDX
 header reconstruction, and full rebuild.
+
+Cold-start timing contract:
+
+- `wall_ms` is the persisted ordering field used by reopen and HLC reconstruction
+- exact `timestamp_us` still lives in the event frame and is available on full frame reads
+- `EventHeader::age_us()` remains safe on SIDX-reconstructed headers, but callers must not compare live-path and cold-start `timestamp_us` values for sub-millisecond precision
+
+### Upgrade and Rollback Procedure
+
+Operator posture for artifact-format changes is explicit:
+
+- forward upgrade support is part of the contract for current readers
+- old optimization artifacts may be ignored and rebuilt or fallback-scanned
+- mixed-version operation does **not** mean two binaries may write the same mutable store directory at once
+- downgrade is **not** assumed safe just because forward-read compatibility exists
+
+Practical procedure:
+
+1. stop all writers for the target store directory
+2. deploy the newer binary and allow it to reopen normally
+3. if reopen ignores an old artifact, let the fallback scan or rebuild complete instead of trying to preserve the stale optimization file
+4. if you must roll back binaries, purge cold-start optimization artifacts (`index.fbati`, `index.ckpt`, old SIDX expectations) before reopening with the older binary unless that downgrade path is explicitly proven
+5. never run two binary versions against the same mutable store directory concurrently
 
 ## Public Surface Witnesses
 

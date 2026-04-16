@@ -174,7 +174,7 @@ fn batch_oversized_item_no_partial_visibility() {
         "PROPERTY: a batch whose total bytes exceed batch_max_bytes must \
          fail with BatchFailed; got {result:?}. \
          Investigate: src/store/writer.rs validate_batch byte-cap branch \
-         and StoreError::BatchFailed mapping for the Validating stage."
+         and StoreError::BatchFailed mapping for validation failures."
     );
 
     // Critical: NONE of the 4 items should be visible.
@@ -353,15 +353,9 @@ fn batch_size_limits() {
          Investigate: src/store/writer.rs validate_batch size check.",
     );
     assert!(
-        matches!(
-            err,
-            StoreError::BatchFailed {
-                stage: BatchStage::Validation,
-                ..
-            }
-        ),
-        "PROPERTY: batch size violation must be reported as \
-         BatchFailed{{stage: Validation, ..}}, got {err:?}"
+        matches!(err, StoreError::BatchFailed { item_index: 0, .. }),
+        "PROPERTY: batch size violation must surface as BatchFailed on the \
+         first item boundary, got {err:?}"
     );
 }
 
@@ -597,15 +591,10 @@ fn batch_fsync_ambiguity_discards_uncommitted() {
          site fault injection point.",
     );
     assert!(
-        matches!(
-            err,
-            StoreError::BatchFailed {
-                stage: BatchStage::Syncing,
-                ..
-            }
-        ) || matches!(err, StoreError::FaultInjected(_)),
-        "PROPERTY: BatchFsync fault must surface as BatchFailed{{stage: \
-         Syncing}} or FaultInjected, got {err:?}"
+        matches!(err, StoreError::BatchFailed { .. })
+            || matches!(err, StoreError::FaultInjected(_)),
+        "PROPERTY: BatchFsync fault must surface as BatchFailed or \
+         FaultInjected, got {err:?}"
     );
     drop(store);
 

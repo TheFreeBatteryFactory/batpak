@@ -13,8 +13,8 @@ pub use crate::store::cursor::{CursorWorkerAction, CursorWorkerConfig, CursorWor
 pub use crate::store::subscription::{Subscription, SubscriptionOps};
 pub use crate::store::{
     AppendOptions, AppendPositionHint, AppendReceipt, AppendTicket, BatchAppendItem,
-    BatchAppendTicket, BatchConfig, BatchStage, CausationRef, Closed, CompactionConfig,
-    CompactionStrategy, Cursor, DiskPos, Freshness, IndexConfig, IndexEntry, IndexTopology,
-    NoCache, Notification, Open, ReadOnly, RestartPolicy, Store, StoreConfig, StoreError,
-    SyncConfig, SyncMode, WriterConfig, WriterPressure,
+    BatchAppendTicket, BatchConfig, CausationRef, Closed, CompactionConfig, CompactionStrategy,
+    Cursor, DiskPos, Freshness, IndexConfig, IndexEntry, IndexTopology, NoCache, Notification,
+    Open, ReadOnly, RestartPolicy, Store, StoreConfig, StoreError, SyncConfig, SyncMode,
+    WriterConfig, WriterPressure,
 };

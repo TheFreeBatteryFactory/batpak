@@ -4,8 +4,9 @@ use std::fmt;
 /// DagPosition: graph position with hybrid logical clock + depth + lane + sequence.
 /// wall_ms + counter provide global causal ordering (HLC-style) across entities.
 /// depth/lane/sequence provide per-entity chain ordering.
-/// v1: depth=0, lane=0 always. Sequence is per-entity monotonic counter.
-/// Lane/depth vocabulary is scaffolding for future distributed fan-out.
+/// Early releases always committed depth=0/lane=0. Current append-position hints
+/// may supply non-root depth/lane, while the writer still owns HLC fields and
+/// the per-entity sequence counter.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DagPosition {
@@ -14,9 +15,9 @@ pub struct DagPosition {
     pub wall_ms: u64,
     /// HLC counter for same-millisecond tiebreaking. Incremented when wall_ms hasn't advanced.
     pub counter: u16,
-    /// DAG depth level; always 0 in v1, reserved for future branching.
+    /// DAG depth level. Root appends default to 0; append-position hints may set non-root depth.
     pub depth: u32,
-    /// Parallel branch index; always 0 in v1, reserved for future fan-out.
+    /// Parallel branch index. Root appends default to 0; append-position hints may set non-root lane.
     pub lane: u32,
     /// Per-entity monotonic event counter within this lane and depth.
     pub sequence: u32,
@@ -62,7 +63,7 @@ impl DagPosition {
         }
     }
 
-    /// v1: always depth=0, lane=0, sequence=N. wall_ms set by writer.
+    /// Root-lane child: depth=0, lane=0, sequence=N. wall_ms set by writer when committed.
     pub const fn child(sequence: u32) -> Self {
         Self {
             wall_ms: 0,
@@ -73,7 +74,7 @@ impl DagPosition {
         }
     }
 
-    /// v1 with HLC: same as child but with wall clock context.
+    /// Root-lane child with HLC context supplied by the writer.
     pub const fn child_at(sequence: u32, wall_ms: u64, counter: u16) -> Self {
         Self {
             wall_ms,
@@ -84,7 +85,7 @@ impl DagPosition {
         }
     }
 
-    /// Future: fork creates a new lane at depth+1
+    /// Construct a new branch root at `depth + 1` on the given lane.
     pub const fn fork(parent_depth: u32, new_lane: u32) -> Self {
         Self {
             wall_ms: 0,
@@ -101,8 +102,7 @@ impl DagPosition {
     }
 
     /// Causal ordering: ancestor if same lane, same depth, and lower sequence.
-    /// v1: depth is always 0, lane always 0, so just compare sequence.
-    /// DAG-ready: different depths means different branches — not ancestor.
+    /// Different lanes or depths are different branches and are not comparable.
     pub const fn is_ancestor_of(&self, other: &DagPosition) -> bool {
         self.lane == other.lane && self.depth == other.depth && self.sequence < other.sequence
     }

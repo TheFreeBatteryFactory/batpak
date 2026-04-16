@@ -331,6 +331,17 @@ pub struct DiskPos {
     pub length: u32,
 }
 
+impl DiskPos {
+    /// Construct a new persisted frame location.
+    pub const fn new(segment_id: u64, offset: u64, length: u32) -> Self {
+        Self {
+            segment_id,
+            offset,
+            length,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ProjectionReplayItem {
     pub(crate) global_sequence: u64,
@@ -725,8 +736,6 @@ impl StoreIndex {
     /// `entries` must be sorted ascending by `global_sequence`. The allocator is
     /// restored to `max(last_sequence + 1, allocator_hint)` and published only
     /// after every base map and overlay view has been rebuilt.
-    // Entity run indices are u64 for serialization portability; truncation is safe on 64-bit.
-    #[allow(clippy::cast_possible_truncation)]
     fn restore_sorted_entries_impl(
         &self,
         entries: Vec<IndexEntry>,
@@ -748,8 +757,11 @@ impl StoreIndex {
             HashMap::<Arc<str>, Arc<IndexEntry>>::with_capacity(restored.routing.entity_runs.len());
 
         for run in &restored.routing.entity_runs {
-            let start = run.start as usize;
-            let end = start + (run.len as usize);
+            let start = usize::try_from(run.start)
+                .expect("invariant: entity run index fits usize on any supported target");
+            let end = start
+                + usize::try_from(run.len)
+                    .expect("invariant: entity run length fits usize on any supported target");
             let slice = &restored.entries_by_entity[start..end];
             let entity = slice[0].coord.entity_arc();
             let stream: BTreeMap<ClockKey, Arc<IndexEntry>> = slice

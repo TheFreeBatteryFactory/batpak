@@ -15,19 +15,47 @@ pub enum CausationRef {
     PriorItem(usize),
 }
 
+impl CausationRef {
+    /// Returns true when causation should fall back to the append options field.
+    pub const fn uses_options_fallback(self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    /// Resolve the effective causation ID for a batch item.
+    pub(crate) fn resolve(
+        self,
+        fallback: Option<u128>,
+        item_index: usize,
+        prior_event_id: impl FnOnce(usize) -> u128,
+    ) -> Result<Option<u128>, StoreError> {
+        match self {
+            Self::None => Ok(fallback),
+            Self::Absolute(id) => Ok(Some(id)),
+            Self::PriorItem(prior_idx) => {
+                if prior_idx >= item_index {
+                    return Err(StoreError::Configuration(
+                        "PriorItem causation must reference earlier batch item".into(),
+                    ));
+                }
+                Ok(Some(prior_event_id(prior_idx)))
+            }
+        }
+    }
+}
+
 /// Single item in a batch append operation.
 #[derive(Clone, Debug)]
 pub struct BatchAppendItem {
     /// Target coordinate (entity/scope) for this event.
-    pub coord: Coordinate,
+    coord: Coordinate,
     /// Event kind classification.
-    pub kind: EventKind,
+    kind: EventKind,
     /// Pre-serialized payload bytes (MessagePack).
-    pub payload_bytes: Vec<u8>,
+    payload_bytes: Vec<u8>,
     /// Append options (idempotency, correlation, etc.).
-    pub options: AppendOptions,
+    options: AppendOptions,
     /// Causation reference for intra-batch linking.
-    pub causation: CausationRef,
+    causation: CausationRef,
 }
 
 impl BatchAppendItem {
@@ -51,6 +79,67 @@ impl BatchAppendItem {
             options,
             causation,
         })
+    }
+
+    /// Low-level escape hatch for callers that already own canonical MessagePack bytes.
+    ///
+    /// Unlike [`BatchAppendItem::new`], this does not perform payload serialization.
+    pub fn from_msgpack_bytes(
+        coord: Coordinate,
+        kind: EventKind,
+        payload_bytes: Vec<u8>,
+        options: AppendOptions,
+        causation: CausationRef,
+    ) -> Self {
+        Self {
+            coord,
+            kind,
+            payload_bytes,
+            options,
+            causation,
+        }
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (Coordinate, EventKind, Vec<u8>, AppendOptions, CausationRef) {
+        (
+            self.coord,
+            self.kind,
+            self.payload_bytes,
+            self.options,
+            self.causation,
+        )
+    }
+
+    /// Borrow the append options for this item.
+    pub fn options(&self) -> AppendOptions {
+        self.options
+    }
+
+    /// Borrow the causation reference for this item.
+    pub fn causation(&self) -> CausationRef {
+        self.causation
+    }
+
+    /// Borrow the coordinate for this item.
+    pub fn coord(&self) -> &Coordinate {
+        &self.coord
+    }
+
+    /// Return the event kind for this item.
+    pub fn kind(&self) -> EventKind {
+        self.kind
+    }
+
+    /// Borrow the encoded payload bytes for this item.
+    pub fn payload_bytes(&self) -> &[u8] {
+        &self.payload_bytes
+    }
+
+    pub(crate) fn with_options(mut self, options: AppendOptions) -> Self {
+        self.options = options;
+        self
     }
 }
 
@@ -82,7 +171,7 @@ impl AppendPositionHint {
 }
 
 /// AppendOptions: CAS, idempotency, custom correlation/causation.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct AppendOptions {
     /// Expected entity sequence for compare-and-swap; `None` skips the CAS check.
     pub expected_sequence: Option<u32>,
@@ -100,9 +189,17 @@ pub struct AppendOptions {
 }
 
 impl AppendOptions {
-    /// Create new AppendOptions with all defaults.
-    pub fn new() -> Self {
-        Self::default()
+    /// No-option baseline: all guards disabled, no hints, no custom IDs.
+    /// `Default::default()` delegates here — one source of truth for the zero value.
+    pub const fn new() -> Self {
+        Self {
+            expected_sequence: None,
+            idempotency_key: None,
+            correlation_id: None,
+            causation_id: None,
+            position_hint: None,
+            flags: 0,
+        }
     }
 
     /// Set expected sequence for compare-and-swap (CAS) check.
@@ -139,6 +236,12 @@ impl AppendOptions {
     pub fn with_position_hint(mut self, hint: AppendPositionHint) -> Self {
         self.position_hint = Some(hint);
         self
+    }
+}
+
+impl Default for AppendOptions {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

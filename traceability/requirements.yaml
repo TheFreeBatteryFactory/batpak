@@ -17,6 +17,8 @@
     - ART-TRACEABILITY
     - ART-ADR-SYNC
     - ART-ADR-COMPACTION
+    - ART-ADR-RESTORE-PLANNER
+    - ART-ADR-POSITION-HINTS
 - id: REQ-STORE-HONESTY
   summary: The store runtime must expose only production-valid APIs by default and make privileged paths explicit.
   artifacts:

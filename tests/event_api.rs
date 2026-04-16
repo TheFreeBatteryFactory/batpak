@@ -606,6 +606,41 @@ fn dag_position_child() {
 }
 
 #[test]
+fn dag_position_with_hlc_preserves_all_fields() {
+    let pos = DagPosition::with_hlc(1234, 7, 2, 9, 42);
+    assert_eq!(
+        pos.wall_ms, 1234,
+        "PROPERTY: DagPosition::with_hlc must preserve the supplied wall_ms.\n\
+         Investigate: src/coordinate/position.rs DagPosition::with_hlc().\n\
+         Run: cargo test --test event_api dag_position_with_hlc_preserves_all_fields"
+    );
+    assert_eq!(
+        pos.counter, 7,
+        "PROPERTY: DagPosition::with_hlc must preserve the supplied HLC counter.\n\
+         Investigate: src/coordinate/position.rs DagPosition::with_hlc().\n\
+         Run: cargo test --test event_api dag_position_with_hlc_preserves_all_fields"
+    );
+    assert_eq!(
+        pos.depth, 2,
+        "PROPERTY: DagPosition::with_hlc must preserve the supplied depth.\n\
+         Investigate: src/coordinate/position.rs DagPosition::with_hlc().\n\
+         Run: cargo test --test event_api dag_position_with_hlc_preserves_all_fields"
+    );
+    assert_eq!(
+        pos.lane, 9,
+        "PROPERTY: DagPosition::with_hlc must preserve the supplied lane.\n\
+         Investigate: src/coordinate/position.rs DagPosition::with_hlc().\n\
+         Run: cargo test --test event_api dag_position_with_hlc_preserves_all_fields"
+    );
+    assert_eq!(
+        pos.sequence, 42,
+        "PROPERTY: DagPosition::with_hlc must preserve the supplied sequence.\n\
+         Investigate: src/coordinate/position.rs DagPosition::with_hlc().\n\
+         Run: cargo test --test event_api dag_position_with_hlc_preserves_all_fields"
+    );
+}
+
+#[test]
 fn dag_position_fork() {
     let pos = DagPosition::fork(2, 3);
     assert_eq!(

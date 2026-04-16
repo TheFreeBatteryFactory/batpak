@@ -732,19 +732,19 @@ proptest! {
         .expect("construct BatchAppendItem");
 
         let decoded: serde_json::Value =
-            rmp_serde::from_slice(&item.payload_bytes).expect("decode payload bytes");
+            rmp_serde::from_slice(item.payload_bytes()).expect("decode payload bytes");
 
-        prop_assert_eq!(item.coord, coord,
+        prop_assert_eq!(item.coord(), &coord,
             "BATCH ITEM COORD MISMATCH. Investigate: src/store/contracts.rs BatchAppendItem::new.");
-        prop_assert_eq!(item.kind, EventKind::DATA,
+        prop_assert_eq!(item.kind(), EventKind::DATA,
             "BATCH ITEM KIND MISMATCH. Investigate: src/store/contracts.rs BatchAppendItem::new.");
-        prop_assert_eq!(item.options.correlation_id, correlation_id,
+        prop_assert_eq!(item.options().correlation_id, correlation_id,
             "BATCH ITEM CORRELATION MISMATCH. Investigate: src/store/contracts.rs AppendOptions preservation.");
-        prop_assert_eq!(item.options.causation_id, causation_id,
+        prop_assert_eq!(item.options().causation_id, causation_id,
             "BATCH ITEM CAUSATION OPTION MISMATCH. Investigate: src/store/contracts.rs AppendOptions preservation.");
-        prop_assert_eq!(item.options.flags, flags,
+        prop_assert_eq!(item.options().flags, flags,
             "BATCH ITEM FLAGS MISMATCH. Investigate: src/store/contracts.rs AppendOptions preservation.");
-        prop_assert_eq!(item.causation, causation,
+        prop_assert_eq!(item.causation(), causation,
             "BATCH ITEM CAUSATION REF MISMATCH. Investigate: src/store/contracts.rs CausationRef preservation.");
         prop_assert_eq!(decoded, value,
             "BATCH ITEM PAYLOAD ROUNDTRIP FAILED. Investigate: src/store/contracts.rs BatchAppendItem::new payload encoding.");
@@ -775,11 +775,11 @@ proptest! {
 
         prop_assert_eq!(items.len(), item_count,
             "BATCH ITEM COUNT MISMATCH. Investigate: src/store/contracts.rs batch item construction.");
-        prop_assert!(items.iter().all(|item| item.coord == coord),
+        prop_assert!(items.iter().all(|item| item.coord() == &coord),
             "BATCH ITEM COORD DRIFT. Investigate: src/store/contracts.rs BatchAppendItem construction.");
-        prop_assert!(items.iter().all(|item| item.kind == EventKind::DATA),
+        prop_assert!(items.iter().all(|item| item.kind() == EventKind::DATA),
             "BATCH ITEM KIND DRIFT. Investigate: src/store/contracts.rs BatchAppendItem construction.");
-        prop_assert!(items.iter().all(|item| !item.payload_bytes.is_empty()),
+        prop_assert!(items.iter().all(|item| !item.payload_bytes().is_empty()),
             "BATCH ITEM PAYLOAD BYTES SHOULD NOT BE EMPTY FOR NON-EMPTY JSON ARRAYS.");
     }
 

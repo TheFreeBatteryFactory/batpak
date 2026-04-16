@@ -1,4 +1,5 @@
 use crate::coordinate::Coordinate;
+use crate::event::header::SidxReconstructionFields;
 use crate::event::{Event, EventHeader, EventKind, HashChain, StoredEvent};
 use crate::store::segment::{self, FramePayload, SEGMENT_MAGIC};
 use crate::store::{DiskPos, StoreError};
@@ -10,6 +11,9 @@ use std::fs::File;
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+const FRAME_HEADER_BYTES: usize = 8;
+const MAX_BATCH_RECOVERY_ITEMS: u32 = 4096;
 
 /// Reader: reads events from segment files.
 /// Sealed segments: memory-mapped via `memmap2` for zero-copy reads.
@@ -83,6 +87,114 @@ struct IndexScanEvent {
 }
 
 impl Reader {
+    fn checked_frame_len(segment_id: u64, length: u32) -> Result<usize, StoreError> {
+        let frame_len = usize::try_from(length).map_err(|_| {
+            StoreError::corrupt_frame(segment_id, "stored frame length does not fit in usize")
+        })?;
+        let max_frame_len = FRAME_HEADER_BYTES + segment::MAX_FRAME_PAYLOAD;
+        if frame_len < FRAME_HEADER_BYTES || frame_len > max_frame_len {
+            return Err(StoreError::corrupt_frame(
+                segment_id,
+                format!(
+                    "stored frame length {frame_len} is outside valid range [{FRAME_HEADER_BYTES}, {max_frame_len}]"
+                ),
+            ));
+        }
+        Ok(frame_len)
+    }
+
+    fn checked_frame_range(
+        segment_id: u64,
+        offset: u64,
+        length: u32,
+        available_len: usize,
+    ) -> Result<std::ops::Range<usize>, StoreError> {
+        let start = usize::try_from(offset).map_err(|_| StoreError::corrupt_eof(segment_id))?;
+        let frame_len = Self::checked_frame_len(segment_id, length)?;
+        let end = start
+            .checked_add(frame_len)
+            .ok_or_else(|| StoreError::corrupt_frame(segment_id, "frame offset overflow"))?;
+        if end > available_len {
+            return Err(StoreError::corrupt_eof(segment_id));
+        }
+        Ok(start..end)
+    }
+
+    fn checked_batch_count(
+        segment_id: u64,
+        offset: u64,
+        batch_count: u32,
+    ) -> Result<u32, StoreError> {
+        if batch_count == 0 || batch_count > MAX_BATCH_RECOVERY_ITEMS {
+            return Err(StoreError::corrupt_frame(
+                segment_id,
+                format!(
+                    "invalid batch marker count {batch_count} at offset {offset}; expected 1..={MAX_BATCH_RECOVERY_ITEMS}"
+                ),
+            ));
+        }
+        Ok(batch_count)
+    }
+
+    fn required_index_hash_chain(
+        event: &IndexScanEvent,
+        segment_id: u64,
+        offset: u64,
+    ) -> Result<HashChain, StoreError> {
+        match &event.hash_chain {
+            Some(chain) => Ok(chain.clone()),
+            None if matches!(
+                event.header.event_kind,
+                EventKind::SYSTEM_BATCH_BEGIN | EventKind::SYSTEM_BATCH_COMMIT
+            ) =>
+            {
+                Err(StoreError::corrupt_frame(
+                    segment_id,
+                    format!(
+                        "batch marker at offset {offset} should not reach hash-chain validation"
+                    ),
+                ))
+            }
+            None => Err(StoreError::corrupt_frame(
+                segment_id,
+                format!(
+                    "event at offset {offset} is missing hash_chain; recovery no longer defaults missing hashes"
+                ),
+            )),
+        }
+    }
+
+    fn read_active_frame_into(&self, pos: &DiskPos, buf: &mut [u8]) -> Result<(), StoreError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            let segment_id = pos.segment_id;
+            let offset = pos.offset;
+            self.with_fd(segment_id, |f| {
+                let mut total_read = 0;
+                while total_read < buf.len() {
+                    let n = f
+                        .read_at(&mut buf[total_read..], offset + total_read as u64)
+                        .map_err(StoreError::Io)?;
+                    if n == 0 {
+                        return Err(StoreError::corrupt_eof(segment_id));
+                    }
+                    total_read += n;
+                }
+                Ok(())
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            use std::io::{Seek, SeekFrom};
+            let offset = pos.offset;
+            self.with_fd(pos.segment_id, |f| {
+                f.seek(SeekFrom::Start(offset)).map_err(StoreError::Io)?;
+                f.read_exact(buf).map_err(StoreError::Io)
+            })
+        }
+    }
+
     fn decode_frame_payload_raw(msgpack: &[u8]) -> Result<FramePayload<Vec<u8>>, StoreError> {
         rmp_serde::from_slice(msgpack).map_err(|e| StoreError::Serialization(Box::new(e)))
     }
@@ -210,36 +322,9 @@ impl Reader {
         }
 
         // Slow path: active segment via FD cache + buffer pool.
-        let mut buf = self.acquire_buffer(pos.length as usize);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            let segment_id = pos.segment_id;
-            let offset = pos.offset;
-            self.with_fd(segment_id, |f| {
-                let mut total_read = 0;
-                while total_read < buf.len() {
-                    let n = f
-                        .read_at(&mut buf[total_read..], offset + total_read as u64)
-                        .map_err(StoreError::Io)?;
-                    if n == 0 {
-                        return Err(StoreError::corrupt_eof(segment_id));
-                    }
-                    total_read += n;
-                }
-                Ok(())
-            })?;
-        }
-        #[cfg(not(unix))]
-        {
-            use std::io::{Seek, SeekFrom};
-            let offset = pos.offset;
-            self.with_fd(pos.segment_id, |f| {
-                f.seek(SeekFrom::Start(offset)).map_err(StoreError::Io)?;
-                f.read_exact(&mut buf).map_err(StoreError::Io)
-            })?;
-        }
+        let frame_len = Self::checked_frame_len(pos.segment_id, pos.length)?;
+        let mut buf = self.acquire_buffer(frame_len);
+        self.read_active_frame_into(pos, &mut buf)?;
 
         let result = segment::frame_decode(&buf).map_err(|e| match e {
             segment::FrameDecodeError::CrcMismatch { .. } => StoreError::CrcMismatch {
@@ -433,20 +518,16 @@ impl Reader {
                         .cloned()
                         .unwrap_or_default();
                     sink(ScannedIndexEntry {
-                        header: crate::event::EventHeader::from_sidx(
-                            se.event_id,
-                            se.correlation_id,
-                            if se.causation_id == 0 {
-                                None
-                            } else {
-                                Some(se.causation_id)
-                            },
-                            se.wall_ms,
-                            se.clock,
-                            se.dag_lane,
-                            se.dag_depth,
-                            kind,
-                        ),
+                        header: EventHeader::from_sidx(SidxReconstructionFields {
+                            event_id: se.event_id,
+                            correlation_id: se.correlation_id,
+                            causation_id: (se.causation_id != 0).then_some(se.causation_id),
+                            wall_ms: se.wall_ms,
+                            clock: se.clock,
+                            lane: se.dag_lane,
+                            depth: se.dag_depth,
+                            event_kind: kind,
+                        }),
                         entity,
                         scope,
                         hash_chain: crate::event::HashChain {
@@ -579,11 +660,18 @@ impl Reader {
                                 if kind == EventKind::SYSTEM_BATCH_BEGIN {
                                     // Start staging batch. The marker itself is not indexed.
                                     // Extract batch count from payload_size field.
-                                    let batch_count = payload.event.header.payload_size;
+                                    let batch_count = Self::checked_batch_count(
+                                        segment_id,
+                                        frame_offset,
+                                        payload.event.header.payload_size,
+                                    )?;
                                     state_ref.in_batch = true;
                                     state_ref.remaining = batch_count;
                                     state_ref.started_count = batch_count;
-                                    state_ref.staged.reserve(batch_count as usize);
+                                    state_ref.staged.reserve(
+                                        usize::try_from(batch_count)
+                                            .expect("validated batch count fits in usize"),
+                                    );
                                 } else if kind == EventKind::SYSTEM_BATCH_COMMIT {
                                     // COMMIT without BEGIN: orphaned commit, skip.
                                     tracing::warn!(
@@ -593,16 +681,20 @@ impl Reader {
                                     );
                                 } else {
                                     // Normal event: commit immediately.
+                                    let hash_chain = Self::required_index_hash_chain(
+                                        &payload.event,
+                                        segment_id,
+                                        frame_offset,
+                                    )?;
                                     sink(ScannedIndexEntry {
                                         header: payload.event.header,
                                         entity: payload.entity,
                                         scope: payload.scope,
-                                        hash_chain: payload.event.hash_chain.unwrap_or_default(),
+                                        hash_chain,
                                         segment_id,
                                         offset: frame_offset,
-                                        // Frame sizes are bounded by segment_max_bytes (default 64MB), well within u32 range
-                                        #[allow(clippy::cast_possible_truncation)]
-                                        length: frame_size as u32,
+                                        length: u32::try_from(frame_size)
+                                            .expect("invariant: frame_size bounded by segment_max_bytes (64 MB), well within u32"),
                                         // Slow path: no SIDX footer, so no durable sequence source.
                                         // Caller (rebuild) will synthesize via the ReplayCursor allocator.
                                         global_sequence: None,
@@ -648,23 +740,34 @@ impl Reader {
                                     "nested BEGIN without COMMIT, discarding incomplete batch"
                                 );
                                 // Start new batch.
-                                let batch_count = payload.event.header.payload_size;
+                                let batch_count = Self::checked_batch_count(
+                                    segment_id,
+                                    frame_offset,
+                                    payload.event.header.payload_size,
+                                )?;
                                 state_ref.remaining = batch_count;
                                 state_ref.started_count = batch_count;
                                 state_ref.staged.clear();
-                                state_ref.staged.reserve(batch_count as usize);
+                                state_ref.staged.reserve(
+                                    usize::try_from(batch_count)
+                                        .expect("validated batch count fits in usize"),
+                                );
                             } else {
                                 // Stage this event (not a marker).
+                                let hash_chain = Self::required_index_hash_chain(
+                                    &payload.event,
+                                    segment_id,
+                                    frame_offset,
+                                )?;
                                 state_ref.staged.push(ScannedIndexEntry {
                                     header: payload.event.header,
                                     entity: payload.entity,
                                     scope: payload.scope,
-                                    hash_chain: payload.event.hash_chain.unwrap_or_default(),
+                                    hash_chain,
                                     segment_id,
                                     offset: frame_offset,
-                                    // Frame sizes are bounded by segment_max_bytes (default 64MB), well within u32 range
-                                    #[allow(clippy::cast_possible_truncation)]
-                                    length: frame_size as u32,
+                                    length: u32::try_from(frame_size)
+                                        .expect("invariant: frame_size bounded by segment_max_bytes (64 MB), well within u32"),
                                     // Slow path: no SIDX, no durable sequence source.
                                     global_sequence: None,
                                 });
@@ -774,13 +877,9 @@ impl Reader {
     fn read_entry_mmap(&self, pos: &DiskPos) -> Result<StoredEvent<serde_json::Value>, StoreError> {
         let mmap_ref = self.get_or_map_sealed(pos.segment_id)?;
         let mmap: &memmap2::Mmap = mmap_ref.value();
-        let start =
-            usize::try_from(pos.offset).map_err(|_| StoreError::corrupt_eof(pos.segment_id))?;
-        let end = start + pos.length as usize;
-        if end > mmap.len() {
-            return Err(StoreError::corrupt_eof(pos.segment_id));
-        }
-        let frame_buf = &mmap[start..end];
+        let frame_range =
+            Self::checked_frame_range(pos.segment_id, pos.offset, pos.length, mmap.len())?;
+        let frame_buf = &mmap[frame_range];
         let (msgpack, _) = segment::frame_decode(frame_buf).map_err(|e| match e {
             segment::FrameDecodeError::CrcMismatch { .. } => StoreError::CrcMismatch {
                 segment_id: pos.segment_id,
@@ -812,36 +911,9 @@ impl Reader {
         }
 
         // Slow path: active segment via FD cache + buffer pool.
-        let mut buf = self.acquire_buffer(pos.length as usize);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            let segment_id = pos.segment_id;
-            let offset = pos.offset;
-            self.with_fd(segment_id, |f| {
-                let mut total_read = 0;
-                while total_read < buf.len() {
-                    let n = f
-                        .read_at(&mut buf[total_read..], offset + total_read as u64)
-                        .map_err(StoreError::Io)?;
-                    if n == 0 {
-                        return Err(StoreError::corrupt_eof(segment_id));
-                    }
-                    total_read += n;
-                }
-                Ok(())
-            })?;
-        }
-        #[cfg(not(unix))]
-        {
-            use std::io::{Seek, SeekFrom};
-            let offset = pos.offset;
-            self.with_fd(pos.segment_id, |f| {
-                f.seek(SeekFrom::Start(offset)).map_err(StoreError::Io)?;
-                f.read_exact(&mut buf).map_err(StoreError::Io)
-            })?;
-        }
+        let frame_len = Self::checked_frame_len(pos.segment_id, pos.length)?;
+        let mut buf = self.acquire_buffer(frame_len);
+        self.read_active_frame_into(pos, &mut buf)?;
 
         let result = segment::frame_decode(&buf).map_err(|e| match e {
             segment::FrameDecodeError::CrcMismatch { .. } => StoreError::CrcMismatch {
@@ -872,13 +944,9 @@ impl Reader {
     fn read_event_only_mmap(&self, pos: &DiskPos) -> Result<Event<serde_json::Value>, StoreError> {
         let mmap_ref = self.get_or_map_sealed(pos.segment_id)?;
         let mmap: &memmap2::Mmap = mmap_ref.value();
-        let start =
-            usize::try_from(pos.offset).map_err(|_| StoreError::corrupt_eof(pos.segment_id))?;
-        let end = start + pos.length as usize;
-        if end > mmap.len() {
-            return Err(StoreError::corrupt_eof(pos.segment_id));
-        }
-        let frame_buf = &mmap[start..end];
+        let frame_range =
+            Self::checked_frame_range(pos.segment_id, pos.offset, pos.length, mmap.len())?;
+        let frame_buf = &mmap[frame_range];
         let (msgpack, _) = segment::frame_decode(frame_buf).map_err(|e| match e {
             segment::FrameDecodeError::CrcMismatch { .. } => StoreError::CrcMismatch {
                 segment_id: pos.segment_id,
@@ -913,36 +981,9 @@ impl Reader {
             return self.read_event_raw_only_mmap(pos);
         }
 
-        let mut buf = self.acquire_buffer(pos.length as usize);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            let segment_id = pos.segment_id;
-            let offset = pos.offset;
-            self.with_fd(segment_id, |f| {
-                let mut total_read = 0;
-                while total_read < buf.len() {
-                    let n = f
-                        .read_at(&mut buf[total_read..], offset + total_read as u64)
-                        .map_err(StoreError::Io)?;
-                    if n == 0 {
-                        return Err(StoreError::corrupt_eof(segment_id));
-                    }
-                    total_read += n;
-                }
-                Ok(())
-            })?;
-        }
-        #[cfg(not(unix))]
-        {
-            use std::io::{Seek, SeekFrom};
-            let offset = pos.offset;
-            self.with_fd(pos.segment_id, |f| {
-                f.seek(SeekFrom::Start(offset)).map_err(StoreError::Io)?;
-                f.read_exact(&mut buf).map_err(StoreError::Io)
-            })?;
-        }
+        let frame_len = Self::checked_frame_len(pos.segment_id, pos.length)?;
+        let mut buf = self.acquire_buffer(frame_len);
+        self.read_active_frame_into(pos, &mut buf)?;
 
         let result = segment::frame_decode(&buf).map_err(|e| match e {
             segment::FrameDecodeError::CrcMismatch { .. } => StoreError::CrcMismatch {
@@ -968,13 +1009,9 @@ impl Reader {
     fn read_event_raw_only_mmap(&self, pos: &DiskPos) -> Result<Event<Vec<u8>>, StoreError> {
         let mmap_ref = self.get_or_map_sealed(pos.segment_id)?;
         let mmap: &memmap2::Mmap = mmap_ref.value();
-        let start =
-            usize::try_from(pos.offset).map_err(|_| StoreError::corrupt_eof(pos.segment_id))?;
-        let end = start + pos.length as usize;
-        if end > mmap.len() {
-            return Err(StoreError::corrupt_eof(pos.segment_id));
-        }
-        let frame_buf = &mmap[start..end];
+        let frame_range =
+            Self::checked_frame_range(pos.segment_id, pos.offset, pos.length, mmap.len())?;
+        let frame_buf = &mmap[frame_range];
         let (msgpack, _) = segment::frame_decode(frame_buf).map_err(|e| match e {
             segment::FrameDecodeError::CrcMismatch { .. } => StoreError::CrcMismatch {
                 segment_id: pos.segment_id,
@@ -1135,6 +1172,50 @@ mod tests {
         assert!(
             buf.iter().all(|&b| b == 0),
             "PROPERTY: a freshly allocated buffer must be zero-filled."
+        );
+    }
+
+    #[test]
+    fn checked_frame_range_rejects_overflow_and_oversized_lengths() {
+        assert!(Reader::checked_frame_range(1, u64::MAX, 16, 1024).is_err());
+        assert!(Reader::checked_frame_len(1, 4).is_err());
+        assert!(Reader::checked_frame_len(1, u32::MAX).is_err());
+    }
+
+    #[test]
+    fn checked_batch_count_rejects_vacuous_or_implausible_counts() {
+        assert!(Reader::checked_batch_count(1, 0, 0).is_err());
+        assert!(Reader::checked_batch_count(1, 0, MAX_BATCH_RECOVERY_ITEMS + 1).is_err());
+        assert_eq!(
+            Reader::checked_batch_count(1, 0, 3).expect("valid batch count"),
+            3
+        );
+    }
+
+    #[test]
+    fn required_index_hash_chain_rejects_missing_chain_for_data_event() {
+        let event = IndexScanEvent {
+            header: EventHeader::new(
+                1,
+                1,
+                None,
+                1,
+                crate::coordinate::DagPosition::root(),
+                0,
+                EventKind::DATA,
+            ),
+            _payload: serde::de::IgnoredAny,
+            hash_chain: None,
+        };
+
+        let err = Reader::required_index_hash_chain(&event, 7, 99).expect_err("missing hash chain");
+        assert!(
+            matches!(
+                err,
+                StoreError::CorruptSegment { segment_id: 7, ref detail }
+                if detail.contains("missing hash_chain")
+            ),
+            "PROPERTY: missing hash_chain must surface as CorruptSegment with the expected detail, got {err:?}"
         );
     }
 }

@@ -184,14 +184,16 @@ impl Segment<Active> {
         let path = dir.join(segment_filename(segment_id));
         let mut file = std::fs::File::create_new(&path).map_err(StoreError::Io)?;
 
+        let created_ns_u128 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
         let header = SegmentHeader {
             version: 1,
             flags: 0,
-            #[allow(clippy::cast_possible_truncation)] // won't overflow i64 until year 2262
-            created_ns: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as i64,
+            // Unix epoch nanoseconds fit in i64 until year 2262 — safe for this project's lifetime.
+            created_ns: i64::try_from(created_ns_u128)
+                .expect("invariant: Unix epoch ns fits i64 until year 2262"),
             segment_id,
         };
 
@@ -199,8 +201,9 @@ impl Segment<Active> {
         file.write_all(SEGMENT_MAGIC).map_err(StoreError::Io)?;
         let header_bytes =
             rmp_serde::to_vec_named(&header).map_err(|e| StoreError::Serialization(Box::new(e)))?;
-        #[allow(clippy::cast_possible_truncation)] // msgpack header is always small
-        let header_len = (header_bytes.len() as u32).to_be_bytes();
+        let header_len = u32::try_from(header_bytes.len())
+            .expect("invariant: msgpack segment header is always small, well under u32::MAX")
+            .to_be_bytes();
         file.write_all(&header_len).map_err(StoreError::Io)?;
         file.write_all(&header_bytes).map_err(StoreError::Io)?;
 

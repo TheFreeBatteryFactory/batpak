@@ -89,6 +89,10 @@ struct MmapIndexEntry {
 }
 
 impl MmapIndexEntry {
+    fn to_disk_pos(&self) -> DiskPos {
+        DiskPos::new(self.segment_id, self.frame_offset, self.frame_length)
+    }
+
     #[cfg(test)]
     fn encode_into_v2(&self, buf: &mut [u8]) {
         debug_assert_eq!(buf.len(), MMAP_ENTRY_SIZE_V2);
@@ -592,6 +596,10 @@ fn try_load_mmap_index(data_dir: &Path) -> Option<LoadedMmapIndex> {
         }
     }
 
+    // SAFETY: Mmap::map requires a valid open file descriptor. The `file`
+    // handle remains open for the duration of the mapping. The mmap index
+    // file is read-only and not written to while open — external modification
+    // would be a usage error, not a correctness concern for safe Rust callers.
     let mmap = match unsafe { Mmap::map(&file) } {
         Ok(mmap) => mmap,
         Err(error) => {
@@ -773,11 +781,7 @@ pub(crate) fn try_load_mmap_snapshot(data_dir: &Path) -> Option<LoadedMmapSnapsh
                         prev_hash: entry.prev_hash,
                         event_hash: entry.event_hash,
                     },
-                    disk_pos: DiskPos {
-                        segment_id: entry.segment_id,
-                        offset: entry.frame_offset,
-                        length: entry.frame_length,
-                    },
+                    disk_pos: entry.to_disk_pos(),
                     global_sequence: entry.global_sequence,
                 });
             }
@@ -829,7 +833,7 @@ mod tests {
                 coord,
                 entity_id,
                 scope_id,
-                kind: EventKind::custom(0x1, (i & 0x0FFF) as u16),
+                kind: EventKind::custom(0x1, u16::try_from(i & 0x0FFF).expect("masked to 12 bits, fits u16")),
                 wall_ms: 10_000 + i,
                 clock: u32::try_from(i).expect("fits u32"),
                 dag_lane: 0,
@@ -902,7 +906,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::cast_possible_truncation)] // test constructs v1 binary format with known small values
     fn v1_mmap_fallback_is_still_readable() {
         let tmp = TempDir::new().expect("temp dir");
         let segment_path = tmp.path().join(crate::store::segment::segment_filename(7));
@@ -918,7 +921,11 @@ mod tests {
         header_tail.extend_from_slice(&7u64.to_le_bytes());
         header_tail.extend_from_slice(&128u64.to_le_bytes());
         header_tail.extend_from_slice(&idx.global_sequence().to_le_bytes());
-        header_tail.extend_from_slice(&(interner_strings.len() as u32).to_le_bytes());
+        header_tail.extend_from_slice(
+            &u32::try_from(interner_strings.len())
+                .expect("test interner string count fits in u32")
+                .to_le_bytes(),
+        );
         header_tail.extend_from_slice(&(entries.len() as u64).to_le_bytes());
         header_tail.extend_from_slice(&(interner_bytes.len() as u64).to_le_bytes());
 
@@ -974,7 +981,11 @@ mod tests {
         header_tail.extend_from_slice(&7u64.to_le_bytes());
         header_tail.extend_from_slice(&128u64.to_le_bytes());
         header_tail.extend_from_slice(&idx.global_sequence().to_le_bytes());
-        header_tail.extend_from_slice(&(interner_strings.len() as u32).to_le_bytes());
+        header_tail.extend_from_slice(
+            &u32::try_from(interner_strings.len())
+                .expect("test interner string count fits in u32")
+                .to_le_bytes(),
+        );
         header_tail.extend_from_slice(&(entries.len() as u64).to_le_bytes());
         header_tail.extend_from_slice(&(interner_bytes.len() as u64).to_le_bytes());
         header_tail.extend_from_slice(&(summary_bytes.len() as u64).to_le_bytes());

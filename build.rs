@@ -1,4 +1,4 @@
-#![allow(clippy::panic)]
+#![allow(clippy::panic)] // build.rs fails fast with explicit invariant messages by design
 
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -69,19 +69,16 @@ fn check_no_stubs_in_src() {
     });
 }
 
-/// FM-002 Rogue Silence defense: every #[allow(...)] in src/ must have a
+/// FM-002 Rogue Silence defense: every #[allow(...)] in runtime or toolchain
+/// Rust code must have a
 /// justification comment on the same or previous line explaining why.
 /// Unjustified allows are how agents silence the compiler instead of fixing bugs.
 fn check_allow_justifications() {
-    walk_rs_files(Path::new("src"), &mut |path, contents| {
+    walk_allow_checked_rs_files(&mut |path, contents| {
         let path_str = path.display().to_string();
         for (line_no, line) in contents.lines().enumerate() {
             let trimmed = line.trim();
-            // Skip the crate-level allow at the top of lib.rs
-            if trimmed.starts_with("#![allow") {
-                continue;
-            }
-            if trimmed.starts_with("#[allow(") {
+            if trimmed.starts_with("#![allow(") || trimmed.starts_with("#[allow(") {
                 // Check this line and previous line for a justification comment
                 let has_justification = trimmed.contains("//")
                     || (line_no > 0
@@ -408,14 +405,10 @@ fn collect_rs_contents(dir: &Path, buf: &mut String, exclude: Option<&str>) {
     }
 }
 
-/// Moonwalker post-mortem defense: every pub item in src/ must appear in at least
-/// one test file. This is the library-shaped version of "dispatch functions with no
-/// tests" — if a future AI campaign adds a pub fn/struct/enum/trait without a test,
-/// the build fails. LAW-003 (No Orphan Infrastructure), FM-007 (Island Syndrome).
-///
-/// Fast text scan plus the canonical YAML allowlist. Keep this build-time gate
-/// cheap and local, even though the richer structural mirror lives in the
-/// integrity tool.
+/// Moonwalker post-mortem defense: every public item in src/ must have at least one
+/// coarse witness reference in tests/ or inline test/source contexts. This is a fast
+/// build-time tripwire, not a full semantic proof. LAW-003 (No Orphan Infrastructure),
+/// FM-007 (Island Syndrome).
 fn check_pub_items_have_tests() {
     // Collect all test file contents into one searchable string.
     let mut test_contents = String::new();
@@ -427,29 +420,31 @@ fn check_pub_items_have_tests() {
     let allowlist = load_pub_item_allowlist();
     let allowed_names: BTreeSet<&str> = allowlist.iter().map(|entry| entry.name.as_str()).collect();
 
-    // Walk src/ and extract pub item names.
+    // Walk src/ and collect public item names from the parsed AST.
     walk_rs_files(Path::new("src"), &mut |path, contents| {
         let path_str = path.display().to_string();
-        for (line_no, line) in contents.lines().enumerate() {
-            let trimmed = line.trim();
-            // Match: pub fn NAME, pub struct NAME, pub enum NAME, pub trait NAME
-            let item_name = extract_pub_item_name(trimmed);
-            if let Some(name) = item_name {
-                if allowed_names.contains(name) {
-                    continue;
-                }
-                // Check if this name appears in any test file
-                if !test_contents.contains(name) && !has_test_reference(&src_contents, name) {
-                    panic!(
-                        "PUB ITEM UNTESTED: `{name}` in {path_str}:{}\n\
-                         Every pub fn/struct/enum/trait must appear in at least one test file.\n\
-                         Either add a test that exercises this item, or add it to\n\
-                         traceability/pub_item_allowlist.yaml with a justification for why it's tested indirectly.\n\
-                         See: LAW-003 (No Orphan Infrastructure), FM-007 (Island Syndrome).\n\
-                         Post-mortem: moonwalker had 5 dispatch functions with zero tests.",
-                        line_no + 1
-                    );
-                }
+        let file = syn::parse_file(contents).unwrap_or_else(|err| {
+            panic!(
+                "PUB ITEM REFERENCE CHECK PARSE FAILURE in {path_str}: {err}\n\
+                 This detector is syntax-aware by design; fix the source or the parser input."
+            )
+        });
+        let mut collector = PublicItemCollector::default();
+        collector.visit_file(&file);
+        for name in collector.names {
+            if allowed_names.contains(name.as_str()) {
+                continue;
+            }
+            if !test_contents.contains(name.as_str()) && !has_test_reference(&src_contents, &name) {
+                panic!(
+                    "PUB ITEM REFERENCE GAP: `{name}` in {path_str}\n\
+                     This fast build-time detector only proves coarse name references in tests/\n\
+                     or inline test/source contexts; it does NOT prove semantic coverage.\n\
+                     Add a witness that names this item, or add it to\n\
+                     traceability/pub_item_allowlist.yaml with a justification for why it is\n\
+                     exercised indirectly.\n\
+                     See: LAW-003 (No Orphan Infrastructure), FM-007 (Island Syndrome)."
+                );
             }
         }
     });
@@ -480,37 +475,84 @@ fn load_pub_item_allowlist() -> Vec<PubItemAllowlistEntry> {
     entries
 }
 
-/// Extract the item name from a line like `pub fn foo(`, `pub struct Bar {`, etc.
-/// Returns None if the line doesn't match a pub item declaration.
-/// TODO(integrity-hardening): this heuristic does not handle `pub async fn`.
-/// Upgrade public-item discovery to a syn visitor before trusting it as a
-/// language-aware detector rather than a repo-shaped text scan.
-fn extract_pub_item_name(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix("pub ")?;
-    // Skip pub(crate), pub(super), pub(in ...) — those aren't public API
-    if rest.starts_with('(') {
-        return None;
+#[derive(Default)]
+struct PublicItemCollector {
+    names: BTreeSet<String>,
+}
+
+impl PublicItemCollector {
+    fn record_visibility(&mut self, vis: &syn::Visibility, name: impl Into<String>) {
+        if matches!(vis, syn::Visibility::Public(_)) {
+            self.names.insert(name.into());
+        }
     }
-    // Match the keyword
-    let after_keyword = if let Some(r) = rest.strip_prefix("fn ") {
-        r
-    } else if let Some(r) = rest.strip_prefix("struct ") {
-        r
-    } else if let Some(r) = rest.strip_prefix("enum ") {
-        r
-    } else if let Some(r) = rest.strip_prefix("trait ") {
-        r
-    } else {
-        return None;
-    };
-    // Extract the name (up to first non-alphanumeric/underscore)
-    let name = after_keyword
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .next()?;
-    if name.is_empty() {
-        return None;
+
+    fn record_use_tree(&mut self, tree: &syn::UseTree) {
+        match tree {
+            syn::UseTree::Name(name) => {
+                self.names.insert(name.ident.to_string());
+            }
+            syn::UseTree::Rename(rename) => {
+                self.names.insert(rename.rename.to_string());
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    self.record_use_tree(item);
+                }
+            }
+            syn::UseTree::Path(path) => self.record_use_tree(&path.tree),
+            syn::UseTree::Glob(_) => {}
+        }
     }
-    Some(name)
+}
+
+impl Visit<'_> for PublicItemCollector {
+    fn visit_item_fn(&mut self, node: &syn::ItemFn) {
+        self.record_visibility(&node.vis, node.sig.ident.to_string());
+        syn::visit::visit_item_fn(self, node);
+    }
+
+    fn visit_item_struct(&mut self, node: &syn::ItemStruct) {
+        self.record_visibility(&node.vis, node.ident.to_string());
+        syn::visit::visit_item_struct(self, node);
+    }
+
+    fn visit_item_enum(&mut self, node: &syn::ItemEnum) {
+        self.record_visibility(&node.vis, node.ident.to_string());
+        syn::visit::visit_item_enum(self, node);
+    }
+
+    fn visit_item_trait(&mut self, node: &syn::ItemTrait) {
+        self.record_visibility(&node.vis, node.ident.to_string());
+        syn::visit::visit_item_trait(self, node);
+    }
+
+    fn visit_item_type(&mut self, node: &syn::ItemType) {
+        self.record_visibility(&node.vis, node.ident.to_string());
+        syn::visit::visit_item_type(self, node);
+    }
+
+    fn visit_item_const(&mut self, node: &syn::ItemConst) {
+        self.record_visibility(&node.vis, node.ident.to_string());
+        syn::visit::visit_item_const(self, node);
+    }
+
+    fn visit_item_mod(&mut self, node: &syn::ItemMod) {
+        self.record_visibility(&node.vis, node.ident.to_string());
+        syn::visit::visit_item_mod(self, node);
+    }
+
+    fn visit_item_use(&mut self, node: &syn::ItemUse) {
+        if matches!(node.vis, syn::Visibility::Public(_)) {
+            self.record_use_tree(&node.tree);
+        }
+        syn::visit::visit_item_use(self, node);
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &syn::ImplItemFn) {
+        self.record_visibility(&node.vis, node.sig.ident.to_string());
+        syn::visit::visit_impl_item_fn(self, node);
+    }
 }
 
 /// Check if a name appears in a #[cfg(test)] context within src/ contents.
@@ -546,6 +588,24 @@ fn walk_rs_files(dir: &Path, check: &mut dyn FnMut(&Path, &str)) {
                     check(&path, &contents);
                 }
             }
+        }
+    }
+}
+
+fn walk_allow_checked_rs_files(check: &mut dyn FnMut(&Path, &str)) {
+    let roots = [
+        Path::new("build.rs"),
+        Path::new("src"),
+        Path::new("tools/xtask/src"),
+        Path::new("tools/integrity/src"),
+    ];
+    for root in roots {
+        if root.is_file() {
+            if let Ok(contents) = fs::read_to_string(root) {
+                check(root, &contents);
+            }
+        } else {
+            walk_rs_files(root, check);
         }
     }
 }

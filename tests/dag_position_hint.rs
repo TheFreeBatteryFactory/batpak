@@ -56,6 +56,81 @@ fn no_position_hint_preserves_root_position() {
 }
 
 #[test]
+fn batch_append_preserves_per_item_position_hints() {
+    let dir = TempDir::new().expect("temp dir");
+    let store = Store::open(StoreConfig::new(dir.path())).expect("open store");
+    let coord = test_coord();
+
+    let receipts = store
+        .append_batch(vec![
+            BatchAppendItem::new(
+                coord.clone(),
+                data_kind(),
+                &json!({"batch": 0}),
+                AppendOptions::new().with_position_hint(AppendPositionHint::new(2, 1)),
+                CausationRef::None,
+            )
+            .expect("batch item 0"),
+            BatchAppendItem::new(
+                coord.clone(),
+                data_kind(),
+                &json!({"batch": 1}),
+                AppendOptions::new().with_position_hint(AppendPositionHint::new(5, 3)),
+                CausationRef::None,
+            )
+            .expect("batch item 1"),
+        ])
+        .expect("append batch with position hints");
+
+    let first = store
+        .get(receipts[0].event_id)
+        .expect("fetch first batch item");
+    let second = store
+        .get(receipts[1].event_id)
+        .expect("fetch second batch item");
+
+    assert_position(&first, 2, 1);
+    assert_position(&second, 5, 3);
+}
+
+#[test]
+fn idempotent_replay_preserves_original_position_hint() {
+    let dir = TempDir::new().expect("temp dir");
+    let store = Store::open(StoreConfig::new(dir.path())).expect("open store");
+    let coord = test_coord();
+    let key = 0xABCD_EF01_2345_6789_u128;
+
+    let first = store
+        .append_with_options(
+            &coord,
+            data_kind(),
+            &json!({"x": 1}),
+            AppendOptions::new()
+                .with_idempotency(key)
+                .with_position_hint(AppendPositionHint::new(4, 2)),
+        )
+        .expect("first append");
+    let replay = store
+        .append_with_options(
+            &coord,
+            data_kind(),
+            &json!({"x": 2}),
+            AppendOptions::new()
+                .with_idempotency(key)
+                .with_position_hint(AppendPositionHint::new(9, 9)),
+        )
+        .expect("idempotent replay");
+
+    assert_eq!(replay.event_id, first.event_id);
+    assert_eq!(replay.sequence, first.sequence);
+
+    let stored = store
+        .get(first.event_id)
+        .expect("fetch idempotent original event");
+    assert_position(&stored, 4, 2);
+}
+
+#[test]
 fn lane_depth_survives_store_reopen_via_mmap() {
     let dir = TempDir::new().expect("temp dir");
     let config = StoreConfig::new(dir.path())
@@ -79,7 +154,12 @@ fn lane_depth_survives_store_reopen_via_mmap() {
     let stored = reopened.get(event_id).expect("fetch reopened event");
     assert_position(&stored, 7, 2);
     assert_eq!(
-        reopened.diagnostics().open_report.as_ref().unwrap().path,
+        reopened
+            .diagnostics()
+            .open_report
+            .as_ref()
+            .expect("mmap reopen should report its open path")
+            .path,
         OpenIndexPath::Mmap
     );
 }
@@ -108,7 +188,12 @@ fn lane_depth_survives_store_reopen_via_checkpoint() {
     let stored = reopened.get(event_id).expect("fetch reopened event");
     assert_position(&stored, 5, 4);
     assert_eq!(
-        reopened.diagnostics().open_report.as_ref().unwrap().path,
+        reopened
+            .diagnostics()
+            .open_report
+            .as_ref()
+            .expect("checkpoint reopen should report its open path")
+            .path,
         OpenIndexPath::Checkpoint
     );
 }
@@ -137,7 +222,12 @@ fn lane_depth_survives_full_rebuild_without_snapshots() {
     let stored = reopened.get(event_id).expect("fetch reopened event");
     assert_position(&stored, 9, 6);
     assert_eq!(
-        reopened.diagnostics().open_report.as_ref().unwrap().path,
+        reopened
+            .diagnostics()
+            .open_report
+            .as_ref()
+            .expect("rebuild reopen should report its open path")
+            .path,
         OpenIndexPath::Rebuild
     );
 }

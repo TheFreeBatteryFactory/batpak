@@ -1,20 +1,5 @@
 use crate::coordinate::CoordinateError;
 
-/// Stage of batch processing when failure occurred.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BatchStage {
-    /// Pre-write checks (CAS, idempotency, entity locks).
-    Validation,
-    /// Payload serialization.
-    Encoding,
-    /// Segment file write.
-    Writing,
-    /// fsync to disk.
-    Syncing,
-    /// In-memory index update.
-    Indexing,
-}
-
 /// StoreError: every error the store can produce.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -68,8 +53,6 @@ pub enum StoreError {
     BatchFailed {
         /// Index of the item that failed (0-based).
         item_index: usize,
-        /// Stage of processing when the failure occurred.
-        stage: BatchStage,
         /// The underlying error.
         source: Box<StoreError>,
     },
@@ -113,15 +96,9 @@ impl std::fmt::Display for StoreError {
             Self::VisibilityFenceCancelled => {
                 write!(f, "visibility fence was cancelled before publish")
             }
-            Self::BatchFailed {
-                item_index,
-                stage,
-                source,
-            } => write!(
-                f,
-                "batch failed at item {} during {:?}: {}",
-                item_index, stage, source
-            ),
+            Self::BatchFailed { item_index, source } => {
+                write!(f, "batch failed at item {}: {}", item_index, source)
+            }
             #[cfg(feature = "dangerous-test-hooks")]
             Self::FaultInjected(msg) => write!(f, "fault injected: {msg}"),
         }
@@ -144,8 +121,8 @@ impl std::error::Error for StoreError {
             | Self::IdempotencyRequired
             | Self::VisibilityFenceActive
             | Self::VisibilityFenceNotActive
-            | Self::VisibilityFenceCancelled
-            | Self::BatchFailed { .. } => None,
+            | Self::VisibilityFenceCancelled => None,
+            Self::BatchFailed { source, .. } => Some(source.as_ref()),
             #[cfg(feature = "dangerous-test-hooks")]
             Self::FaultInjected(_) => None,
         }
@@ -153,6 +130,13 @@ impl std::error::Error for StoreError {
 }
 
 impl StoreError {
+    pub(crate) fn batch_failed(item_index: usize, source: impl Into<Box<StoreError>>) -> Self {
+        Self::BatchFailed {
+            item_index,
+            source: source.into(),
+        }
+    }
+
     /// Segment has a bad magic number (not a valid batpak segment).
     pub(crate) fn corrupt_magic(segment_id: u64) -> Self {
         Self::CorruptSegment {

@@ -107,12 +107,31 @@ fn batch_append_item_uses_named_msgpack_payloads() {
     let expected = rmp_serde::to_vec_named(&payload).expect("serialize expected named payload");
 
     assert_eq!(
-        item.payload_bytes, expected,
+        item.payload_bytes(),
+        expected.as_slice(),
         "WIRE FORMAT: BatchAppendItem payload encoding drifted from named MessagePack.\n\
          Investigate: src/store/contracts.rs BatchAppendItem::new.\n\
          Common causes: rmp_serde::to_vec used instead of to_vec_named.\n\
          Run: cargo test --test wire_format batch_append_item_uses_named_msgpack_payloads"
     );
+}
+
+#[test]
+fn batch_append_item_from_msgpack_bytes_preserves_raw_payload() {
+    let coord = Coordinate::new("entity:test", "scope:test").expect("valid coord");
+    let payload = BatchPayloadShape { alpha: 1, beta: 2 };
+    let encoded = rmp_serde::to_vec_named(&payload).expect("encode named payload");
+    let item = BatchAppendItem::from_msgpack_bytes(
+        coord.clone(),
+        EventKind::custom(0xF, 7),
+        encoded.clone(),
+        AppendOptions::default(),
+        CausationRef::None,
+    );
+
+    assert_eq!(item.coord(), &coord);
+    assert_eq!(item.kind(), EventKind::custom(0xF, 7));
+    assert_eq!(item.payload_bytes(), encoded.as_slice());
 }
 
 // --- EventHeader ---

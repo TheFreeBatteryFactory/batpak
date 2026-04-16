@@ -50,12 +50,11 @@ pub use config::{
     BatchConfig, IndexConfig, IndexTopology, StoreConfig, SyncConfig, SyncMode, WriterConfig,
 };
 pub use contracts::{
-    AppendOptions, AppendPositionHint, AppendReceipt, BatchAppendItem, CausationRef, CompactionConfig,
-    CompactionStrategy, RetentionPredicate,
+    AppendOptions, AppendPositionHint, AppendReceipt, BatchAppendItem, CausationRef,
+    CompactionConfig, CompactionStrategy, RetentionPredicate,
 };
 pub use control_plane::{AppendTicket, BatchAppendTicket, Outbox, VisibilityFence};
 pub use cursor::{Cursor, CursorWorkerAction, CursorWorkerConfig, CursorWorkerHandle};
-pub use error::BatchStage;
 pub use error::StoreError;
 #[cfg(feature = "dangerous-test-hooks")]
 pub use fault::{
@@ -389,8 +388,8 @@ impl Store<Open> {
     /// All events are committed together or none are visible.
     ///
     /// # Errors
-    /// Returns `StoreError::BatchFailed` if any item fails validation, encoding, or write.
-    /// The `item_index` field indicates which item failed.
+    /// Returns `StoreError::BatchFailed` if any item fails validation, encoding, durability,
+    /// or publish preparation. The `item_index` field indicates which item failed.
     pub fn append_batch(
         &self,
         items: Vec<crate::store::contracts::BatchAppendItem>,
@@ -402,7 +401,8 @@ impl Store<Open> {
     /// All events share the same correlation_id from the triggering event.
     ///
     /// # Errors
-    /// Returns `StoreError::BatchFailed` if any item fails validation, encoding, or write.
+    /// Returns `StoreError::BatchFailed` if any item fails validation, encoding, durability,
+    /// or publish preparation.
     pub fn append_reaction_batch(
         &self,
         correlation_id: u128,
@@ -412,13 +412,14 @@ impl Store<Open> {
         // Set correlation_id and causation_id on all items.
         let items: Vec<_> = items
             .into_iter()
-            .map(|mut item| {
-                item.options.correlation_id = Some(correlation_id);
+            .map(|item| {
+                let mut options = item.options();
+                options.correlation_id = Some(correlation_id);
                 // Only set causation_id if not already explicitly set.
-                if matches!(item.causation, crate::store::contracts::CausationRef::None) {
-                    item.options.causation_id = Some(causation_id);
+                if item.causation().uses_options_fallback() {
+                    options.causation_id = Some(causation_id);
                 }
-                item
+                item.with_options(options)
             })
             .collect();
         self.append_batch(items)

@@ -108,6 +108,12 @@ pub(crate) struct CheckpointEntry {
     pub global_sequence: u64,
 }
 
+impl CheckpointEntry {
+    fn to_disk_pos(&self) -> DiskPos {
+        DiskPos::new(self.segment_id, self.offset, self.length)
+    }
+}
+
 // ── Public-to-crate surface ───────────────────────────────────────────────────
 
 /// Watermark and global-sequence information returned by [`try_load_checkpoint`].
@@ -144,11 +150,13 @@ fn checkpoint_entries_to_index_entries(
     entries
         .iter()
         .map(|ce| {
+            let entity_id = crate::store::interner::InternId(ce.entity_id);
+            let scope_id = crate::store::interner::InternId(ce.scope_id);
             let entity_str = interner_strings
-                .get(ce.entity_id as usize)
+                .get(entity_id.to_usize())
                 .ok_or_else(|| StoreError::ser_msg("checkpoint entity_id out of interner range"))?;
             let scope_str = interner_strings
-                .get(ce.scope_id as usize)
+                .get(scope_id.to_usize())
                 .ok_or_else(|| StoreError::ser_msg("checkpoint scope_id out of interner range"))?;
             let coord = Coordinate::new(entity_str, scope_str)?;
             Ok(IndexEntry {
@@ -156,8 +164,8 @@ fn checkpoint_entries_to_index_entries(
                 correlation_id: ce.correlation_id,
                 causation_id: ce.causation_id,
                 coord,
-                entity_id: crate::store::interner::InternId(ce.entity_id),
-                scope_id: crate::store::interner::InternId(ce.scope_id),
+                entity_id,
+                scope_id,
                 kind: ce.kind,
                 wall_ms: ce.wall_ms,
                 clock: ce.clock,
@@ -167,11 +175,7 @@ fn checkpoint_entries_to_index_entries(
                     prev_hash: ce.prev_hash,
                     event_hash: ce.event_hash,
                 },
-                disk_pos: DiskPos {
-                    segment_id: ce.segment_id,
-                    offset: ce.offset,
-                    length: ce.length,
-                },
+                disk_pos: ce.to_disk_pos(),
                 global_sequence: ce.global_sequence,
             })
         })
@@ -545,11 +549,13 @@ pub(crate) fn restore_from_checkpoint(
     let mut rebuilt_entries = Vec::with_capacity(entries.len());
 
     for ce in entries {
+        let entity_id = crate::store::interner::InternId(ce.entity_id);
+        let scope_id = crate::store::interner::InternId(ce.scope_id);
         let entity_str = interner_strings
-            .get(ce.entity_id as usize)
+            .get(entity_id.to_usize())
             .ok_or_else(|| StoreError::ser_msg("checkpoint entity_id out of interner range"))?;
         let scope_str = interner_strings
-            .get(ce.scope_id as usize)
+            .get(scope_id.to_usize())
             .ok_or_else(|| StoreError::ser_msg("checkpoint scope_id out of interner range"))?;
 
         let coord = Coordinate::new(entity_str, scope_str)?;
@@ -558,8 +564,8 @@ pub(crate) fn restore_from_checkpoint(
             correlation_id: ce.correlation_id,
             causation_id: ce.causation_id,
             coord,
-            entity_id: crate::store::interner::InternId(ce.entity_id),
-            scope_id: crate::store::interner::InternId(ce.scope_id),
+            entity_id,
+            scope_id,
             kind: ce.kind,
             wall_ms: ce.wall_ms,
             clock: ce.clock,
@@ -569,11 +575,7 @@ pub(crate) fn restore_from_checkpoint(
                 prev_hash: ce.prev_hash,
                 event_hash: ce.event_hash,
             },
-            disk_pos: DiskPos {
-                segment_id: ce.segment_id,
-                offset: ce.offset,
-                length: ce.length,
-            },
+            disk_pos: ce.to_disk_pos(),
             global_sequence: ce.global_sequence,
         });
     }

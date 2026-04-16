@@ -53,6 +53,39 @@ fn ops_recv_without_filters() {
 }
 
 #[test]
+fn subscription_notifications_preserve_committed_position() {
+    let (store, _dir) = test_store();
+    let store = Arc::new(store);
+    let coord = Coordinate::new("entity:position", "scope:test").expect("valid coord");
+    let kind = EventKind::custom(0xF, 1);
+
+    let region = Region::entity("entity:position");
+    let sub = store.subscribe_lossy(&region);
+    let mut ops = sub.ops().take(1);
+
+    let store_w = Arc::clone(&store);
+    let coord_w = coord.clone();
+    let producer = thread::spawn(move || {
+        store_w
+            .append_with_options(
+                &coord_w,
+                kind,
+                &serde_json::json!({"position": true}),
+                AppendOptions::new().with_position_hint(AppendPositionHint::new(6, 2)),
+            )
+            .expect("append with position hint");
+    });
+
+    let notif = ops.recv().expect("position notification");
+    assert_eq!(notif.position.lane, 6);
+    assert_eq!(notif.position.depth, 2);
+    assert!(notif.position.wall_ms > 0);
+    assert_eq!(notif.position.sequence, 0);
+
+    producer.join().expect("producer thread");
+}
+
+#[test]
 fn ops_filter_passes_matching() {
     let (store, _dir) = test_store();
     let store = Arc::new(store);
@@ -271,6 +304,7 @@ fn ops_map_transforms_notification() {
                 coord: n.coord.clone(),
                 kind: mapped_kind,
                 sequence: n.sequence,
+                position: n.position,
             })
         })
         .take(1);

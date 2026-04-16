@@ -620,6 +620,12 @@ fn chaos_batch_atomicity_concurrent() {
     }
 
     let total_committed = total_batches.load(Ordering::SeqCst);
+    assert!(
+        total_committed > 0,
+        "CHAOS PROPERTY: concurrent batch atomicity must observe at least one committed batch.\n\
+         A zero-commit run is vacuous and does not prove anything about atomic publish.\n\
+         Investigate: test harness stress level, writer availability, or batch fault paths."
+    );
     eprintln!("  CHAOS BATCH: {total_committed} batches committed across {n_threads} threads");
 
     drop(store);

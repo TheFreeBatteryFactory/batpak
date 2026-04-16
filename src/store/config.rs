@@ -479,12 +479,20 @@ impl std::fmt::Debug for StoreConfig {
 }
 
 pub(crate) fn now_us() -> i64 {
-    // Unix epoch micros fit in i64 for any practical lifetime of this project.
-    #[allow(clippy::cast_possible_truncation)]
-    {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros() as i64
-    }
+    let us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    // Unix epoch µs fits i64 until year 292,277 — safe for this project's lifetime.
+    i64::try_from(us).expect("invariant: Unix epoch µs fits i64 until year 292,277")
+}
+
+/// Convert an [`Instant::elapsed`] duration to microseconds as `u64`.
+///
+/// `Duration::as_micros()` returns `u128`; the cast to `u64` would overflow
+/// after ~584,942 years of elapsed time. Caps at `u64::MAX` rather than
+/// panicking — a saturating ceiling is more useful than a crash for telemetry.
+#[inline]
+pub(crate) fn duration_micros(d: std::time::Duration) -> u64 {
+    u64::try_from(d.as_micros()).unwrap_or(u64::MAX)
 }

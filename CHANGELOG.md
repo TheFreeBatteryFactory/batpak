@@ -16,10 +16,12 @@ All notable changes to this project will be documented in this file.
 - Parser-backed architecture linting in `tools/integrity/src/architecture_lints.rs`
 - Topology/replay/writer measurement surfaces in `benches/topology_matrix.rs`, `benches/replay_lanes.rs`, and `benches/writer_staging.rs`
 - End-to-end lane/depth position-hint coverage across live append, mmap reopen, checkpoint reopen, full rebuild, and SIDX header reconstruction
+- ADR-0009: Position Hints and Artifact Upgrade Contract
 
 ### Notes
 - Released sections below preserve the public names that shipped in those releases, even when newer unreleased work has renamed the live surface since then.
 - Upgrade note: pre-existing artifacts remain readable. Old SIDX footers are ignored and fall back to scan; checkpoint v3 and mmap v1/v2 load with `dag_lane=0` and `dag_depth=0`, which is the correct root default for pre-feature events.
+- Rollback note: downgrade is not assumed safe just because forward-read compatibility exists; the operator procedure is binary rollback plus cold-artifact purge/rebuild unless a narrower downgrade path has been proven.
 
 ## [0.5.0] - 2026-04-13
 

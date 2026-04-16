@@ -36,8 +36,10 @@
   justification: public batch API type tested through tests/atomic_batch.rs
 - name: CausationRef
   justification: batch causation enum tested through tests/atomic_batch.rs intra-batch linking tests
-- name: BatchStage
-  justification: batch error reporting enum tested through tests/atomic_batch.rs validation failure tests
+- name: uses_options_fallback
+  justification: const fn method on CausationRef called by store::mod batch append logic; exercised indirectly by tests/atomic_batch.rs without naming the method directly
+- name: stage_with_causation
+  justification: public outbox API for staging batch items with explicit causation; tested indirectly through intra-batch causation tests in tests/atomic_batch.rs
 - name: InjectionPoint
   justification: fault injection enum tested through tests/atomic_batch.rs chaos injection tests (dangerous-test-hooks feature)
 - name: FaultInjector

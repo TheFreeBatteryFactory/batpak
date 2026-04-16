@@ -1,19 +1,17 @@
 #![allow(clippy::panic, clippy::print_stderr, clippy::cast_possible_truncation)] // benchmark reporting uses eprintln; gate failures use panic
-//! Performance gate tests: the library dogfoods its own Gate/Pipeline system
-//! to enforce its own throughput, latency, and correctness thresholds.
-//! These are catastrophic-regression guards with intentionally generous
-//! thresholds, not precision benchmark gates: no current environment is both
-//! canonical and timing-stable.
+//! Performance gate tests use the library's Gate/Pipeline primitives as a
+//! reusable harness for catastrophic-regression checks.
+//! These thresholds are intentionally generous and exist to catch obvious
+//! regressions, not to act as precision benchmark authority: no current
+//! environment is both canonical and timing-stable.
 //!
 //! PROVES: LAW-004 (Composition Over Construction — quadratic dogfooding)
 //! DEFENDS: FM-013 (Coverage Mirage — gates test themselves), FM-007 (Island Syndrome)
 //! INVARIANTS: INV-PERF (performance thresholds), INV-STATE (gate evaluation)
 //!
-//! This IS the "free battery factory" philosophy: the same Gate/Pipeline system
-//! that products use to enforce business rules, the library uses to enforce
-//! its own performance AND correctness characteristics.
-//! If gates work, this test passes. If this test passes, gates work.
-//! Quadratic feedback — the deepest kind of dogfood.
+//! This is deliberate dogfooding of shared control-flow primitives, not a
+//! claim that these tests are the sole performance authority. Criterion
+//! benches provide trend visibility; these gates catch gross regressions.
 
 use batpak::prelude::*;
 use batpak::store::{Store, StoreConfig, SyncConfig};
@@ -21,7 +19,7 @@ use std::time::Instant;
 use tempfile::TempDir;
 
 /// A Gate that checks cold-start performance.
-/// This is not a unit test — it's the library testing itself with its own tools.
+/// This is a reusable assertion harness, not a precision benchmark.
 struct ColdStartGate {
     max_ms: u128,
 }
@@ -87,7 +85,7 @@ fn cold_start_1k_events_under_threshold() {
     let store = Store::open(config).expect("cold start");
     let cold_start_ms = start.elapsed().as_millis();
 
-    // Dogfood: use our own Gate system to validate performance
+    // Use GateSet as a reusable assertion harness for catastrophic regressions.
     let mut gates = GateSet::new();
     // Reference target: cold start < 200ms for 1K events on production hardware.
     // CI threshold: 2000ms (10x) because CI runners are slow, virtualized, and
@@ -124,7 +122,7 @@ fn cold_start_1k_events_under_threshold() {
         Err(denial) => {
             panic!(
                 "SELF-BENCHMARK FAILED: {}\n\
-                    The library's own Gate system detected a performance regression.\n\
+                    The catastrophic regression guard detected a performance regression.\n\
                     Context: {:?}",
                 denial, denial.context
             );
@@ -134,9 +132,8 @@ fn cold_start_1k_events_under_threshold() {
     store.sync().expect("sync");
 }
 
-/// Verify the Gate system correctly rejects slow cold starts.
-/// This tests that the dogfood mechanism itself works — it would catch
-/// a broken Gate that always passes.
+/// Verify the gate harness correctly rejects slow cold starts.
+/// This ensures the catastrophic-regression tripwire itself is not vacuous.
 #[test]
 fn cold_start_gate_rejects_slow() {
     let mut gates = GateSet::new();
@@ -364,8 +361,8 @@ fn multi_gate_performance_feedback() {
         }
         panic!(
             "SELF-BENCHMARK FAILED: {} performance gate(s) denied.\n\
-             The denials above tell you exactly where to look.\n\
-             This is the library using its own Gate system to enforce its own quality.",
+             The denials above point to the likely investigation sites.\n\
+             This is the library using the shared guard primitives to catch gross regressions.",
             denials.len()
         );
     }
@@ -587,9 +584,9 @@ fn multi_gate_collects_all_denials() {
 }
 
 // ================================================================
-// CORRECTNESS GATES: the library uses its own Gate system to verify
-// its own resilience properties. Not just "does it work?" but
-// "does it KEEP working when things go wrong?"
+// CORRECTNESS GATES: the library uses the same guard primitives to express
+// resilience assertions. These are code-level tripwires, not an independent
+// production certification system.
 // ================================================================
 
 /// Context for correctness gates — collected by exercising the store
@@ -721,8 +718,9 @@ impl Gate<CorrectnessContext> for SnapshotBootGate {
 
 /// THE CORRECTNESS SELF-TEST.
 /// The library exercises itself under adversarial conditions, collects
-/// the results, then feeds them through its own Gate system.
-/// Every denial tells you EXACTLY where the bug is.
+/// the results, then feeds them through the shared guard primitives.
+/// Every denial points to the likely bug site; the comments do not claim
+/// stronger proof than the exercised probes provide.
 #[test]
 fn correctness_gates_self_validate() {
     let dir = TempDir::new().expect("temp dir");
@@ -830,7 +828,7 @@ fn correctness_gates_self_validate() {
         let _ = s.close();
     }
 
-    // --- Feed through our own Gate system ---
+    // --- Feed through the shared guard primitives ---
     let ctx = CorrectnessContext {
         fd_eviction_round_trips,
         cross_segment_reads_ok,
@@ -867,8 +865,8 @@ fn correctness_gates_self_validate() {
         }
         panic!(
             "CORRECTNESS SELF-TEST FAILED: {} gate(s) denied.\n\
-             Each denial above tells you the exact file + function to investigate.\n\
-             This is the library stress-testing itself with its own Gate system.",
+             Each denial above points to the likely file + function to investigate.\n\
+             This is the library stress-testing itself with the shared guard primitives.",
             denials.len()
         );
     }
@@ -876,7 +874,7 @@ fn correctness_gates_self_validate() {
     store.close().expect("close");
 }
 
-/// Append throughput gate: dedicated test using the library's own Gate system.
+/// Append throughput gate: dedicated catastrophic-regression harness.
 #[test]
 #[ignore = "hardware-dependent perf gate — run via `cargo xtask perf-gates`. Asserts events/sec on shared hardware."]
 fn append_throughput_gate() {
@@ -930,7 +928,7 @@ fn append_throughput_gate() {
     store.close().expect("close");
 }
 
-/// Projection latency gate: dedicated test using the library's own Gate system.
+/// Projection latency gate: dedicated catastrophic-regression harness.
 #[test]
 #[ignore = "hardware-dependent perf gate — run via `cargo xtask perf-gates`. Asserts projection latency in ms on shared hardware."]
 fn projection_latency_gate() {
