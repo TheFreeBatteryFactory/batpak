@@ -53,6 +53,10 @@ impl<T: Clone> FanoutList<T> {
         rx
     }
 
+    pub(crate) fn has_subscribers(&self) -> bool {
+        !self.senders.lock().is_empty()
+    }
+
     /// Broadcast: try_send to all, retain on Ok or Full, prune on Disconnected.
     /// NEVER use blocking send() — one slow subscriber must not block the writer.
     /// [DEP:flume::Sender::try_send] → Result<(), TrySendError<T>>

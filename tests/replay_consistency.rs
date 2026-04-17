@@ -233,7 +233,7 @@ fn snapshot_checkpoint_matches_source_projection() {
          as the source store. Drift here means the rebuild path is using a \
          different sequence-allocation scheme than the live writer. \
          Investigate: ReplayCursor::commit / synthesize_next empty-cursor \
-         handling, src/store/index.rs."
+         handling, src/store/index/mod.rs."
     );
     assert_eq!(
         snap_projection, live,

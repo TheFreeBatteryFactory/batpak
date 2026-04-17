@@ -28,7 +28,7 @@ fn nocache_get_always_returns_none() {
     let result = cache.get(b"any_key").expect("get should not error");
     assert!(
         result.is_none(),
-        "NoCache::get should always return None. Investigate: src/store/projection.rs NoCache."
+        "NoCache::get should always return None. Investigate: src/store/projection/mod.rs NoCache."
     );
 }
 
@@ -82,18 +82,18 @@ mod native_tests {
         let (value, returned_meta) = cache.get(b"key1").expect("get").expect("should be Some");
         assert_eq!(
             value, b"hello",
-            "NativeCache round-trip failed. Investigate: src/store/projection.rs NativeCache."
+            "NativeCache round-trip failed. Investigate: src/store/projection/mod.rs NativeCache."
         );
         assert_eq!(
             returned_meta.watermark, 42,
             "NATIVE ROUND-TRIP META WATERMARK: watermark should be preserved across put/get.\n\
-             Investigate: src/store/projection.rs NativeCache::put and NativeCache::get.\n\
+             Investigate: src/store/projection/mod.rs NativeCache::put and NativeCache::get.\n\
              Common causes: CacheMeta serialization losing watermark field."
         );
         assert_eq!(
             returned_meta.cached_at_us, 1_000_000,
             "NATIVE ROUND-TRIP META CACHED_AT: cached_at_us should be preserved across put/get.\n\
-             Investigate: src/store/projection.rs NativeCache::put and NativeCache::get.\n\
+             Investigate: src/store/projection/mod.rs NativeCache::put and NativeCache::get.\n\
              Common causes: CacheMeta serialization losing cached_at_us field."
         );
 
@@ -101,7 +101,7 @@ mod native_tests {
         assert!(
             cache.get(b"nonexistent").expect("get").is_none(),
             "NATIVE ROUND-TRIP: get for a key that was never inserted should return None.\n\
-             Investigate: src/store/projection.rs NativeCache::get."
+             Investigate: src/store/projection/mod.rs NativeCache::get."
         );
     }
 
@@ -121,7 +121,7 @@ mod native_tests {
         assert!(
             cache.get(b"user:1").expect("get").is_none(),
             "NATIVE DELETE PREFIX: key 'user:1' should be gone after delete_prefix('user:').\n\
-             Investigate: src/store/projection.rs NativeCache::delete_prefix."
+             Investigate: src/store/projection/mod.rs NativeCache::delete_prefix."
         );
         assert!(
             cache.get(b"user:2").expect("get").is_none(),
@@ -211,7 +211,7 @@ mod native_tests {
         assert!(
             result.is_none(),
             "NATIVE CORRUPTION: corrupt cache file should degrade to cache miss, not error.\n\
-             Investigate: src/store/projection.rs NativeCache::get decode error path."
+             Investigate: src/store/projection/mod.rs NativeCache::get decode error path."
         );
 
         // Corrupt file should be deleted (self-healing)

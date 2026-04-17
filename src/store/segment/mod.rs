@@ -1,3 +1,6 @@
+pub(crate) mod scan;
+pub(crate) mod sidx;
+
 use crate::event::Event;
 use crate::store::StoreError;
 use serde::{Deserialize, Serialize};
@@ -299,7 +302,7 @@ impl Segment<Active> {
     /// Returns `StoreError::Io` or `StoreError::Serialization` if writing fails.
     pub(crate) fn write_sidx_footer(
         &mut self,
-        collector: &crate::store::sidx::SidxEntryCollector,
+        collector: &crate::store::segment::sidx::SidxEntryCollector,
     ) -> Result<(), StoreError> {
         if let Some(ref mut f) = self.file {
             collector.write_footer(f)?;
@@ -339,7 +342,7 @@ fn detect_sidx_boundary<R: Read + Seek>(
     source.read_exact(&mut trailer).map_err(StoreError::Io)?;
 
     // Check magic at bytes 12..16
-    if &trailer[12..16] != crate::store::sidx::SIDX_MAGIC {
+    if &trailer[12..16] != crate::store::segment::sidx::SIDX_MAGIC {
         return Ok(None);
     }
     // string_table_offset at bytes 0..8

@@ -14,7 +14,6 @@
 use batpak::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Duration;
 
 const MSG_SENT: EventKind = EventKind::custom(3, 1);
 const MSG_EDITED: EventKind = EventKind::custom(3, 2);
@@ -116,12 +115,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     println!("Charlie: Hey! Just joined.");
 
-    // Small delay so subscriber processes all notifications
-    std::thread::sleep(Duration::from_millis(50));
-
     // Wait for listener to finish (it takes 3 MSG_SENT events then stops)
     println!("\n--- Subscription Results ---");
-    let _ = listener.join();
+    listener
+        .join()
+        .map_err(|_| std::io::Error::other("chat room listener thread panicked"))?;
 
     // -- Now demonstrate cursors: guaranteed delivery, pull-based --
     println!("\n--- Cursor: Pull-based replay ---");

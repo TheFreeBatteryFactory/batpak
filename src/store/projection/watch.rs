@@ -1,5 +1,8 @@
-use super::{projection_flow, Freshness, Open, Store, StoreError, Subscription};
+use super::flow as projection_flow;
+use super::Freshness;
 use crate::event::EventSourced;
+use crate::store::delivery::subscription::Subscription;
+use crate::store::{Open, Store, StoreError};
 use std::sync::Arc;
 
 /// Reactive projection watcher: emits updated projections when the entity

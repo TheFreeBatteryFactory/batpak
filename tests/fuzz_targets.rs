@@ -56,12 +56,12 @@ proptest! {
         let (decoded_msgpack, consumed) = frame_decode(&encoded).expect("decode");
         prop_assert_eq!(consumed, encoded.len(),
             "FRAME ROUNDTRIP SIZE MISMATCH: consumed {} != encoded {}. \
-             Investigate: src/store/segment.rs frame_encode/frame_decode.",
+             Investigate: src/store/segment/mod.rs frame_encode/frame_decode.",
             consumed, encoded.len());
         // Deserialize back and check equality
         let decoded: String = rmp_serde::from_slice(decoded_msgpack).expect("deserialize");
         prop_assert_eq!(decoded, payload,
-            "FRAME ROUNDTRIP DATA MISMATCH. Investigate: src/store/segment.rs");
+            "FRAME ROUNDTRIP DATA MISMATCH. Investigate: src/store/segment/mod.rs");
     }
 
     /// frame_decode with truncated frames (header present, body cut short).
@@ -76,7 +76,7 @@ proptest! {
             let result = frame_decode(truncated);
             prop_assert!(result.is_err(),
                 "TRUNCATED FRAME ACCEPTED: frame_decode should reject truncated data. \
-                 Investigate: src/store/segment.rs frame_decode length check.");
+                 Investigate: src/store/segment/mod.rs frame_decode length check.");
         }
     }
 
@@ -90,7 +90,7 @@ proptest! {
             let result = frame_decode(&encoded);
             prop_assert!(result.is_err(),
                 "CRC BYPASS: frame_decode accepted data with corrupted CRC. \
-                 Investigate: src/store/segment.rs CRC validation.");
+                 Investigate: src/store/segment/mod.rs CRC validation.");
         }
     }
 }
@@ -198,15 +198,14 @@ proptest! {
             "EVENTKIND SERDE ROUNDTRIP FAILED. Investigate: src/event/kind.rs Serialize/Deserialize.");
     }
 
-    /// EventKind with overflow type_id — lower 12 bits should be masked.
+    /// EventKind with overflow type_id must be rejected instead of truncated.
     /// Categories 0x0 (system) and 0xD (effect) are reserved — filter them out.
     #[test]
-    fn fuzz_event_kind_overflow(cat in 0u8..16, raw_type in 0u16..=u16::MAX) {
+    fn fuzz_event_kind_overflow(cat in 0u8..16, raw_type in 4096u16..=u16::MAX) {
         prop_assume!(cat != 0 && cat != 0xD);
-        let kind = EventKind::custom(cat, raw_type);
-        // type_id must be masked to 12 bits
-        prop_assert_eq!(kind.type_id(), raw_type & 0x0FFF,
-            "EVENTKIND OVERFLOW: type_id should mask to 12 bits. \
+        let result = std::panic::catch_unwind(|| EventKind::custom(cat, raw_type));
+        prop_assert!(result.is_err(),
+            "EVENTKIND OVERFLOW: oversized type_id must panic instead of truncating. \
              Investigate: src/event/kind.rs custom().");
     }
 }
@@ -304,7 +303,9 @@ proptest! {
              Investigate: src/coordinate/position.rs is_ancestor_of.");
     }
 
-    /// DagPosition partial_cmp: same lane = comparable, different lane = None.
+    /// DagPosition partial_cmp: different lanes or depths are incomparable.
+    /// Same lane/depth is only comparable when sequence differs or the full
+    /// HLC tuple also matches.
     #[test]
     fn fuzz_dag_position_ordering(
         d1 in any::<u32>(), l1 in any::<u32>(), s1 in any::<u32>(),
@@ -312,13 +313,13 @@ proptest! {
     ) {
         let a = DagPosition::new(d1, l1, s1);
         let b = DagPosition::new(d2, l2, s2);
-        if l1 != l2 {
+        if l1 != l2 || d1 != d2 {
             prop_assert_eq!(a.partial_cmp(&b), None,
-                "DAG POSITION CROSS-LANE COMPARABLE: different lanes must be incomparable. \
+                "DAG POSITION CROSS-BRANCH COMPARABLE: different lanes or depths must be incomparable. \
                  Investigate: src/coordinate/position.rs PartialOrd.");
         } else {
             prop_assert!(a.partial_cmp(&b).is_some(),
-                "DAG POSITION SAME-LANE INCOMPARABLE: same lane must be comparable.");
+                "DAG POSITION SAME-BRANCH INCOMPARABLE: same lane/depth with zeroed HLC must be comparable.");
         }
     }
 
@@ -475,25 +476,25 @@ proptest! {
         let decoded: SegmentHeader = rmp_serde::from_slice(&bytes).expect("deserialize");
         prop_assert_eq!(header.version, decoded.version,
             "SEGMENTHEADER VERSION MISMATCH: {} != {} after serde roundtrip.\n\
-             Investigate: src/store/segment.rs SegmentHeader Serialize/Deserialize.\n\
+             Investigate: src/store/segment/mod.rs SegmentHeader Serialize/Deserialize.\n\
              Common causes: field renamed/skipped in serde attrs, version field type mismatch.\n\
              Run: cargo test --test fuzz_targets",
             header.version, decoded.version);
         prop_assert_eq!(header.flags, decoded.flags,
             "SEGMENTHEADER FLAGS MISMATCH: {} != {} after serde roundtrip.\n\
-             Investigate: src/store/segment.rs SegmentHeader Serialize/Deserialize.\n\
+             Investigate: src/store/segment/mod.rs SegmentHeader Serialize/Deserialize.\n\
              Common causes: flags field skipped or default-overridden during deserialization.\n\
              Run: cargo test --test fuzz_targets",
             header.flags, decoded.flags);
         prop_assert_eq!(header.created_ns, decoded.created_ns,
             "SEGMENTHEADER CREATED_NS MISMATCH: {} != {} after serde roundtrip.\n\
-             Investigate: src/store/segment.rs SegmentHeader Serialize/Deserialize.\n\
+             Investigate: src/store/segment/mod.rs SegmentHeader Serialize/Deserialize.\n\
              Common causes: i64 sign-extension bug, timestamp field lost in wire encoding.\n\
              Run: cargo test --test fuzz_targets",
             header.created_ns, decoded.created_ns);
         prop_assert_eq!(header.segment_id, decoded.segment_id,
             "SEGMENTHEADER SEGMENT_ID MISMATCH: {} != {} after serde roundtrip.\n\
-             Investigate: src/store/segment.rs SegmentHeader Serialize/Deserialize.\n\
+             Investigate: src/store/segment/mod.rs SegmentHeader Serialize/Deserialize.\n\
              Common causes: u64 truncated to u32 in wire format, field ordering error.\n\
              Run: cargo test --test fuzz_targets",
             header.segment_id, decoded.segment_id);
@@ -735,19 +736,19 @@ proptest! {
             rmp_serde::from_slice(item.payload_bytes()).expect("decode payload bytes");
 
         prop_assert_eq!(item.coord(), &coord,
-            "BATCH ITEM COORD MISMATCH. Investigate: src/store/contracts.rs BatchAppendItem::new.");
+            "BATCH ITEM COORD MISMATCH. Investigate: src/store/append.rs BatchAppendItem::new.");
         prop_assert_eq!(item.kind(), EventKind::DATA,
-            "BATCH ITEM KIND MISMATCH. Investigate: src/store/contracts.rs BatchAppendItem::new.");
+            "BATCH ITEM KIND MISMATCH. Investigate: src/store/append.rs BatchAppendItem::new.");
         prop_assert_eq!(item.options().correlation_id, correlation_id,
-            "BATCH ITEM CORRELATION MISMATCH. Investigate: src/store/contracts.rs AppendOptions preservation.");
+            "BATCH ITEM CORRELATION MISMATCH. Investigate: src/store/append.rs AppendOptions preservation.");
         prop_assert_eq!(item.options().causation_id, causation_id,
-            "BATCH ITEM CAUSATION OPTION MISMATCH. Investigate: src/store/contracts.rs AppendOptions preservation.");
+            "BATCH ITEM CAUSATION OPTION MISMATCH. Investigate: src/store/append.rs AppendOptions preservation.");
         prop_assert_eq!(item.options().flags, flags,
-            "BATCH ITEM FLAGS MISMATCH. Investigate: src/store/contracts.rs AppendOptions preservation.");
+            "BATCH ITEM FLAGS MISMATCH. Investigate: src/store/append.rs AppendOptions preservation.");
         prop_assert_eq!(item.causation(), causation,
-            "BATCH ITEM CAUSATION REF MISMATCH. Investigate: src/store/contracts.rs CausationRef preservation.");
+            "BATCH ITEM CAUSATION REF MISMATCH. Investigate: src/store/append.rs CausationRef preservation.");
         prop_assert_eq!(decoded, value,
-            "BATCH ITEM PAYLOAD ROUNDTRIP FAILED. Investigate: src/store/contracts.rs BatchAppendItem::new payload encoding.");
+            "BATCH ITEM PAYLOAD ROUNDTRIP FAILED. Investigate: src/store/append.rs BatchAppendItem::new payload encoding.");
     }
 
     #[test]
@@ -774,11 +775,11 @@ proptest! {
             .collect();
 
         prop_assert_eq!(items.len(), item_count,
-            "BATCH ITEM COUNT MISMATCH. Investigate: src/store/contracts.rs batch item construction.");
+            "BATCH ITEM COUNT MISMATCH. Investigate: src/store/append.rs batch item construction.");
         prop_assert!(items.iter().all(|item| item.coord() == &coord),
-            "BATCH ITEM COORD DRIFT. Investigate: src/store/contracts.rs BatchAppendItem construction.");
+            "BATCH ITEM COORD DRIFT. Investigate: src/store/append.rs BatchAppendItem construction.");
         prop_assert!(items.iter().all(|item| item.kind() == EventKind::DATA),
-            "BATCH ITEM KIND DRIFT. Investigate: src/store/contracts.rs BatchAppendItem construction.");
+            "BATCH ITEM KIND DRIFT. Investigate: src/store/append.rs BatchAppendItem construction.");
         prop_assert!(items.iter().all(|item| !item.payload_bytes().is_empty()),
             "BATCH ITEM PAYLOAD BYTES SHOULD NOT BE EMPTY FOR NON-EMPTY JSON ARRAYS.");
     }
@@ -793,6 +794,6 @@ proptest! {
 
         let copied = causation;
         prop_assert_eq!(copied, causation,
-            "CAUSATION REF COPY/EQ FAILED. Investigate: src/store/contracts.rs CausationRef.");
+            "CAUSATION REF COPY/EQ FAILED. Investigate: src/store/append.rs CausationRef.");
     }
 }

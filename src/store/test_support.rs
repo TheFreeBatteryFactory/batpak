@@ -1,4 +1,4 @@
-use crate::store::writer::WriterCommand;
+use crate::store::write::writer::WriterCommand;
 use crate::store::{Store, StoreError};
 
 /// Test helper: trigger a panic in the writer thread to exercise restart_policy.

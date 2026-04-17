@@ -1,5 +1,5 @@
-use super::fanout::Notification;
 use crate::coordinate::Region;
+use crate::store::write::fanout::Notification;
 use flume::Receiver;
 
 /// Subscription: push-based per-subscriber flume channel. Lossy.

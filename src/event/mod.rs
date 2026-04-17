@@ -71,12 +71,14 @@ impl<P> Event<P> {
         &self.header.position
     }
 
-    /// Returns `true` if this is the first event in its hash chain.
+    /// Returns whether this is the first event in its hash chain.
+    ///
+    /// Events without hash-chain metadata are treated as genesis events for
+    /// callers that only care about the common "is this a root?" question.
     pub fn is_genesis(&self) -> bool {
         self.hash_chain
             .as_ref()
-            .map(|c| c.prev_hash == [0u8; 32])
-            .unwrap_or(true)
+            .is_none_or(|c| c.prev_hash == [0u8; 32])
     }
 
     /// Transforms the payload with `f`, preserving the header and hash chain.

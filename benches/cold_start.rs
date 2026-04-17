@@ -72,15 +72,8 @@ fn prepare_fixture(count: u64, config: StoreConfig) -> TempDir {
     fixture_dir
 }
 
-fn append_tail_without_refreshing_snapshot(
-    fixture_dir: &TempDir,
-    tail_count: u64,
-    lane: SnapshotLane,
-) {
-    let stale_config = match lane {
-        SnapshotLane::Mmap => rebuild_only_config(fixture_dir.path()),
-        SnapshotLane::Checkpoint => rebuild_only_config(fixture_dir.path()),
-    };
+fn append_tail_without_refreshing_snapshot(fixture_dir: &TempDir, tail_count: u64) {
+    let stale_config = rebuild_only_config(fixture_dir.path());
     let store = Store::open(stale_config).expect("open stale snapshot fixture");
     let coord = Coordinate::new("bench:entity", "bench:scope").expect("valid coord");
     let kind = EventKind::custom(0xF, 1);
@@ -136,7 +129,7 @@ fn bench_cold_start_paths(c: &mut Criterion) {
                 ..lane_config(std::path::Path::new(""), SnapshotLane::Mmap)
             },
         );
-        append_tail_without_refreshing_snapshot(&mmap_tail_fixture, tail_count, SnapshotLane::Mmap);
+        append_tail_without_refreshing_snapshot(&mmap_tail_fixture, tail_count);
         let checkpoint_tail_fixture = prepare_fixture(
             count,
             StoreConfig {
@@ -144,11 +137,7 @@ fn bench_cold_start_paths(c: &mut Criterion) {
                 ..lane_config(std::path::Path::new(""), SnapshotLane::Checkpoint)
             },
         );
-        append_tail_without_refreshing_snapshot(
-            &checkpoint_tail_fixture,
-            tail_count,
-            SnapshotLane::Checkpoint,
-        );
+        append_tail_without_refreshing_snapshot(&checkpoint_tail_fixture, tail_count);
 
         // open-only: measures ONLY Store::open(), no close().
         // This is the honest "product open regression" number.

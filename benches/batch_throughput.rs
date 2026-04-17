@@ -27,13 +27,27 @@ fn open_bench_store(sync_mode: SyncMode) -> (Store, TempDir, Coordinate, EventKi
     (store, dir, coord, kind)
 }
 
+fn event_payload(i: usize) -> serde_json::Value {
+    serde_json::json!({"i": i, "payload": "x".repeat(100)})
+}
+
+fn batch_plan(total_events: usize, batch_size: usize) -> Vec<usize> {
+    let full_batches = total_events / batch_size;
+    let remainder = total_events % batch_size;
+    let mut plan = vec![batch_size; full_batches];
+    if remainder > 0 {
+        plan.push(remainder);
+    }
+    plan
+}
+
 fn make_batch_items(coord: &Coordinate, kind: EventKind, count: usize) -> Vec<BatchAppendItem> {
     (0..count)
         .map(|i| {
             BatchAppendItem::new(
                 coord.clone(),
                 kind,
-                &serde_json::json!({"i": i, "payload": "x".repeat(100)}),
+                &event_payload(i),
                 AppendOptions::default(),
                 CausationRef::None,
             )
@@ -56,20 +70,17 @@ fn bench_batch_vs_single(c: &mut Criterion) {
             BenchmarkId::new("batch", batch_size),
             &batch_size,
             |b, &batch_size| {
-                let batches_needed = usize::try_from(total_events)
-                    .expect("total_events fits in usize for benchmark")
-                    .div_ceil(batch_size);
+                let total_events = usize::try_from(total_events)
+                    .expect("total_events fits in usize for benchmark");
+                let plan = batch_plan(total_events, batch_size);
                 b.iter_batched(
                     || open_bench_store(SyncMode::SyncData),
                     |(store, _dir, coord, kind)| {
-                        for batch_idx in 0..batches_needed {
-                            let items = make_batch_items(&coord, kind, batch_size);
+                        for item_count in &plan {
+                            let items = make_batch_items(&coord, kind, *item_count);
                             store.append_batch(items).expect("batch append");
-                            // Small yield to prevent blocking
-                            if batch_idx % 10 == 0 {
-                                std::thread::yield_now();
-                            }
                         }
+                        store.close().expect("close batch benchmark store");
                     },
                     BatchSize::SmallInput,
                 );
@@ -86,12 +97,16 @@ fn bench_batch_vs_single(c: &mut Criterion) {
                     |(store, _dir, coord, kind)| {
                         for i in 0..total_events {
                             store
-                                .append(&coord, kind, &serde_json::json!({"i": i}))
+                                .append(
+                                    &coord,
+                                    kind,
+                                    &event_payload(
+                                        usize::try_from(i).expect("single append index fits"),
+                                    ),
+                                )
                                 .expect("single append");
-                            if i % 100 == 0 {
-                                std::thread::yield_now();
-                            }
                         }
+                        store.close().expect("close single benchmark store");
                     },
                     BatchSize::SmallInput,
                 );
@@ -127,6 +142,7 @@ fn bench_batch_durability(c: &mut Criterion) {
                             let items = make_batch_items(&coord, kind, 100);
                             store.append_batch(items).expect("batch append");
                         }
+                        store.close().expect("close durability benchmark store");
                     },
                     BatchSize::SmallInput,
                 );
@@ -152,16 +168,17 @@ fn bench_batch_size_scaling(c: &mut Criterion) {
             BenchmarkId::from_parameter(batch_size),
             &batch_size,
             |b, &batch_size| {
-                let batches_needed = usize::try_from(total_events)
-                    .expect("total_events fits in usize for benchmark")
-                    .div_ceil(batch_size);
+                let total_events = usize::try_from(total_events)
+                    .expect("total_events fits in usize for benchmark");
+                let plan = batch_plan(total_events, batch_size);
                 b.iter_batched(
                     || open_bench_store(SyncMode::SyncData),
                     |(store, _dir, coord, kind)| {
-                        for _ in 0..batches_needed {
-                            let items = make_batch_items(&coord, kind, batch_size);
+                        for item_count in &plan {
+                            let items = make_batch_items(&coord, kind, *item_count);
                             store.append_batch(items).expect("batch append");
                         }
+                        store.close().expect("close batch scaling benchmark store");
                     },
                     BatchSize::SmallInput,
                 );
@@ -201,6 +218,7 @@ fn bench_batch_causation(c: &mut Criterion) {
                     })
                     .collect();
                 store.append_batch(items).expect("batch with causation");
+                store.close().expect("close causation benchmark store");
             },
             BatchSize::SmallInput,
         );

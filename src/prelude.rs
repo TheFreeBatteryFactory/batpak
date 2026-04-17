@@ -8,9 +8,11 @@ pub use crate::event::{
 pub use crate::guard::{Denial, Gate, GateSet, Receipt};
 pub use crate::id::EventId;
 pub use crate::outcome::{ErrorKind, Outcome, OutcomeError};
-pub use crate::pipeline::{Committed, Pipeline, Proposal};
-pub use crate::store::cursor::{CursorWorkerAction, CursorWorkerConfig, CursorWorkerHandle};
-pub use crate::store::subscription::{Subscription, SubscriptionOps};
+pub use crate::pipeline::{CommitMetadata, Committed, Pipeline, Proposal};
+pub use crate::store::delivery::cursor::{
+    CursorWorkerAction, CursorWorkerConfig, CursorWorkerHandle,
+};
+pub use crate::store::delivery::subscription::{Subscription, SubscriptionOps};
 pub use crate::store::{
     AppendOptions, AppendPositionHint, AppendReceipt, AppendTicket, BatchAppendItem,
     BatchAppendTicket, BatchConfig, CausationRef, Closed, CompactionConfig, CompactionStrategy,

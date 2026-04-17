@@ -110,7 +110,7 @@ fn batch_append_item_uses_named_msgpack_payloads() {
         item.payload_bytes(),
         expected.as_slice(),
         "WIRE FORMAT: BatchAppendItem payload encoding drifted from named MessagePack.\n\
-         Investigate: src/store/contracts.rs BatchAppendItem::new.\n\
+         Investigate: src/store/append.rs BatchAppendItem::new.\n\
          Common causes: rmp_serde::to_vec used instead of to_vec_named.\n\
          Run: cargo test --test wire_format batch_append_item_uses_named_msgpack_payloads"
     );
@@ -255,45 +255,64 @@ fn outcome_batch_round_trip() {
     );
 }
 
-// --- Committed<T> golden test ---
+#[test]
+fn committed_api_contract() {
+    struct TestBypassReason;
+
+    impl batpak::pipeline::BypassReason for TestBypassReason {
+        fn name(&self) -> &'static str {
+            "wire-format-test"
+        }
+
+        fn justification(&self) -> &'static str {
+            "exercise committed proof through the public pipeline surface"
+        }
+    }
+
+    let event_id: u128 = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10;
+    let sequence: u64 = 42;
+    let mut hash = [0u8; 32];
+    hash[0] = 0xAB;
+    hash[31] = 0xCD;
+
+    let meta = CommitMetadata::new(event_id, sequence, hash);
+    assert_eq!(meta.event_id(), event_id);
+    assert_eq!(meta.sequence(), sequence);
+    assert_eq!(meta.hash(), hash);
+
+    let committed = Pipeline::<()>::commit_bypass(
+        Pipeline::<()>::bypass(Proposal::new("payload"), &TestBypassReason),
+        |_| Ok::<_, String>(meta),
+    )
+    .expect("public commit path should construct Committed");
+    assert_eq!(committed.payload(), &"payload");
+    assert_eq!(committed.event_id(), event_id);
+    assert_eq!(committed.sequence(), sequence);
+    assert_eq!(committed.hash(), &hash);
+
+    let (payload, meta2) = committed.into_parts();
+    assert_eq!(payload, "payload");
+    assert_eq!(meta2.event_id(), event_id);
+    assert_eq!(meta2.sequence(), sequence);
+    assert_eq!(meta2.hash(), hash);
+}
 
 #[test]
-fn committed_msgpack_golden() {
-    let committed = Committed {
-        payload: "test_payload".to_string(),
-        event_id: 0x0123456789ABCDEF_0123456789ABCDEF_u128,
-        sequence: 42,
-        hash: [0xAB; 32],
+fn commit_metadata_from_append_receipt_zeroes_hash() {
+    let receipt = batpak::store::AppendReceipt {
+        event_id: 0xDEAD,
+        sequence: 7,
+        disk_pos: batpak::store::DiskPos::new(3, 128, 64),
     };
 
-    let bytes = rmp_serde::to_vec_named(&committed).expect("serialize Committed");
-
-    // Round-trip
-    let decoded: Committed<String> = rmp_serde::from_slice(&bytes).expect("deserialize Committed");
+    let meta = CommitMetadata::from_append_receipt(receipt);
+    assert_eq!(meta.event_id(), 0xDEAD);
+    assert_eq!(meta.sequence(), 7);
     assert_eq!(
-        committed.event_id, decoded.event_id,
-        "WIRE FORMAT: Committed.event_id round-trip mismatch.\n\
-         Investigate: src/pipeline/mod.rs #[serde(with = \"crate::wire::u128_bytes\")].\n\
-         Common causes: u128_bytes serialize/deserialize changed.\n\
-         Run: GOLDEN_UPDATE=I_KNOW_WHAT_IM_DOING cargo test wire_format committed_msgpack_golden"
+        meta.hash(),
+        [0u8; 32],
+        "CommitMetadata::from_append_receipt must not fabricate a content hash",
     );
-    assert_eq!(
-        committed.payload, decoded.payload,
-        "WIRE FORMAT: Committed.payload round-trip mismatch.\n\
-         Investigate: src/pipeline/mod.rs Committed<T> serde.\n\
-         Common causes: generic T serialization broken.\n\
-         Run: GOLDEN_UPDATE=I_KNOW_WHAT_IM_DOING cargo test wire_format committed_msgpack_golden"
-    );
-    assert_eq!(
-        committed.sequence, decoded.sequence,
-        "WIRE FORMAT: Committed.sequence mismatch."
-    );
-    assert_eq!(
-        committed.hash, decoded.hash,
-        "WIRE FORMAT: Committed.hash mismatch."
-    );
-
-    check_or_update_golden("committed_v1.hex", &bytes);
 }
 
 // --- WaitCondition golden test ---

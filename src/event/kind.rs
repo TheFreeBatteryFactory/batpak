@@ -10,6 +10,11 @@ impl EventKind {
     /// category:type encoding. Upper 4 bits = category, lower 12 = type.
     /// Products use categories 0x1-0xC, 0xE-0xF. System reserves 0x0 and 0xD.
     ///
+    /// This constructor is intentionally strict: invalid inputs panic instead
+    /// of silently truncating into a different namespace. That keeps the
+    /// `const fn` surface honest and prevents accidental cross-category
+    /// collisions from being smuggled through as "best effort" encoding.
+    ///
     /// # Example
     /// ```
     /// use batpak::prelude::*;
@@ -31,7 +36,11 @@ impl EventKind {
             category != 0xD,
             "EventKind category 0xD is reserved for effect kinds (EFFECT_ERROR, etc.)"
         );
-        Self(((category as u16) << 12) | (type_id & 0x0FFF))
+        assert!(
+            type_id < 0x1000,
+            "EventKind type_id must fit in 12 bits without truncation"
+        );
+        Self(((category as u16) << 12) | type_id)
     }
 
     /// Returns the upper 4-bit category of this kind.

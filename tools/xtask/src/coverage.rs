@@ -108,17 +108,19 @@ pub(crate) fn cover(args: CoverArgs) -> Result<()> {
 
     if args.ci {
         let threshold = args.threshold.unwrap_or(70);
-        if summary.line_pct < threshold {
+        if summary.line_pct < threshold || summary.func_pct < threshold {
             bail!(
-                "FAIL: Line coverage {}% < threshold {}%\nFix the uncovered functions listed above.",
+                "FAIL: coverage below threshold {}% (lines={}%, functions={}%)\n\
+                 Fix the uncovered functions listed above.",
+                threshold,
                 summary.line_pct,
-                threshold
+                summary.func_pct
             );
         }
         println!();
         println!(
-            "PASS: Line coverage {}% >= threshold {}%",
-            summary.line_pct, threshold
+            "PASS: coverage meets threshold {}% (lines={}%, functions={}%)",
+            threshold, summary.line_pct, summary.func_pct
         );
     }
 

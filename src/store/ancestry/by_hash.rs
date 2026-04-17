@@ -6,31 +6,21 @@ pub(crate) fn walk_ancestors_by_hash<State>(
     event_id: u128,
     limit: usize,
 ) -> Vec<StoredEvent<serde_json::Value>> {
-    let mut results = Vec::new();
-    let mut current_id = Some(event_id);
-    while let Some(id) = current_id {
-        if results.len() >= limit {
-            break;
-        }
-        if let Some(entry) = store.index.get_by_id(id) {
-            if let Ok(stored) = store.reader.read_entry(&entry.disk_pos) {
-                results.push(stored);
-            }
-            let prev = entry.hash_chain.prev_hash;
-            if prev == [0_u8; 32] {
-                break;
-            }
-            current_id = store
+    super::collect_ancestors(store, Some(event_id), limit, |store, current_id| {
+        let (entry, stored) = super::read_entry_and_event(store, current_id)?;
+        let prev = entry.hash_chain.prev_hash;
+        let next = if prev == [0_u8; 32] {
+            None
+        } else {
+            store
                 .index
                 .stream(entry.coord.entity())
                 .iter()
                 .find(|candidate| candidate.hash_chain.event_hash == prev)
-                .map(|candidate| candidate.event_id);
-        } else {
-            break;
-        }
-    }
-    results
+                .map(|candidate| candidate.event_id)
+        };
+        Some((stored, next))
+    })
 }
 
 #[cfg(test)]

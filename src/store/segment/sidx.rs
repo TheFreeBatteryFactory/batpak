@@ -41,6 +41,9 @@
 //! | **Total**       | **162** |                                   |
 
 use crate::event::EventKind;
+use crate::event::HashChain;
+use crate::store::cold_start::{ColdStartIndexRow, ColdStartSource};
+use crate::store::index::interner::InternId;
 use crate::store::StoreError;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -166,6 +169,28 @@ pub(crate) struct SidxEntry {
 impl SidxEntry {
     pub(crate) fn to_disk_pos(&self, segment_id: u64) -> crate::store::DiskPos {
         crate::store::DiskPos::new(segment_id, self.frame_offset, self.frame_length)
+    }
+
+    pub(crate) fn to_cold_start_row(&self, segment_id: u64) -> ColdStartIndexRow {
+        ColdStartIndexRow {
+            source: ColdStartSource::Sidx,
+            event_id: self.event_id,
+            correlation_id: self.correlation_id,
+            causation_id: (self.causation_id != 0).then_some(self.causation_id),
+            entity_id: InternId(self.entity_idx),
+            scope_id: InternId(self.scope_idx),
+            kind: raw_to_kind(self.kind),
+            wall_ms: self.wall_ms,
+            clock: self.clock,
+            dag_lane: self.dag_lane,
+            dag_depth: self.dag_depth,
+            hash_chain: HashChain {
+                prev_hash: self.prev_hash,
+                event_hash: self.event_hash,
+            },
+            disk_pos: self.to_disk_pos(segment_id),
+            global_sequence: self.global_sequence,
+        }
     }
 
     /// Serialise this entry into `buf`, which must be exactly [`ENTRY_SIZE`] bytes.
@@ -632,6 +657,76 @@ mod tests {
         original.encode_into(&mut buf);
         let decoded = SidxEntry::decode_from(&buf, 1).expect("decode must succeed");
         assert_eq!(original, decoded, "round-trip must be lossless");
+    }
+
+    #[test]
+    fn sidx_entry_to_cold_start_row_preserves_index_and_header_fields() {
+        let entry = SidxEntry {
+            event_id: 0xDE,
+            entity_idx: 1,
+            scope_idx: 2,
+            kind: kind_to_raw(EventKind::custom(0x6, 0x77)),
+            wall_ms: 9_999,
+            clock: 12,
+            dag_lane: 4,
+            dag_depth: 8,
+            prev_hash: [0xAB; 32],
+            event_hash: [0xCD; 32],
+            frame_offset: 512,
+            frame_length: 144,
+            global_sequence: 123,
+            correlation_id: 0xEE,
+            causation_id: 0xFA,
+        };
+        let strings = vec![
+            String::new(),
+            "entity:sidx".to_owned(),
+            "scope:test".to_owned(),
+        ];
+
+        let row = entry.to_cold_start_row(7);
+        let rebuilt = row
+            .to_index_entry(&strings)
+            .expect("SIDX row to index entry");
+        let header = row.to_event_header();
+
+        assert_eq!(rebuilt.event_id, entry.event_id);
+        assert_eq!(rebuilt.correlation_id, entry.correlation_id);
+        assert_eq!(rebuilt.causation_id, Some(entry.causation_id));
+        assert_eq!(rebuilt.coord.entity(), "entity:sidx");
+        assert_eq!(rebuilt.coord.scope(), "scope:test");
+        assert_eq!(rebuilt.kind, raw_to_kind(entry.kind));
+        assert_eq!(rebuilt.wall_ms, entry.wall_ms);
+        assert_eq!(rebuilt.clock, entry.clock);
+        assert_eq!(rebuilt.dag_lane, entry.dag_lane);
+        assert_eq!(rebuilt.dag_depth, entry.dag_depth);
+        assert_eq!(rebuilt.hash_chain.prev_hash, entry.prev_hash);
+        assert_eq!(rebuilt.hash_chain.event_hash, entry.event_hash);
+        assert_eq!(rebuilt.disk_pos, entry.to_disk_pos(7));
+        assert_eq!(rebuilt.global_sequence, entry.global_sequence);
+        assert_eq!(header.event_id, entry.event_id);
+        assert_eq!(header.correlation_id, entry.correlation_id);
+        assert_eq!(header.causation_id, Some(entry.causation_id));
+        assert_eq!(header.position.wall_ms, entry.wall_ms);
+        assert_eq!(header.position.sequence, entry.clock);
+        assert_eq!(header.position.lane, entry.dag_lane);
+        assert_eq!(header.position.depth, entry.dag_depth);
+        assert_eq!(header.event_kind, raw_to_kind(entry.kind));
+    }
+
+    #[test]
+    fn sidx_entry_normalizes_zero_causation_to_none() {
+        let entry = SidxEntry {
+            causation_id: 0,
+            ..sample_entry(7)
+        };
+        let row = entry.to_cold_start_row(11);
+
+        assert_eq!(row.causation_id, None);
+        assert_eq!(
+            row.disk_pos,
+            crate::store::DiskPos::new(11, entry.frame_offset, entry.frame_length)
+        );
     }
 
     // ── kind_to_raw / raw_to_kind / event_kind round-trip ────────────────────

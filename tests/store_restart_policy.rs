@@ -29,7 +29,7 @@ fn writer_restart_once_recovers_from_panic() {
     store.panic_writer_for_test().expect("send panic command");
     store.append(&coord, kind, &"after_panic").expect(
         "RESTART FAILED: append after writer panic should succeed with RestartPolicy::Once.\n\
-         Investigate: src/store/writer.rs writer_thread_main() catch_unwind logic.",
+         Investigate: src/store/write/writer.rs writer_thread_main() catch_unwind logic.",
     );
 
     let entries = store.stream("restart:test");
@@ -69,7 +69,7 @@ fn writer_restart_once_gives_up_after_second_panic() {
                     "PROPERTY: after exhausting RestartPolicy::Once, append \
                      must fail. Writer thread did not die within 5s of \
                      receiving the second PanicForTest command. \
-                     Investigate: src/store/writer.rs writer_thread_main \
+                     Investigate: src/store/write/writer.rs writer_thread_main \
                      restart counter."
                 )
             }
@@ -124,7 +124,7 @@ fn writer_restart_bounded_respects_limit() {
                 panic!(
                     "PROPERTY: after exhausting RestartPolicy::Bounded, \
                      append must fail. Writer thread did not die within 5s. \
-                     Investigate: src/store/writer.rs restart counter."
+                     Investigate: src/store/write/writer.rs restart counter."
                 )
             }
             Ok(_) => std::thread::yield_now(),

@@ -1,16 +1,21 @@
-use super::contracts::checked_payload_len;
-use super::{fanout, *};
+use super::*;
+use crate::store::append::checked_payload_len;
+use crate::store::segment::scan as reader;
+use crate::store::write::{fanout, writer};
 use tempfile::TempDir;
 
 fn test_store_with_writer(tx: flume::Sender<writer::WriterCommand>) -> (Store, TempDir) {
     let dir = TempDir::new().expect("temp dir");
     let subscribers = Arc::new(fanout::SubscriberList::new());
+    let config = Arc::new(StoreConfig::new(dir.path().to_path_buf()));
+    let runtime = Arc::new(config.validated().expect("validated runtime config"));
     let store = Store {
         index: Arc::new(index::StoreIndex::new()),
         reader: Arc::new(reader::Reader::new(dir.path().to_path_buf(), 4)),
         cache: Box::new(NoCache),
         writer: Some(writer::WriterHandle::from_parts_for_test(tx, subscribers)),
-        config: Arc::new(StoreConfig::new(dir.path().to_path_buf())),
+        config,
+        runtime,
         should_shutdown_on_drop: true,
         open_report: None,
         _state: std::marker::PhantomData,
@@ -27,7 +32,7 @@ fn sync_reports_writer_crash_when_channel_is_closed() {
     assert!(
         matches!(Store::sync(&store), Err(StoreError::WriterCrashed)),
         "PROPERTY: Store::sync must surface WriterCrashed when the writer channel is disconnected.\n\
-         Investigate: src/store/mod.rs Store::sync and src/store/maintenance.rs sync.\n\
+         Investigate: src/store/mod.rs Store::sync and src/store/lifecycle.rs sync.\n\
          Common causes: sync() returning success without contacting the writer, disconnected sends being ignored."
     );
 }
@@ -65,7 +70,7 @@ fn checked_payload_len_returns_exact_serialized_length() {
         checked_payload_len(&[1, 2, 3, 4]).expect("payload len"),
         4,
         "PROPERTY: checked_payload_len must preserve the exact payload byte length.\n\
-         Investigate: src/store/contracts.rs checked_payload_len.\n\
+         Investigate: src/store/append.rs checked_payload_len.\n\
          Common causes: helper replaced with a constant, off-by-one, or truncated length conversion."
     );
 }

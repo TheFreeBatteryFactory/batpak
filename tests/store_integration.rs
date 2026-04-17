@@ -44,7 +44,7 @@ fn append_and_get_single_event() {
         stored.event.event_kind(),
         kind,
         "ROUND-TRIP FAILED: event_kind mismatch after append+get — expected {:?}, got {:?}.\n\
-         Check: src/store/mod.rs append(), src/store/reader.rs decode path.\n\
+         Check: src/store/mod.rs append(), src/store/segment/scan.rs decode path.\n\
          Common causes: EventKind serialization truncation, wrong field ordering in wire format.\n\
          Run: cargo test append_and_get_single_event -- --nocapture",
         kind,
@@ -69,7 +69,7 @@ fn append_multiple_events_same_entity() {
     assert_eq!(
         stats.event_count, 10,
         "EVENT COUNT MISMATCH: expected 10 events, got {}.\n\
-         Check: src/store/index.rs insert(), src/store/writer.rs append logic.\n\
+         Check: src/store/index/mod.rs insert(), src/store/write/writer.rs append logic.\n\
          Common causes: double-counting, off-by-one in loop, index not updated on each write.\n\
          Run: cargo test append_multiple_events_same_entity -- --nocapture",
         stats.event_count
@@ -81,7 +81,7 @@ fn append_multiple_events_same_entity() {
         results.len(),
         10,
         "CONTENT VERIFICATION FAILED: stream('entity:1') returned {} events, expected 10.\n\
-         Check: src/store/index.rs query() entity lookup, src/store/reader.rs decode.\n\
+         Check: src/store/index/mod.rs query() entity lookup, src/store/segment/scan.rs decode.\n\
          Common causes: index not keyed by entity, stream() filters incorrectly.\n\
          Run: cargo test append_multiple_events_same_entity -- --nocapture",
         results.len()
@@ -125,7 +125,7 @@ fn query_by_entity_prefix() {
         results.len(),
         5,
         "ENTITY PREFIX QUERY FAILED: expected 5 'user:*' events, got {}.\n\
-         Check: src/store/index.rs query() entity_prefix path, BTreeMap range scan.\n\
+         Check: src/store/index/mod.rs query() entity_prefix path, BTreeMap range scan.\n\
          Common causes: prefix range bounds wrong (start_bound/end_bound), Arc<str> key comparison mismatch.\n\
          Run: cargo test query_by_entity_prefix -- --nocapture",
         results.len()
@@ -137,7 +137,7 @@ fn query_by_entity_prefix() {
         assert!(
             entity.starts_with("user:"),
             "ENTITY PREFIX QUERY CONTAMINATION: entry[{idx}] has entity '{}' which does not match prefix 'user:'.\n\
-             Check: src/store/index.rs query() entity_prefix range, BTreeMap range end bound.\n\
+             Check: src/store/index/mod.rs query() entity_prefix range, BTreeMap range end bound.\n\
              Common causes: range upper bound too loose, prefix check skipped for last entry.\n\
              Run: cargo test query_by_entity_prefix -- --nocapture",
             entity
@@ -145,7 +145,7 @@ fn query_by_entity_prefix() {
         assert_eq!(
             entry.kind, kind,
             "ENTITY PREFIX QUERY WRONG KIND: entry[{idx}] has kind {:?}, expected {:?}.\n\
-             Check: src/store/index.rs insert() kind assignment.\n\
+             Check: src/store/index/mod.rs insert() kind assignment.\n\
              Common causes: EventKind not propagated to IndexEntry.\n\
              Run: cargo test query_by_entity_prefix -- --nocapture",
             entry.kind, kind
@@ -160,7 +160,7 @@ fn query_by_entity_prefix() {
     assert!(
         order_results.is_empty(),
         "ENTITY PREFIX QUERY LEAKAGE: 'order:' entity leaked into 'user:' prefix query ({} events).\n\
-         Check: src/store/index.rs query() entity_prefix range end bound computation.\n\
+         Check: src/store/index/mod.rs query() entity_prefix range end bound computation.\n\
          Common causes: BTreeMap range end bound not exclusive, prefix increment overflow.\n\
          Run: cargo test query_by_entity_prefix -- --nocapture",
         order_results.len()
@@ -188,7 +188,7 @@ fn query_by_scope() {
         results.len(),
         2,
         "SCOPE QUERY FAILED: expected 2 scope:a events, got {}.\n\
-         Check: src/store/index.rs query() scope path (DashMap Ref lifetime fix — Phase 1.5).\n\
+         Check: src/store/index/mod.rs query() scope path (DashMap Ref lifetime fix — Phase 1.5).\n\
          Common causes: DashMap guard dropped too early, scope key normalization mismatch.\n\
          Run: cargo test query_by_scope -- --nocapture",
         results.len()
@@ -200,7 +200,7 @@ fn query_by_scope() {
         assert_eq!(
             scope, "scope:a",
             "SCOPE QUERY CONTAMINATION: entry[{idx}] has scope '{}', expected 'scope:a'.\n\
-             Check: src/store/index.rs query() scope filter, DashMap iteration guard lifetime.\n\
+             Check: src/store/index/mod.rs query() scope filter, DashMap iteration guard lifetime.\n\
              Common causes: scope filter predicate inverted, wrong DashMap shard iterated.\n\
              Run: cargo test query_by_scope -- --nocapture",
             scope
@@ -209,7 +209,7 @@ fn query_by_scope() {
             entry.coord.entity(),
             "entity:1",
             "SCOPE QUERY WRONG ENTITY: entry[{idx}] has entity '{}', expected 'entity:1'.\n\
-             Check: src/store/index.rs scope index structure, coordinate stored correctly.\n\
+             Check: src/store/index/mod.rs scope index structure, coordinate stored correctly.\n\
              Common causes: coordinate fields swapped during index insertion.\n\
              Run: cargo test query_by_scope -- --nocapture",
             entry.coord.entity()
@@ -217,7 +217,7 @@ fn query_by_scope() {
         assert_eq!(
             entry.kind, kind,
             "SCOPE QUERY WRONG KIND: entry[{idx}] has kind {:?}, expected {:?}.\n\
-             Check: src/store/index.rs insert() kind assignment.\n\
+             Check: src/store/index/mod.rs insert() kind assignment.\n\
              Common causes: EventKind not propagated to IndexEntry.\n\
              Run: cargo test query_by_scope -- --nocapture",
             entry.kind, kind
@@ -232,7 +232,7 @@ fn query_by_scope() {
     assert!(
         scope_b_in_results.is_empty(),
         "SCOPE QUERY LEAKAGE: scope:b event leaked into scope:a query ({} events).\n\
-         Check: src/store/index.rs query() scope filter predicate.\n\
+         Check: src/store/index/mod.rs query() scope filter predicate.\n\
          Common causes: scope equality check uses prefix instead of exact match.\n\
          Run: cargo test query_by_scope -- --nocapture",
         scope_b_in_results.len()
@@ -262,7 +262,7 @@ fn by_scope_wrapper_matches_exact_scope_results() {
         wrapped.len(),
         2,
         "SCOPE WRAPPER FAILED: Store::by_scope('scope:wrapper') should return exactly 2 events.\n\
-         Check: src/store/mod.rs by_scope() wrapper and src/store/index.rs scope query path.\n\
+         Check: src/store/mod.rs by_scope() wrapper and src/store/index/mod.rs scope query path.\n\
          Common causes: by_scope() returning an empty vec, forwarding the wrong Region, or widening to prefix semantics.\n\
          Run: cargo test by_scope_wrapper_matches_exact_scope_results -- --nocapture",
     );
@@ -280,7 +280,7 @@ fn by_scope_wrapper_matches_exact_scope_results() {
             entry.coord.scope(),
             "scope:wrapper",
             "SCOPE WRAPPER CONTAMINATION: entry[{idx}] has scope '{}', expected 'scope:wrapper'.\n\
-             Check: src/store/mod.rs by_scope() and src/store/index.rs query() scope filtering.\n\
+             Check: src/store/mod.rs by_scope() and src/store/index/mod.rs query() scope filtering.\n\
              Run: cargo test by_scope_wrapper_matches_exact_scope_results -- --nocapture",
             entry.coord.scope()
         );
@@ -306,7 +306,7 @@ fn query_by_fact() {
         results.len(),
         2,
         "FACT QUERY FAILED: expected 2 events of kind_a ({:?}), got {}.\n\
-         Check: src/store/index.rs by_fact() path, EventKind index key.\n\
+         Check: src/store/index/mod.rs by_fact() path, EventKind index key.\n\
          Common causes: EventKind hash/eq mismatch, by_fact index not updated on insert.\n\
          Run: cargo test query_by_fact -- --nocapture",
         kind_a,
@@ -319,7 +319,7 @@ fn query_by_fact() {
             entry.kind,
             kind_a,
             "FACT QUERY WRONG KIND: entry[{idx}] has kind {:?}, expected kind_a {:?}.\n\
-             Check: src/store/index.rs by_fact() filter, EventKind comparison in index.\n\
+             Check: src/store/index/mod.rs by_fact() filter, EventKind comparison in index.\n\
              Common causes: index bucket collision between kind_a and kind_b, wrong EventKind key.\n\
              Run: cargo test query_by_fact -- --nocapture",
             entry.kind,
@@ -332,7 +332,7 @@ fn query_by_fact() {
     assert!(
         kind_b_in_results.is_empty(),
         "FACT QUERY LEAKAGE: kind_b ({:?}) leaked into kind_a ({:?}) query ({} events).\n\
-         Check: src/store/index.rs by_fact() bucket lookup, EventKind Hash impl.\n\
+         Check: src/store/index/mod.rs by_fact() bucket lookup, EventKind Hash impl.\n\
          Common causes: EventKind Hash collision, index uses wrong discriminant.\n\
          Run: cargo test query_by_fact -- --nocapture",
         kind_b,
@@ -387,7 +387,7 @@ fn cold_start_rebuilds_index() {
             results.len(),
             20,
             "COLD START STREAM FAILED: stream('entity:1') returned {} events after cold start, expected 20.\n\
-             Check: src/store/mod.rs Store::open() cold start scan, src/store/index.rs rebuild logic.\n\
+             Check: src/store/mod.rs Store::open() cold start scan, src/store/index/mod.rs rebuild logic.\n\
              Common causes: stream() skips events from non-active segments, index rebuild stops early.\n\
              Run: cargo test cold_start_rebuilds_index -- --nocapture",
             results.len()
@@ -414,7 +414,7 @@ fn cold_start_rebuilds_index() {
                 entry.coord.entity(),
                 "entity:1",
                 "COLD START COORDINATE CORRUPTION: entry[{idx}] has entity '{}' after cold start, expected 'entity:1'.\n\
-                 Check: src/store/reader.rs coordinate deserialization, Arc<str> round-trip (Phase 1.1 fix).\n\
+                 Check: src/store/segment/scan.rs coordinate deserialization, Arc<str> round-trip (Phase 1.1 fix).\n\
                  Common causes: Arc<str> serialized as pointer, entity string not persisted correctly.\n\
                  Run: cargo test cold_start_rebuilds_index -- --nocapture",
                 entry.coord.entity()
@@ -423,7 +423,7 @@ fn cold_start_rebuilds_index() {
                 entry.coord.scope(),
                 "scope:test",
                 "COLD START COORDINATE CORRUPTION: entry[{idx}] has scope '{}' after cold start, expected 'scope:test'.\n\
-                 Check: src/store/reader.rs coordinate deserialization, scope field offset in wire format.\n\
+                 Check: src/store/segment/scan.rs coordinate deserialization, scope field offset in wire format.\n\
                  Common causes: entity/scope fields swapped in codec, scope not written to segment.\n\
                  Run: cargo test cold_start_rebuilds_index -- --nocapture",
                 entry.coord.scope()
@@ -473,7 +473,7 @@ fn segment_rotation_on_size() {
     assert!(
         segment_count > 1,
         "SEGMENT ROTATION FAILED: expected multiple .fbat segments with 512-byte limit, got {}.\n\
-         Check: src/store/writer.rs rotation check (STEP 7), segment_max_bytes threshold comparison.\n\
+         Check: src/store/write/writer.rs rotation check (STEP 7), segment_max_bytes threshold comparison.\n\
          Common causes: rotation check uses > instead of >=, byte count measured before not after write.\n\
          Run: cargo test segment_rotation_on_size -- --nocapture",
         segment_count
@@ -544,7 +544,7 @@ fn concurrent_append_and_query() {
     assert_eq!(
         stats.event_count, 100,
         "CONCURRENT R/W FAILED: expected 100 events after concurrent writes, got {}.\n\
-         Check: src/store/index.rs insert() under concurrent load, writer.rs flush ordering.\n\
+         Check: src/store/index/mod.rs insert() under concurrent load, writer.rs flush ordering.\n\
          Common causes: lost write under contention, event_count stat not atomically updated.\n\
          Run: cargo test concurrent_append_and_query -- --nocapture",
         stats.event_count

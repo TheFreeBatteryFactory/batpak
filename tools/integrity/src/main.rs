@@ -840,7 +840,7 @@ fn check_pub_items_have_references(repo_root: &Path) -> Result<()> {
             ensure(
                 reference_space.contains(&name),
                 format!(
-                    "public item `{}` from {} has no coarse witness reference in tests/benches/examples/docs",
+                    "public item `{}` from {} has no coarse witness reference in tests/benches/examples/docs; add a named witness or reserve the allowlist for structural surfaces that cannot sensibly be named directly",
                     name,
                     relative(repo_root, &path)
                 ),

@@ -5,20 +5,23 @@
 //! mmap it, restore the interner snapshot, replay the entry section, then
 //! replay only the durable tail after the recorded watermark.
 
-use crate::coordinate::Coordinate;
+use super::checkpoint::WatermarkInfo;
 use crate::event::HashChain;
-use crate::store::checkpoint::WatermarkInfo;
+use crate::store::cold_start::{
+    validate_watermark_segment, write_artifact_atomically, ColdStartIndexRow, ColdStartSource,
+    WatermarkValidationError,
+};
+use crate::store::index::interner::InternId;
 use crate::store::index::{
     recommended_restore_chunk_count, DiskPos, IndexEntry, RoutingSummary, StoreIndex,
 };
-use crate::store::sidx::{kind_to_raw, raw_to_kind};
+use crate::store::segment::sidx::{kind_to_raw, raw_to_kind};
 use crate::store::StoreError;
 use memmap2::Mmap;
 use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use tempfile::NamedTempFile;
 
 pub(crate) const MMAP_INDEX_MAGIC: &[u8; 6] = b"FBATIX";
 pub(crate) const MMAP_INDEX_VERSION: u16 = 3;
@@ -56,19 +59,6 @@ struct MmapSummaryDataV2 {
     routing: RoutingSummary,
 }
 
-fn reject_symlink_leaf(path: &Path) -> Result<(), StoreError> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(StoreError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "refusing to write mmap index through symlink {}",
-                path.display()
-            ),
-        ))),
-        Ok(_) | Err(_) => Ok(()),
-    }
-}
-
 struct MmapIndexEntry {
     event_id: u128,
     entity_idx: u32,
@@ -91,6 +81,28 @@ struct MmapIndexEntry {
 impl MmapIndexEntry {
     fn to_disk_pos(&self) -> DiskPos {
         DiskPos::new(self.segment_id, self.frame_offset, self.frame_length)
+    }
+
+    fn to_cold_start_row(&self) -> ColdStartIndexRow {
+        ColdStartIndexRow {
+            source: ColdStartSource::MmapIndex,
+            event_id: self.event_id,
+            correlation_id: self.correlation_id,
+            causation_id: (self.causation_id != 0).then_some(self.causation_id),
+            entity_id: InternId(self.entity_idx),
+            scope_id: InternId(self.scope_idx),
+            kind: raw_to_kind(self.kind),
+            wall_ms: self.wall_ms,
+            clock: self.clock,
+            dag_lane: self.dag_lane,
+            dag_depth: self.dag_depth,
+            hash_chain: HashChain {
+                prev_hash: self.prev_hash,
+                event_hash: self.event_hash,
+            },
+            disk_pos: self.to_disk_pos(),
+            global_sequence: self.global_sequence,
+        }
     }
 
     #[cfg(test)]
@@ -296,12 +308,8 @@ pub(crate) fn write_mmap_index(
     hasher.update(&summary_bytes);
 
     let final_path = data_dir.join(MMAP_INDEX_FILENAME);
-    reject_symlink_leaf(&final_path)?;
-
-    let tmp = NamedTempFile::new_in(data_dir)?;
-    let mut file = tmp.reopen().map_err(StoreError::Io)?;
-    {
-        let mut writer = BufWriter::new(&mut file);
+    write_artifact_atomically(data_dir, &final_path, "mmap index", |file| {
+        let mut writer = BufWriter::new(&mut *file);
         writer.write_all(MMAP_INDEX_MAGIC).map_err(StoreError::Io)?;
         writer
             .write_all(&MMAP_INDEX_VERSION.to_le_bytes())
@@ -321,16 +329,13 @@ pub(crate) fn write_mmap_index(
         }
 
         writer.flush().map_err(StoreError::Io)?;
-    }
+        drop(writer);
 
-    let crc = hasher.finalize();
-    file.seek(SeekFrom::Start(8)).map_err(StoreError::Io)?;
-    file.write_all(&crc.to_le_bytes()).map_err(StoreError::Io)?;
-    file.sync_all().map_err(StoreError::Io)?;
-    drop(file);
-
-    tmp.persist(&final_path)
-        .map_err(|e| StoreError::Io(e.error))?;
+        let crc = hasher.finalize();
+        file.seek(SeekFrom::Start(8)).map_err(StoreError::Io)?;
+        file.write_all(&crc.to_le_bytes()).map_err(StoreError::Io)?;
+        Ok(())
+    })?;
 
     tracing::debug!(
         target: "batpak::mmap_index",
@@ -568,28 +573,30 @@ fn try_load_mmap_index(data_dir: &Path) -> Option<LoadedMmapIndex> {
         return None;
     }
 
-    let watermark_segment_path = data_dir.join(crate::store::segment::segment_filename(
-        watermark_segment_id,
-    ));
-    match std::fs::metadata(&watermark_segment_path) {
-        Ok(meta) if meta.len() >= watermark_offset => {}
-        Ok(meta) => {
+    match validate_watermark_segment(data_dir, watermark_segment_id, watermark_offset) {
+        Ok(()) => {}
+        Err(WatermarkValidationError::OffsetPastTail {
+            path: watermark_segment_path,
+            file_len,
+            watermark_offset,
+        }) => {
             tracing::warn!(
                 target: "batpak::mmap_index",
                 path = %path.display(),
                 watermark_segment = %watermark_segment_path.display(),
-                file_len = meta.len(),
+                file_len,
                 watermark_offset,
                 "mmap index watermark points past the segment tail"
             );
             return None;
         }
-        Err(error) => {
+        Err(WatermarkValidationError::MissingSegment {
+            path: watermark_segment_path,
+        }) => {
             tracing::warn!(
                 target: "batpak::mmap_index",
                 path = %path.display(),
                 watermark_segment = %watermark_segment_path.display(),
-                error = %error,
                 "mmap index watermark segment is missing"
             );
             return None;
@@ -756,34 +763,11 @@ pub(crate) fn try_load_mmap_snapshot(data_dir: &Path) -> Option<LoadedMmapSnapsh
             };
             for chunk in entries_slice[start_byte..end_byte].chunks_exact(loaded.entry_size) {
                 let entry = MmapIndexEntry::decode_from(chunk, version)?;
-                let entity = loaded
-                    .interner_strings
-                    .get(entry.entity_idx as usize)
-                    .ok_or_else(|| StoreError::ser_msg("mmap index entity_idx is out of range"))?;
-                let scope = loaded
-                    .interner_strings
-                    .get(entry.scope_idx as usize)
-                    .ok_or_else(|| StoreError::ser_msg("mmap index scope_idx is out of range"))?;
-                let coord = Coordinate::new(entity, scope)?;
-                rebuilt.push(IndexEntry {
-                    event_id: entry.event_id,
-                    correlation_id: entry.correlation_id,
-                    causation_id: (entry.causation_id != 0).then_some(entry.causation_id),
-                    coord,
-                    entity_id: crate::store::interner::InternId(entry.entity_idx),
-                    scope_id: crate::store::interner::InternId(entry.scope_idx),
-                    kind: raw_to_kind(entry.kind),
-                    wall_ms: entry.wall_ms,
-                    clock: entry.clock,
-                    dag_lane: entry.dag_lane,
-                    dag_depth: entry.dag_depth,
-                    hash_chain: HashChain {
-                        prev_hash: entry.prev_hash,
-                        event_hash: entry.event_hash,
-                    },
-                    disk_pos: entry.to_disk_pos(),
-                    global_sequence: entry.global_sequence,
-                });
+                rebuilt.push(
+                    entry
+                        .to_cold_start_row()
+                        .to_index_entry(&loaded.interner_strings)?,
+                );
             }
             Ok::<_, StoreError>((chunk_idx, rebuilt))
         })
@@ -815,6 +799,7 @@ pub(crate) fn try_load_mmap_snapshot(data_dir: &Path) -> Option<LoadedMmapSnapsh
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coordinate::Coordinate;
     use crate::event::EventKind;
     use crate::store::index::StoreIndex;
     use tempfile::TempDir;
@@ -833,7 +818,10 @@ mod tests {
                 coord,
                 entity_id,
                 scope_id,
-                kind: EventKind::custom(0x1, u16::try_from(i & 0x0FFF).expect("masked to 12 bits, fits u16")),
+                kind: EventKind::custom(
+                    0x1,
+                    u16::try_from(i & 0x0FFF).expect("masked to 12 bits, fits u16"),
+                ),
                 wall_ms: 10_000 + i,
                 clock: u32::try_from(i).expect("fits u32"),
                 dag_lane: 0,
@@ -872,6 +860,79 @@ mod tests {
         assert_eq!(restored.0.watermark_offset, 512);
         assert_eq!(dst.len(), 8);
         assert_eq!(dst.visible_sequence(), 8);
+    }
+
+    #[test]
+    fn mmap_entry_to_cold_start_row_preserves_index_fields() {
+        let entry = MmapIndexEntry {
+            event_id: 0x11,
+            entity_idx: 1,
+            scope_idx: 2,
+            kind: kind_to_raw(EventKind::custom(0x4, 0x55)),
+            wall_ms: 2000,
+            clock: 9,
+            dag_lane: 6,
+            dag_depth: 7,
+            prev_hash: [0x33; 32],
+            event_hash: [0x44; 32],
+            segment_id: 3,
+            frame_offset: 128,
+            frame_length: 96,
+            global_sequence: 77,
+            correlation_id: 0x22,
+            causation_id: 0x33,
+        };
+        let strings = vec![
+            String::new(),
+            "entity:mmap".to_owned(),
+            "scope:test".to_owned(),
+        ];
+
+        let rebuilt = entry
+            .to_cold_start_row()
+            .to_index_entry(&strings)
+            .expect("mmap row to index entry");
+
+        assert_eq!(rebuilt.event_id, entry.event_id);
+        assert_eq!(rebuilt.correlation_id, entry.correlation_id);
+        assert_eq!(rebuilt.causation_id, Some(entry.causation_id));
+        assert_eq!(rebuilt.coord.entity(), "entity:mmap");
+        assert_eq!(rebuilt.coord.scope(), "scope:test");
+        assert_eq!(rebuilt.kind, raw_to_kind(entry.kind));
+        assert_eq!(rebuilt.wall_ms, entry.wall_ms);
+        assert_eq!(rebuilt.clock, entry.clock);
+        assert_eq!(rebuilt.dag_lane, entry.dag_lane);
+        assert_eq!(rebuilt.dag_depth, entry.dag_depth);
+        assert_eq!(rebuilt.hash_chain.prev_hash, entry.prev_hash);
+        assert_eq!(rebuilt.hash_chain.event_hash, entry.event_hash);
+        assert_eq!(rebuilt.disk_pos, entry.to_disk_pos());
+        assert_eq!(rebuilt.global_sequence, entry.global_sequence);
+    }
+
+    #[test]
+    fn mmap_entry_normalizes_zero_causation_to_none() {
+        let row = MmapIndexEntry {
+            event_id: 1,
+            entity_idx: 1,
+            scope_idx: 2,
+            kind: kind_to_raw(EventKind::DATA),
+            wall_ms: 10,
+            clock: 1,
+            dag_lane: 0,
+            dag_depth: 0,
+            prev_hash: [0; 32],
+            event_hash: [1; 32],
+            segment_id: 3,
+            frame_offset: 4,
+            frame_length: 5,
+            global_sequence: 6,
+            correlation_id: 2,
+            causation_id: 0,
+        }
+        .to_cold_start_row();
+
+        assert_eq!(row.causation_id, None);
+        assert_eq!(row.disk_pos, DiskPos::new(3, 4, 5));
     }
 
     #[test]

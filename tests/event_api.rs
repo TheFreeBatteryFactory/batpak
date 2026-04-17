@@ -744,6 +744,20 @@ fn dag_position_partial_ord_same_lane() {
 }
 
 #[test]
+fn dag_position_partial_ord_refuses_false_equal_when_hlc_differs() {
+    let a = DagPosition::with_hlc(1_000, 0, 0, 0, 2);
+    let b = DagPosition::with_hlc(2_000, 0, 0, 0, 2);
+    assert_eq!(
+        a.partial_cmp(&b),
+        None,
+        "PROPERTY: Same lane/depth/sequence with different HLC values must not collapse to Equal.\n\
+         Investigate: src/coordinate/position.rs DagPosition PartialOrd impl.\n\
+         Common causes: comparing only sequence and ignoring wall_ms/counter when sequence matches.\n\
+         Run: cargo test --test event_api dag_position_partial_ord_refuses_false_equal_when_hlc_differs"
+    );
+}
+
+#[test]
 fn dag_position_partial_ord_different_lanes_incomparable() {
     let a = DagPosition::new(0, 0, 2);
     let b = DagPosition::new(0, 1, 5);

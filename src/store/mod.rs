@@ -1,86 +1,64 @@
-mod ancestors;
-/// Index checkpoint: fast cold-start by persisting the in-memory index to disk.
-pub(crate) mod checkpoint;
-/// Columnar (SoA / AoSoA) secondary query index.
-pub(crate) mod columnar;
+mod ancestry;
+mod append;
+pub(crate) mod cold_start;
 mod config;
-mod contracts;
-mod control_plane;
-/// Pull-based cursor for guaranteed, ordered event delivery.
-pub mod cursor;
+/// Push subscriptions (lossy) and pull cursors (guaranteed) for event delivery.
+pub mod delivery;
 mod error;
-/// Writer notification fanout and internal committed-event envelopes.
-mod fanout;
 /// Fault injection framework for testing failure scenarios.
 #[cfg(feature = "dangerous-test-hooks")]
 pub mod fault;
+mod hidden_ranges;
 /// In-memory 2D event index, rebuilt from segments on startup.
 pub mod index;
-mod index_rebuild;
-/// String interning for compact index keys.
-pub(crate) mod interner;
-mod maintenance;
-/// Mmap-first cold-start artifact for fixed-width index snapshots.
-pub(crate) mod mmap_index;
+mod lifecycle;
 /// Projection cache traits and built-in backends (NoCache, NativeCache).
 pub mod projection;
-mod projection_flow;
-/// Low-level segment file reader for replaying events from disk.
-pub mod reader;
 #[cfg(test)]
 mod runtime_contracts;
 /// On-disk segment format, frame encoding/decoding, and compaction helpers.
 pub mod segment;
-/// SIDX segment footer for fast cold-start index rebuild.
-pub(crate) mod sidx;
-mod staging;
 /// Runtime statistics and diagnostic snapshots.
 pub mod stats;
-/// Push-based (lossy) event subscription via broadcast channel.
-pub mod subscription;
 #[cfg(feature = "dangerous-test-hooks")]
 mod test_support;
-/// Persisted hidden fence ranges used to keep cancelled fence writes invisible across reopen.
-pub(crate) mod visibility_ranges;
-mod watch;
-/// Background writer thread, restart policy, and commit flow.
-pub mod writer;
+pub(crate) mod write;
 
-pub use config::{
-    BatchConfig, IndexConfig, IndexTopology, StoreConfig, SyncConfig, SyncMode, WriterConfig,
-};
-pub use contracts::{
+pub use append::{
     AppendOptions, AppendPositionHint, AppendReceipt, BatchAppendItem, CausationRef,
     CompactionConfig, CompactionStrategy, RetentionPredicate,
 };
-pub use control_plane::{AppendTicket, BatchAppendTicket, Outbox, VisibilityFence};
-pub use cursor::{Cursor, CursorWorkerAction, CursorWorkerConfig, CursorWorkerHandle};
+pub use cold_start::rebuild::{OpenIndexPath, OpenIndexReport};
+pub use config::{
+    BatchConfig, IndexConfig, IndexTopology, StoreConfig, SyncConfig, SyncMode, WriterConfig,
+};
+pub use delivery::cursor::{Cursor, CursorWorkerAction, CursorWorkerConfig, CursorWorkerHandle};
+pub use delivery::subscription::Subscription;
 pub use error::StoreError;
 #[cfg(feature = "dangerous-test-hooks")]
 pub use fault::{
     CountdownAction, CountdownInjector, FaultInjector, InjectionPoint, ProbabilisticInjector,
 };
 pub use index::{ClockKey, DiskPos, IndexEntry};
-pub use index_rebuild::{OpenIndexPath, OpenIndexReport};
+pub use projection::watch::ProjectionWatcher;
 pub use projection::{
     CacheCapabilities, CacheMeta, Freshness, NativeCache, NoCache, ProjectionCache,
 };
 pub use stats::{StoreDiagnostics, StoreStats, WriterPressure};
-pub use subscription::Subscription;
-pub use watch::ProjectionWatcher;
-pub use writer::{Notification, RestartPolicy};
+pub use write::control::{AppendTicket, BatchAppendTicket, Outbox, VisibilityFence};
+pub use write::writer::{Notification, RestartPolicy};
 
 use crate::coordinate::{Coordinate, KindFilter, Region};
 use crate::event::{EventKind, EventSourced, StoredEvent};
 #[cfg(test)]
 pub(crate) use config::now_us;
-use control_plane::AppendSubmission;
-use fanout::{ReactorSubscriberList, SubscriberList};
 use index::StoreIndex;
-use reader::Reader;
+use segment::scan::Reader;
 use serde::Serialize;
 use std::sync::Arc;
-use writer::{WriterCommand, WriterHandle};
+use write::control::AppendSubmission;
+use write::fanout::{ReactorSubscriberList, SubscriberList};
+use write::writer::{WriterCommand, WriterHandle};
 // ProjectionCache re-exported above via pub use, no separate use needed.
 
 /// Store: the runtime. Sync API. Send + Sync.
@@ -107,13 +85,45 @@ pub struct Store<State = Open> {
     pub(crate) cache: Box<dyn ProjectionCache>,
     pub(crate) writer: Option<WriterHandle>,
     pub(crate) config: Arc<StoreConfig>,
+    pub(crate) runtime: Arc<config::ValidatedStoreConfig>,
     pub(crate) should_shutdown_on_drop: bool,
-    pub(crate) open_report: Option<index_rebuild::OpenIndexReport>,
+    pub(crate) open_report: Option<cold_start::rebuild::OpenIndexReport>,
     pub(crate) _state: std::marker::PhantomData<State>,
 }
 
-type AppendReply = Result<AppendReceipt, StoreError>;
-type BatchAppendReply = Result<Vec<AppendReceipt>, StoreError>;
+struct OpenComponents {
+    runtime: Arc<config::ValidatedStoreConfig>,
+    config: Arc<StoreConfig>,
+    index: Arc<StoreIndex>,
+    reader: Arc<Reader>,
+    open_report: cold_start::rebuild::OpenIndexReport,
+}
+
+fn open_components(config: StoreConfig) -> Result<OpenComponents, StoreError> {
+    let runtime = Arc::new(config.validated()?);
+    std::fs::create_dir_all(&config.data_dir)?;
+    let config = Arc::new(config);
+    let index = Arc::new(StoreIndex::with_config(&config.index));
+    let reader = Arc::new(Reader::new(config.data_dir.clone(), config.fd_budget));
+
+    // Cold start: checkpoint/mmap fast paths or full segment scan.
+    // Segment files are named so lexicographic order matches replay order.
+    let open_report =
+        cold_start::rebuild::open_index(&index, &reader, &config.data_dir, runtime.cold_start)?;
+
+    // Tell the reader which segment is active (for mmap dispatch).
+    // The writer's initial segment ID is the highest existing + 1.
+    let active_seg_id = write::writer::find_latest_segment_id(&config.data_dir).unwrap_or(0) + 1;
+    reader.set_active_segment(active_seg_id);
+
+    Ok(OpenComponents {
+        runtime,
+        config,
+        index,
+        reader,
+        open_report,
+    })
+}
 
 impl Store<Open> {
     /// Open a store at the given config's data directory. Creates the directory if absent.
@@ -146,31 +156,24 @@ impl Store<Open> {
         config: StoreConfig,
         cache: Box<dyn ProjectionCache>,
     ) -> Result<Self, StoreError> {
-        config.validate()?;
-        std::fs::create_dir_all(&config.data_dir)?;
-        let config = Arc::new(config);
-        let index = Arc::new(StoreIndex::with_config(&config.index));
-        let reader = Arc::new(Reader::new(config.data_dir.clone(), config.fd_budget));
-
-        // Cold start: checkpoint fast path or full segment scan.
-        // Segment files are named so lexicographic order matches replay order.
-        let open_report = index_rebuild::open_index(
-            &index,
-            &reader,
-            &config.data_dir,
-            config.index.enable_checkpoint,
-            config.index.enable_mmap_index,
-        )?;
-
-        // Tell the reader which segment is active (for mmap dispatch).
-        // The writer's initial segment ID is the highest existing + 1.
-        let active_seg_id = writer::find_latest_segment_id(&config.data_dir).unwrap_or(0) + 1;
-        reader.set_active_segment(active_seg_id);
+        let OpenComponents {
+            runtime,
+            config,
+            index,
+            reader,
+            open_report,
+        } = open_components(config)?;
 
         let subscribers = Arc::new(SubscriberList::new());
         let reactor_subscribers = Arc::new(ReactorSubscriberList::new());
-        let writer =
-            WriterHandle::spawn(&config, &index, &subscribers, &reactor_subscribers, &reader)?;
+        let writer = WriterHandle::spawn(
+            &config,
+            &runtime,
+            &index,
+            &subscribers,
+            &reactor_subscribers,
+            &reader,
+        )?;
 
         Ok(Self {
             index,
@@ -178,6 +181,7 @@ impl Store<Open> {
             cache,
             writer: Some(writer),
             config,
+            runtime,
             should_shutdown_on_drop: true,
             open_report: Some(open_report),
             _state: std::marker::PhantomData,
@@ -263,7 +267,7 @@ impl Store<Open> {
     /// background execution.
     pub fn submit_batch(
         &self,
-        items: Vec<crate::store::contracts::BatchAppendItem>,
+        items: Vec<crate::store::append::BatchAppendItem>,
     ) -> Result<BatchAppendTicket, StoreError> {
         self.ensure_no_active_public_fence()?;
         self.submit_batch_with_fence_impl(items, None)
@@ -324,7 +328,7 @@ impl Store<Open> {
     /// proceeds past the soft-pressure gate.
     pub fn try_submit_batch(
         &self,
-        items: Vec<crate::store::contracts::BatchAppendItem>,
+        items: Vec<crate::store::append::BatchAppendItem>,
     ) -> Result<crate::outcome::Outcome<BatchAppendTicket>, StoreError> {
         if self.index.active_visibility_fence().is_some() {
             return Ok(crate::outcome::Outcome::cancelled(
@@ -392,7 +396,7 @@ impl Store<Open> {
     /// or publish preparation. The `item_index` field indicates which item failed.
     pub fn append_batch(
         &self,
-        items: Vec<crate::store::contracts::BatchAppendItem>,
+        items: Vec<crate::store::append::BatchAppendItem>,
     ) -> Result<Vec<AppendReceipt>, StoreError> {
         self.submit_batch(items)?.wait()
     }
@@ -407,7 +411,7 @@ impl Store<Open> {
         &self,
         correlation_id: u128,
         causation_id: u128,
-        items: Vec<crate::store::contracts::BatchAppendItem>,
+        items: Vec<crate::store::append::BatchAppendItem>,
     ) -> Result<Vec<AppendReceipt>, StoreError> {
         // Set correlation_id and causation_id on all items.
         let items: Vec<_> = items
@@ -541,7 +545,11 @@ impl Store<Open> {
     /// # Errors
     /// Returns `StoreError::Serialization` if the payload cannot be serialized.
     /// Returns `StoreError::WriterCrashed` if the writer thread has exited unexpectedly.
-    pub fn apply_transition<From, To, P: Serialize>(
+    pub fn apply_transition<
+        From: crate::typestate::transition::StateMarker,
+        To: crate::typestate::transition::StateMarker,
+        P: Serialize,
+    >(
         &self,
         coord: &Coordinate,
         transition: crate::typestate::transition::Transition<From, To, P>,
@@ -556,7 +564,7 @@ impl Store<Open> {
     /// # Errors
     /// Returns `StoreError::Io` if flushing the active segment to disk fails.
     pub fn sync(&self) -> Result<(), StoreError> {
-        maintenance::sync(self)
+        lifecycle::sync(self)
     }
 
     /// Snapshot the current index to a destination directory.
@@ -564,7 +572,7 @@ impl Store<Open> {
     /// # Errors
     /// Returns `StoreError::Io` if creating the destination directory or copying segment files fails.
     pub fn snapshot(&self, dest: &std::path::Path) -> Result<(), StoreError> {
-        maintenance::snapshot(self, dest)
+        lifecycle::snapshot(self, dest)
     }
 
     /// Compact: merge sealed segments, optionally filtering events.
@@ -583,7 +591,7 @@ impl Store<Open> {
         &self,
         config: &CompactionConfig,
     ) -> Result<segment::CompactionResult, StoreError> {
-        maintenance::compact(self, config)
+        lifecycle::compact(self, config)
     }
 
     /// LIFECYCLE: flush pending writes and shut down the writer thread cleanly.
@@ -591,7 +599,7 @@ impl Store<Open> {
     /// # Errors
     /// Returns `StoreError::WriterCrashed` if the writer thread has already exited unexpectedly.
     pub fn close(self) -> Result<Closed, StoreError> {
-        maintenance::close(self)
+        lifecycle::close(self)
     }
 }
 
@@ -626,22 +634,13 @@ impl Store<ReadOnly> {
         config: StoreConfig,
         cache: Box<dyn ProjectionCache>,
     ) -> Result<Self, StoreError> {
-        config.validate()?;
-        std::fs::create_dir_all(&config.data_dir)?;
-        let config = Arc::new(config);
-        let index = Arc::new(StoreIndex::with_config(&config.index));
-        let reader = Arc::new(Reader::new(config.data_dir.clone(), config.fd_budget));
-
-        let open_report = index_rebuild::open_index(
-            &index,
-            &reader,
-            &config.data_dir,
-            config.index.enable_checkpoint,
-            config.index.enable_mmap_index,
-        )?;
-
-        let active_seg_id = writer::find_latest_segment_id(&config.data_dir).unwrap_or(0) + 1;
-        reader.set_active_segment(active_seg_id);
+        let OpenComponents {
+            runtime,
+            config,
+            index,
+            reader,
+            open_report,
+        } = open_components(config)?;
 
         Ok(Self {
             index,
@@ -649,6 +648,7 @@ impl Store<ReadOnly> {
             cache,
             writer: None,
             config,
+            runtime,
             should_shutdown_on_drop: false,
             open_report: Some(open_report),
             _state: std::marker::PhantomData,
@@ -682,7 +682,7 @@ impl<State> Store<State> {
         event_id: u128,
         limit: usize,
     ) -> Vec<StoredEvent<serde_json::Value>> {
-        ancestors::walk_ancestors(self, event_id, limit)
+        ancestry::walk_ancestors(self, event_id, limit)
     }
 
     /// PROJECT: reconstruct typed state from events, with cache support.
@@ -694,9 +694,9 @@ impl<State> Store<State> {
     pub fn project<T>(&self, entity: &str, freshness: &Freshness) -> Result<Option<T>, StoreError>
     where
         T: EventSourced + serde::Serialize + serde::de::DeserializeOwned + 'static,
-        T::Input: projection_flow::ReplayInput,
+        T::Input: projection::flow::ReplayInput,
     {
-        projection_flow::project(self, entity, freshness)
+        projection::flow::project(self, entity, freshness)
     }
 
     /// Return the current per-entity generation if the entity exists.
@@ -725,9 +725,9 @@ impl<State> Store<State> {
     ) -> Result<Option<(u64, Option<T>)>, StoreError>
     where
         T: EventSourced + serde::Serialize + serde::de::DeserializeOwned + 'static,
-        T::Input: projection_flow::ReplayInput,
+        T::Input: projection::flow::ReplayInput,
     {
-        projection_flow::project_if_changed(self, entity, last_seen_generation, freshness)
+        projection::flow::project_if_changed(self, entity, last_seen_generation, freshness)
     }
 
     /// CONVENIENCE: sugar over index.stream() for exact entity match.
@@ -758,12 +758,12 @@ impl<State> Store<State> {
 
     /// DIAGNOSTICS
     pub fn stats(&self) -> StoreStats {
-        maintenance::stats(self)
+        lifecycle::stats(self)
     }
 
     /// Return detailed diagnostic information about the store's internal state.
     pub fn diagnostics(&self) -> StoreDiagnostics {
-        maintenance::diagnostics(self)
+        lifecycle::diagnostics(self)
     }
 }
 

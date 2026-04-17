@@ -198,10 +198,9 @@ impl<T> Outcome<T> {
             Self::Batch(items) => {
                 Self::Batch(items.into_iter().map(|o| o.map_err(f.clone())).collect())
             }
-            Self::Ok(_)
-            | Self::Retry { .. }
-            | Self::Pending { .. }
-            | Self::Cancelled { .. } => self,
+            Self::Ok(_) | Self::Retry { .. } | Self::Pending { .. } | Self::Cancelled { .. } => {
+                self
+            }
         }
     }
 
@@ -212,10 +211,9 @@ impl<T> Outcome<T> {
             Self::Batch(items) => {
                 Self::Batch(items.into_iter().map(|o| o.or_else(f.clone())).collect())
             }
-            Self::Ok(_)
-            | Self::Retry { .. }
-            | Self::Pending { .. }
-            | Self::Cancelled { .. } => self,
+            Self::Ok(_) | Self::Retry { .. } | Self::Pending { .. } | Self::Cancelled { .. } => {
+                self
+            }
         }
     }
 
@@ -229,10 +227,9 @@ impl<T> Outcome<T> {
             Self::Batch(items) => {
                 Self::Batch(items.into_iter().map(|o| o.inspect(f.clone())).collect())
             }
-            Self::Err(_)
-            | Self::Retry { .. }
-            | Self::Pending { .. }
-            | Self::Cancelled { .. } => self,
+            Self::Err(_) | Self::Retry { .. } | Self::Pending { .. } | Self::Cancelled { .. } => {
+                self
+            }
         }
     }
 
@@ -249,7 +246,26 @@ impl<T> Outcome<T> {
                     .map(|o| o.inspect_err(f.clone()))
                     .collect(),
             ),
-            other => other,
+            Self::Ok(v) => Self::Ok(v),
+            Self::Retry {
+                after_ms,
+                attempt,
+                max_attempts,
+                reason,
+            } => Self::Retry {
+                after_ms,
+                attempt,
+                max_attempts,
+                reason,
+            },
+            Self::Pending {
+                condition,
+                resume_token,
+            } => Self::Pending {
+                condition,
+                resume_token,
+            },
+            Self::Cancelled { reason } => Self::Cancelled { reason },
         }
     }
 
@@ -278,31 +294,100 @@ impl<T> Outcome<T> {
                                 Self::Ok(v)
                             }
                         }
-                        other => other,
+                        Self::Err(error) => Self::Err(error),
+                        Self::Retry {
+                            after_ms,
+                            attempt,
+                            max_attempts,
+                            reason,
+                        } => Self::Retry {
+                            after_ms,
+                            attempt,
+                            max_attempts,
+                            reason,
+                        },
+                        Self::Pending {
+                            condition,
+                            resume_token,
+                        } => Self::Pending {
+                            condition,
+                            resume_token,
+                        },
+                        Self::Cancelled { reason } => Self::Cancelled { reason },
+                        Self::Batch(nested) => Self::Batch(nested),
                     })
                     .collect(),
             ),
-            other => other,
+            Self::Err(error) => Self::Err(error),
+            Self::Retry {
+                after_ms,
+                attempt,
+                max_attempts,
+                reason,
+            } => Self::Retry {
+                after_ms,
+                attempt,
+                max_attempts,
+                reason,
+            },
+            Self::Pending {
+                condition,
+                resume_token,
+            } => Self::Pending {
+                condition,
+                resume_token,
+            },
+            Self::Cancelled { reason } => Self::Cancelled { reason },
         }
     }
 
-    /// Converts this outcome into a `Result`, mapping non-terminal variants to `Err`.
+    /// Converts this outcome into a `Result`.
     ///
     /// # Errors
-    /// Returns `OutcomeError` if this outcome is `Err`, `Cancelled`, or any non-terminal variant.
+    /// Returns an [`OutcomeError`] describing why this outcome did not resolve
+    /// to an `Ok` value.
     pub fn into_result(self) -> Result<T, OutcomeError> {
         match self {
             Self::Ok(v) => Ok(v),
-            Self::Err(e) => Err(e),
+            Self::Err(error) => Err(error),
             Self::Cancelled { reason } => Err(OutcomeError {
-                kind: ErrorKind::Internal,
+                kind: ErrorKind::PolicyRejection,
                 message: format!("cancelled: {reason}"),
                 compensation: None,
                 retryable: false,
             }),
-            _ => Err(OutcomeError {
+            Self::Retry {
+                after_ms,
+                attempt,
+                max_attempts,
+                reason,
+            } => Err(OutcomeError {
+                kind: ErrorKind::Timeout,
+                message: format!(
+                    "retry after {}ms (attempt {}/{}) - {}",
+                    after_ms, attempt, max_attempts, reason
+                ),
+                compensation: None,
+                retryable: true,
+            }),
+            Self::Pending {
+                condition,
+                resume_token,
+            } => Err(OutcomeError {
                 kind: ErrorKind::Internal,
-                message: "outcome is not terminal".into(),
+                message: format!(
+                    "pending outcome cannot collapse into Result: {:?} (resume {:032x})",
+                    condition, resume_token
+                ),
+                compensation: None,
+                retryable: false,
+            }),
+            Self::Batch(items) => Err(OutcomeError {
+                kind: ErrorKind::Internal,
+                message: format!(
+                    "batch outcome cannot collapse into Result without dropping {} item(s)",
+                    items.len()
+                ),
                 compensation: None,
                 retryable: false,
             }),
@@ -313,7 +398,11 @@ impl<T> Outcome<T> {
     pub fn unwrap_or(self, default: T) -> T {
         match self {
             Self::Ok(v) => v,
-            _ => default,
+            Self::Err(_)
+            | Self::Retry { .. }
+            | Self::Pending { .. }
+            | Self::Cancelled { .. }
+            | Self::Batch(_) => default,
         }
     }
 
@@ -321,7 +410,11 @@ impl<T> Outcome<T> {
     pub fn unwrap_or_else<F: FnOnce() -> T>(self, f: F) -> T {
         match self {
             Self::Ok(v) => v,
-            _ => f(),
+            Self::Err(_)
+            | Self::Retry { .. }
+            | Self::Pending { .. }
+            | Self::Cancelled { .. }
+            | Self::Batch(_) => f(),
         }
     }
 }

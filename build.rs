@@ -440,9 +440,13 @@ fn check_pub_items_have_tests() {
                     "PUB ITEM REFERENCE GAP: `{name}` in {path_str}\n\
                      This fast build-time detector only proves coarse name references in tests/\n\
                      or inline test/source contexts; it does NOT prove semantic coverage.\n\
-                     Add a witness that names this item, or add it to\n\
+                     Add a witness that names this item, or allowlist it only if it is a\n\
+                     structural surface that cannot sensibly be named directly (serde helper,\n\
+                     marker, type alias, etc.). Do not use the allowlist to evade missing\n\
+                     ergonomic API witnesses.\n\
+                     Structural exceptions belong in\n\
                      traceability/pub_item_allowlist.yaml with a justification for why it is\n\
-                     exercised indirectly.\n\
+                     structurally unavoidable.\n\
                      See: LAW-003 (No Orphan Infrastructure), FM-007 (Island Syndrome)."
                 );
             }

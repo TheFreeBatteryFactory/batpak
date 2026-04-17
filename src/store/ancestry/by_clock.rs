@@ -6,23 +6,16 @@ pub(crate) fn walk_ancestors_by_clock<State>(
     event_id: u128,
     limit: usize,
 ) -> Vec<StoredEvent<serde_json::Value>> {
-    let mut results = Vec::new();
-    let Some(start_entry) = store.index.get_by_id(event_id) else {
-        return results;
-    };
-    let stream = store.index.stream(start_entry.coord.entity());
-    for entry in stream.iter().rev() {
-        if results.len() >= limit {
-            break;
-        }
-        if entry.clock > start_entry.clock {
-            continue;
-        }
-        if let Ok(stored) = store.reader.read_entry(&entry.disk_pos) {
-            results.push(stored);
-        }
-    }
-    results
+    super::collect_ancestors(
+        store,
+        super::clock_cursor(store, event_id),
+        limit,
+        |store, mut ids| {
+            let event_id = ids.next()?;
+            let (_, stored) = super::read_entry_and_event(store, event_id)?;
+            Some((stored, Some(ids)))
+        },
+    )
 }
 
 #[cfg(test)]

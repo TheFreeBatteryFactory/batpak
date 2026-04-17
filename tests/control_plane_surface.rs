@@ -2,8 +2,8 @@
 
 use batpak::coordinate::{Coordinate, Region};
 use batpak::event::{Event, EventKind, EventSourced};
-use batpak::store::cursor::{CursorWorkerAction, CursorWorkerConfig, CursorWorkerHandle};
-use batpak::store::subscription::ScanSubscriptionOps;
+use batpak::store::delivery::cursor::{CursorWorkerAction, CursorWorkerConfig, CursorWorkerHandle};
+use batpak::store::delivery::subscription::ScanSubscriptionOps;
 use batpak::store::Freshness;
 use batpak::store::{
     AppendOptions, AppendTicket, BatchAppendItem, BatchAppendTicket, IndexTopology, Notification,
@@ -191,6 +191,15 @@ fn control_plane_surface_smoke() {
             AppendOptions::new().with_idempotency(0xDD),
         )
         .expect("stage with options");
+    outbox
+        .stage_with_options_and_causation(
+            coord.clone(),
+            kind,
+            &serde_json::json!({"n": 8.5}),
+            AppendOptions::new().with_idempotency(0xDDE),
+            batpak::store::CausationRef::Absolute(receipt.event_id),
+        )
+        .expect("stage with options and causation");
     outbox.push_item(
         BatchAppendItem::new(
             coord.clone(),
@@ -201,7 +210,7 @@ fn control_plane_surface_smoke() {
         )
         .expect("push item"),
     );
-    assert_eq!(outbox.len(), 3);
+    assert_eq!(outbox.len(), 4);
     let _ = outbox
         .submit_flush()
         .expect("submit flush")

@@ -4,14 +4,14 @@
 //! cannot implement. This ensures only declared states are valid transition
 //! endpoints.
 
-use batpak::typestate::Transition;
+use batpak::typestate::{StateMarker, Transition};
 use batpak::prelude::EventKind;
 
 // Define a state machine with two states via the macro.
-batpak::define_state_machine!(LockState { Acquired, Released });
+batpak::define_state_machine!(lock_state_seal, LockState { Acquired, Released });
 
 // A function that only accepts transitions FROM a valid LockState.
-fn apply_transition<From: LockState, To: LockState>(
+fn apply_transition<From: LockState + StateMarker, To: LockState + StateMarker>(
     _transition: Transition<From, To, String>,
 ) {}
 

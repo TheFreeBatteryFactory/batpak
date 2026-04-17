@@ -1,7 +1,7 @@
 #![allow(clippy::panic)]
 
 use batpak::prelude::*;
-use batpak::store::cursor::{CursorWorkerAction, CursorWorkerConfig};
+use batpak::store::delivery::cursor::{CursorWorkerAction, CursorWorkerConfig};
 use batpak::store::{RestartPolicy, Store, StoreConfig};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};

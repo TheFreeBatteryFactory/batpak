@@ -3,16 +3,16 @@
 ## Repo Map
 
 - `src/`: runtime crate
-  - `src/store/`: see `mod.rs` for full submodule list. Key internals:
-    - `checkpoint.rs` — index checkpoint (fast cold-start persistence)
-    - `sidx.rs` — SIDX segment footer for cold-start rebuild
-    - `columnar.rs` — SoA/AoSoA/SoAoS secondary query index
-    - `interner.rs` — string interning for compact index keys
-    - `projection_flow.rs` — projection replay + incremental apply + schema versioning
-    - `fault.rs` — fault injection framework for chaos testing (dangerous-test-hooks feature)
-    - `fanout.rs` — writer notifications and internal reactor envelopes
-    - `writer.rs` — background writer thread, single/batch append, two-phase commit
-    - `contracts.rs` — `BatchAppendItem`, `CausationRef`, `AppendOptions`
+  - `src/store/`: see `mod.rs` for full submodule list. Key subdirectories:
+    - `write/` — `writer.rs` (background writer, single/batch commit), `fanout.rs` (notifications), `staging.rs`, `control.rs`
+    - `segment/` — `mod.rs` (frame format, compaction), `scan.rs` (segment reading), `sidx.rs` (SIDX footer)
+    - `index/` — `mod.rs` (in-memory query engine), `columnar.rs` (SoA/AoSoA overlays), `interner.rs` (string interning)
+    - `cold_start/` — `mod.rs` (open/restore orchestration), `checkpoint.rs`, `mmap.rs`, `rebuild.rs`
+    - `projection/` — `mod.rs` (cache traits), `flow.rs` (replay + incremental apply), `watch.rs`
+    - `ancestry/` — `mod.rs`, `by_hash.rs`, `by_clock.rs`
+    - `delivery/` — `subscription.rs` (lossy push), `cursor.rs` (guaranteed pull)
+    - Flat files: `append.rs` (`BatchAppendItem`, `CausationRef`, `AppendOptions`), `lifecycle.rs`, `hidden_ranges.rs`, `config.rs`, `error.rs`, `stats.rs`
+    - `fault.rs` — fault injection (dangerous-test-hooks feature)
 - `tests/`: integration, property, compile-fail, and perf-gate tests (30 files)
 - `examples/`: runnable usage patterns
 - `benches/`: Criterion surfaces

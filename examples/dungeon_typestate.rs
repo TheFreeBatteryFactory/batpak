@@ -22,11 +22,14 @@ use serde::Serialize;
 // -- Step 1: Define the state machine --
 // This macro generates: a sealed trait `DoorState`, and zero-sized structs
 // `Open`, `Closed`, `Locked` that implement it.
-batpak::define_state_machine!(DoorState {
-    Open,
-    Closed,
-    Locked
-});
+batpak::define_state_machine!(
+    door_state_seal,
+    DoorState {
+        Open,
+        Closed,
+        Locked
+    }
+);
 
 // -- Step 2: Define the typestate wrapper --
 // This generates `Door<S: DoorState>` with a `name` field and PhantomData<S>.
@@ -50,8 +53,8 @@ struct DoorEvent {
 
 impl Door<Open> {
     fn close(self) -> (Door<Closed>, Transition<Open, Closed, DoorEvent>) {
-        let name = self.name.clone();
-        let door = Door::<Closed>::new(self.name);
+        let (name,) = self.into_data();
+        let door = Door::<Closed>::new(name.clone());
         let transition = Transition::new(
             DOOR_CLOSED,
             DoorEvent {
@@ -65,8 +68,8 @@ impl Door<Open> {
 
 impl Door<Closed> {
     fn open(self) -> (Door<Open>, Transition<Closed, Open, DoorEvent>) {
-        let name = self.name.clone();
-        let door = Door::<Open>::new(self.name);
+        let (name,) = self.into_data();
+        let door = Door::<Open>::new(name.clone());
         let transition = Transition::new(
             DOOR_OPENED,
             DoorEvent {
@@ -78,8 +81,8 @@ impl Door<Closed> {
     }
 
     fn lock(self, _key: &str) -> (Door<Locked>, Transition<Closed, Locked, DoorEvent>) {
-        let name = self.name.clone();
-        let door = Door::<Locked>::new(self.name);
+        let (name,) = self.into_data();
+        let door = Door::<Locked>::new(name.clone());
         let transition = Transition::new(
             DOOR_LOCKED,
             DoorEvent {
@@ -93,8 +96,8 @@ impl Door<Closed> {
 
 impl Door<Locked> {
     fn unlock(self, _key: &str) -> (Door<Closed>, Transition<Locked, Closed, DoorEvent>) {
-        let name = self.name.clone();
-        let door = Door::<Closed>::new(self.name);
+        let (name,) = self.into_data();
+        let door = Door::<Closed>::new(name.clone());
         let transition = Transition::new(
             DOOR_UNLOCKED,
             DoorEvent {
@@ -115,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start with an open door
     let door = Door::<Open>::new("Vault Door".into());
-    println!("Door '{}' starts Open", door.name);
+    println!("Door '{}' starts Open", door.name());
 
     // Close it — this returns a new Door<Closed> and a Transition event
     let (door, transition) = door.close();

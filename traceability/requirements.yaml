@@ -15,6 +15,7 @@
   summary: Important requirements, invariants, flows, and proving artifacts must link bidirectionally.
   artifacts:
     - ART-TRACEABILITY
+    - ART-RELEASE-HISTORY
     - ART-ADR-SYNC
     - ART-ADR-COMPACTION
     - ART-ADR-RESTORE-PLANNER
@@ -40,6 +41,7 @@
   artifacts:
     - ART-REPLAY-TESTS
     - ART-STORE-INTEGRATION
+    - ART-STORE-REBUILD
 - id: REQ-STRUCTURAL-DETECTORS
   summary: The codebase must run parser-backed detectors for structural drift, stale references, and public-surface honesty.
   artifacts:

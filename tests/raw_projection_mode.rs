@@ -37,10 +37,10 @@ impl EventSourced for ValueCounter {
     }
 
     fn apply_event(&mut self, event: &Event<serde_json::Value>) {
-        if let Ok(delta) = serde_json::from_value::<CounterDelta>(event.payload.clone()) {
-            self.value += delta.amount;
-            self.seen += 1;
-        }
+        let delta = serde_json::from_value::<CounterDelta>(event.payload.clone())
+            .expect("ValueCounter::apply_event expects replay payloads that match CounterDelta");
+        self.value += delta.amount;
+        self.seen += 1;
     }
 
     fn relevant_event_kinds() -> &'static [EventKind] {
@@ -69,10 +69,10 @@ impl EventSourced for RawCounter {
     }
 
     fn apply_event(&mut self, event: &Event<Vec<u8>>) {
-        if let Ok(delta) = rmp_serde::from_slice::<CounterDelta>(&event.payload) {
-            self.value += delta.amount;
-            self.seen += 1;
-        }
+        let delta = rmp_serde::from_slice::<CounterDelta>(&event.payload)
+            .expect("RawCounter::apply_event expects replay payloads that decode as CounterDelta");
+        self.value += delta.amount;
+        self.seen += 1;
     }
 
     fn relevant_event_kinds() -> &'static [EventKind] {
@@ -225,7 +225,7 @@ fn raw_watch_projection_matches_project_if_changed_after_relevant_append() {
         watched, projected,
         "PROPERTY: watch_projection and project_if_changed must share the same projection semantics \
          after a relevant event.\n\
-         Investigate: src/store/mod.rs ProjectionWatcher::recv + src/store/projection_flow.rs."
+         Investigate: src/store/mod.rs ProjectionWatcher::recv + src/store/projection/flow.rs."
     );
 
     drop(watcher);
@@ -287,7 +287,7 @@ fn raw_watch_projection_matches_project_if_changed_after_irrelevant_append() {
         watched, projected,
         "PROPERTY: watch_projection and project_if_changed must agree even when the entity changes \
          but the projection filter rejects the new event.\n\
-         Investigate: src/store/mod.rs ProjectionWatcher::recv + src/store/projection_flow.rs."
+         Investigate: src/store/mod.rs ProjectionWatcher::recv + src/store/projection/flow.rs."
     );
     assert!(
         changed.0 > baseline_generation,

@@ -4,12 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-04-16
+
 ### Changed
-- Root docs now treat `README.md` as the primary entrypoint and keep historical material out of the tracked repo
+- Root docs now treat `README.md` as the primary entrypoint and keep historical material out of the root doc flow
 - The public scan-configuration model now centers on `IndexTopology` instead of older layout/view compatibility naming
 - Projection replay naming now centers on `ReplayLane`, `JsonValueInput`, and `RawMsgpackInput`
 - Append options now carry an explicit `AppendPositionHint` for DAG `lane`/`depth` hints while writer-owned HLC wall/counter and sequence remain authoritative
 - Cold-start persistence artifacts now advance together: SIDX uses `SDX2`, checkpoints are v4, and mmap index snapshots are v3 so non-root lane/depth survives reopen across every restore path
+- Cold-start restore now normalizes checkpoint, mmap, and SIDX artifact rows through one shared canonical restore seam before rebuilding `IndexEntry` state or lossy SIDX headers
 
 ### Added
 - Root-doc truth surface centered on `README.md`, `GUIDE.md`, and `REFERENCE.md`
@@ -17,9 +20,29 @@ All notable changes to this project will be documented in this file.
 - Topology/replay/writer measurement surfaces in `benches/topology_matrix.rs`, `benches/replay_lanes.rs`, and `benches/writer_staging.rs`
 - End-to-end lane/depth position-hint coverage across live append, mmap reopen, checkpoint reopen, full rebuild, and SIDX header reconstruction
 - ADR-0009: Position Hints and Artifact Upgrade Contract
+- Structural doc-completeness checks for required `REFERENCE.md` sections so truncation fails integrity instead of silently shipping
+
+### Migration From 0.5.0
+- Rename replay imports and impls:
+  - `ValueInput` -> `JsonValueInput`
+  - `ProjectionMode` -> `ReplayLane`
+- Rename topology/config usage:
+  - `IndexLayout` / `ViewConfig` -> `IndexTopology`
+  - `with_index_layout(...)` / `with_views(...)` -> `with_index_topology(...)`
+- Revisit topology defaults: `StoreConfig::new(...)` now keeps the base AoS topology by default; opt into overlays explicitly with `IndexTopology::all()` or a narrower constructor
+- Update batch code to the narrowed surface:
+  - build `BatchAppendItem` through `new(...)`
+  - use accessors instead of raw field reads
+  - use `stage_with_causation(...)` / `stage_with_options_and_causation(...)` where explicit intra-batch causation matters
+- Update batch error handling: `StoreError::BatchFailed` now exposes only `item_index` plus the underlying `source`; `BatchStage` is no longer part of the public contract
+- Refresh artifact expectations and rollout playbooks:
+  - SIDX `SDX2`
+  - checkpoint v4
+  - mmap snapshot v3
+  - rollback remains binary rollback plus cold-artifact purge/rebuild unless a narrower downgrade path is explicitly proven
 
 ### Notes
-- Released sections below preserve the public names that shipped in those releases, even when newer unreleased work has renamed the live surface since then.
+- Released sections below preserve the public names that shipped in those releases, even when newer releases rename the live surface later.
 - Upgrade note: pre-existing artifacts remain readable. Old SIDX footers are ignored and fall back to scan; checkpoint v3 and mmap v1/v2 load with `dag_lane=0` and `dag_depth=0`, which is the correct root default for pre-feature events.
 - Rollback note: downgrade is not assumed safe just because forward-read compatibility exists; the operator procedure is binary rollback plus cold-artifact purge/rebuild unless a narrower downgrade path has been proven.
 

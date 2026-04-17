@@ -389,12 +389,9 @@ fn into_result_ok() {
 #[test]
 fn into_result_err() {
     let r: Result<i32, OutcomeError> = Outcome::Err(test_err()).into_result();
-    assert!(
-        r.is_err(),
-        "INTO_RESULT ERR NOT ERR: into_result on Outcome::Err must return Err, got Ok.\n\
-         Investigate: src/outcome/mod.rs into_result Err arm.\n\
-         Common causes: into_result maps Err to Ok, or returns wrong variant.\n\
-         Run: cargo test --test outcome_combinators"
+    assert_eq!(
+        r.expect_err("err outcome should stay err").message,
+        "test error"
     );
 }
 
@@ -402,24 +399,24 @@ fn into_result_err() {
 fn into_result_cancelled() {
     let r: Result<i32, OutcomeError> = Outcome::cancelled("nope").into_result();
     let err = r.expect_err("cancelled outcome should convert to error");
-    assert!(err.message.contains("cancelled"),
-        "INTO_RESULT CANCELLED MESSAGE WRONG: error message should contain \"cancelled\", got {:?}.\n\
+    assert!(err.message.contains("cancelled: nope") && !err.retryable,
+        "INTO_RESULT CANCELLED WRONG: expected a non-retryable structured error carrying the cancellation reason, got {:?}.\n\
          Investigate: src/outcome/mod.rs into_result Cancelled arm.\n\
-         Common causes: into_result uses wrong message template for Cancelled variant.\n\
+         Common causes: into_result dropping the cancellation reason or marking cancellation retryable.\n\
          Run: cargo test --test outcome_combinators",
-        err.message);
+        err);
 }
 
 #[test]
 fn into_result_non_terminal() {
     let r: Result<i32, OutcomeError> = Outcome::retry(100, 1, 3, "wait").into_result();
-    let err = r.expect_err("non-terminal outcome should convert to error");
-    assert!(err.message.contains("not terminal"),
-        "INTO_RESULT NON_TERMINAL MESSAGE WRONG: error message should contain \"not terminal\", got {:?}.\n\
-         Investigate: src/outcome/mod.rs into_result Retry/Pending arm.\n\
-         Common causes: into_result uses wrong message template for non-terminal variants.\n\
+    let err = r.expect_err("non-terminal outcome should convert to terminal error");
+    assert!(err.retryable && err.message.contains("retry after 100ms") && err.message.contains("wait"),
+        "INTO_RESULT NON_TERMINAL WRONG: expected a retryable structured error carrying retry details, got {:?}.\n\
+         Investigate: src/outcome/mod.rs into_result Retry arm.\n\
+         Common causes: into_result dropping retry metadata or clearing the retryable bit.\n\
          Run: cargo test --test outcome_combinators",
-        err.message);
+        err);
 }
 
 // --- unwrap_or / unwrap_or_else ---

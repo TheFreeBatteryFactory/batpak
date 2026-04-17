@@ -48,11 +48,11 @@ mod no_blake3_tests {
         assert_eq!(
             chain.event_hash, [0u8; 32],
             "Without blake3 feature, hash chains should use zero hashes. \
-             Investigate: src/store/writer.rs STEP 5 #[cfg(not(feature = \"blake3\"))]."
+             Investigate: src/store/write/writer.rs STEP 5 #[cfg(not(feature = \"blake3\"))]."
         );
         assert_eq!(chain.prev_hash, [0u8; 32],
             "NO-BLAKE3 FALLBACK: without blake3 feature, prev_hash must be [0u8; 32].\n\
-             Investigate: src/store/writer.rs STEP 5 #[cfg(not(feature = \"blake3\"))].\n\
+             Investigate: src/store/write/writer.rs STEP 5 #[cfg(not(feature = \"blake3\"))].\n\
              Common causes: fallback path not zeroing prev_hash, blake3 feature accidentally enabled.\n\
              Run: cargo test --test hash_chain no_blake3_hash_chain_is_zero");
     }

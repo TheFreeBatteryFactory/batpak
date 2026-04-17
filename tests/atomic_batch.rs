@@ -92,7 +92,7 @@ fn batch_empty_is_noop_and_store_remains_usable() {
         result.is_ok(),
         "PROPERTY: an empty batch must succeed as a no-op (writer must \
          tolerate zero items without panicking or returning an error). \
-         Investigate: src/store/writer.rs handle_append_batch validate_batch \
+         Investigate: src/store/write/writer.rs handle_append_batch validate_batch \
          early-return for empty input."
     );
     let receipts = result.expect("empty batch ok");
@@ -173,7 +173,7 @@ fn batch_oversized_item_no_partial_visibility() {
         matches!(result, Err(StoreError::BatchFailed { .. })),
         "PROPERTY: a batch whose total bytes exceed batch_max_bytes must \
          fail with BatchFailed; got {result:?}. \
-         Investigate: src/store/writer.rs validate_batch byte-cap branch \
+         Investigate: src/store/write/writer.rs validate_batch byte-cap branch \
          and StoreError::BatchFailed mapping for validation failures."
     );
 
@@ -187,9 +187,9 @@ fn batch_oversized_item_no_partial_visibility() {
         "PROPERTY: BATCH ATOMICITY VIOLATION — a batch that failed during \
          validation must not expose ANY of its items to readers. Found \
          {visible_count} visible events; expected 0. \
-         Investigate: src/store/writer.rs handle_append_batch must validate \
+         Investigate: src/store/write/writer.rs handle_append_batch must validate \
          BEFORE reserving sequences and writing frames, OR must roll back \
-         all visibility on failure. src/store/index.rs publish() must not \
+         all visibility on failure. src/store/index/mod.rs publish() must not \
          have advanced the watermark."
     );
 
@@ -206,7 +206,7 @@ fn batch_oversized_item_no_partial_visibility() {
         "PROPERTY: the first event after a failed batch must occupy \
          sequence 0 — the failed batch must not have burned any sequence \
          slots that would shift the next append's sequence. Got sequence \
-         {}. Investigate: src/store/writer.rs validate_batch ordering \
+         {}. Investigate: src/store/write/writer.rs validate_batch ordering \
          relative to reserve_sequences.",
         post_failure.sequence
     );
@@ -350,7 +350,7 @@ fn batch_size_limits() {
     let result = store.append_batch(items);
     let err = result.expect_err(
         "PROPERTY: a batch exceeding batch_max_size must fail. \
-         Investigate: src/store/writer.rs validate_batch size check.",
+         Investigate: src/store/write/writer.rs validate_batch size check.",
     );
     assert!(
         matches!(err, StoreError::BatchFailed { item_index: 0, .. }),
@@ -587,7 +587,7 @@ fn batch_fsync_ambiguity_discards_uncommitted() {
     let result = store.append_batch(items);
     let err = result.expect_err(
         "PROPERTY: a fault injected during BatchFsync must propagate as an \
-         error. Investigate: src/store/writer.rs handle_append_batch fsync \
+         error. Investigate: src/store/write/writer.rs handle_append_batch fsync \
          site fault injection point.",
     );
     assert!(
@@ -785,7 +785,7 @@ fn batch_subscription_atomicity_no_partial_visibility() {
         pre_crash_count, 1,
         "PROPERTY: a successful append must produce exactly one subscriber \
          notification, drainable immediately. Got {pre_crash_count}. \
-         Investigate: src/store/writer.rs handle_append broadcast site, \
+         Investigate: src/store/write/writer.rs handle_append broadcast site, \
          and ensure append() blocks until AFTER the broadcast."
     );
     drop(store);
@@ -833,7 +833,7 @@ fn batch_subscription_atomicity_no_partial_visibility() {
          must produce ZERO subscriber notifications. Got {notifications_received}. \
          The writer must broadcast notifications only AFTER the atomic publish, \
          and the publish must never happen for a faulted batch. \
-         Investigate: src/store/writer.rs handle_append_batch ordering of \
+         Investigate: src/store/write/writer.rs handle_append_batch ordering of \
          publish() and broadcast_batch_notifications()."
     );
 
@@ -1038,7 +1038,7 @@ fn batch_publish_atomicity_no_partial_read_during_insert() {
         1,
         "PROPERTY: after BatchPrePublish fault, readers must see 0 batch entries.\n\
          Expected only the baseline event (id={}), but got {} entries.\n\
-         Investigate: src/store/index.rs read methods must filter by visible_sequence.\n\
+         Investigate: src/store/index/mod.rs read methods must filter by visible_sequence.\n\
          Common causes: read method missing visibility filter, publish() called before fault point.",
         pre.event_id,
         entries.len(),
@@ -1169,8 +1169,8 @@ fn batch_publish_atomicity_concurrent_reader_sees_zero_or_all() {
          Allowed set: {allowed:?}\n\
          All observed: {observed:?}\n\
          A partial batch was visible — INV-BATCH-ATOMIC-VISIBILITY violated.\n\
-         Investigate: src/store/index.rs SequenceGate visibility filter +\n\
-         src/store/writer.rs handle_append_batch publish ordering.",
+         Investigate: src/store/index/mod.rs SequenceGate visibility filter +\n\
+         src/store/write/writer.rs handle_append_batch publish ordering.",
     );
 
     // Sanity check: we should have observed AT LEAST the initial pre_count

@@ -36,7 +36,7 @@ fn ops_recv_without_filters() {
     assert!(
         notif.is_some(),
         "OPS RECV WITHOUT FILTERS: expected a notification, got None.\n\
-         Check: src/store/subscription.rs SubscriptionOps::recv(), writer broadcast."
+         Check: src/store/delivery/subscription.rs SubscriptionOps::recv(), writer broadcast."
     );
     let notif = notif.expect("notification should be Some per preceding assert");
     assert_eq!(
@@ -112,7 +112,7 @@ fn ops_filter_passes_matching() {
     assert!(
         notif.is_some(),
         "OPS FILTER PASSES MATCHING: filter should pass events with matching kind.\n\
-         Check: src/store/subscription.rs SubscriptionOps::filter()."
+         Check: src/store/delivery/subscription.rs SubscriptionOps::filter()."
     );
     let notif = notif.expect("notification should be Some per preceding assert");
     assert_eq!(
@@ -201,7 +201,7 @@ fn ops_take_limits_count() {
     assert!(
         third.is_none(),
         "OPS TAKE: third recv should return None after take(2), but got Some.\n\
-         Check: src/store/subscription.rs SubscriptionOps::take() limit enforcement."
+         Check: src/store/delivery/subscription.rs SubscriptionOps::take() limit enforcement."
     );
 
     producer.join().expect("producer thread");
@@ -272,7 +272,7 @@ fn ops_filter_and_take_combined() {
     assert!(
         third.is_none(),
         "OPS COMBINED: third recv should return None (take(2) exhausted), but got Some.\n\
-         Check: src/store/subscription.rs filter + take interaction."
+         Check: src/store/delivery/subscription.rs filter + take interaction."
     );
 
     producer.join().expect("producer thread");
@@ -328,7 +328,7 @@ fn ops_map_transforms_notification() {
             .kind,
         mapped_kind,
         "OPS MAP: map should transform the notification kind.\n\
-         Investigate: src/store/subscription.rs SubscriptionOps::map().\n\
+         Investigate: src/store/delivery/subscription.rs SubscriptionOps::map().\n\
          Common causes: map_fn not applied, original notification returned instead."
     );
 
@@ -381,7 +381,7 @@ fn ops_map_returning_none_skips_event() {
             .kind,
         pass_kind,
         "OPS MAP SKIP: map returning None should skip that event.\n\
-         Investigate: src/store/subscription.rs SubscriptionOps::recv() map branch.\n\
+         Investigate: src/store/delivery/subscription.rs SubscriptionOps::recv() map branch.\n\
          Common causes: None from map not triggering continue in recv loop."
     );
 
@@ -429,7 +429,7 @@ fn ops_multiple_filters_all_must_pass() {
     assert_eq!(
         notif.kind, kind_a,
         "OPS MULTI FILTER: only kind_a/kind_b with sequence>0 should pass both filters.\n\
-         Investigate: src/store/subscription.rs SubscriptionOps::recv() filter chain.\n\
+         Investigate: src/store/delivery/subscription.rs SubscriptionOps::recv() filter chain.\n\
          Common causes: filters short-circuiting, only first filter applied."
     );
 
@@ -454,7 +454,7 @@ fn ops_channel_closed_returns_none() {
     assert!(
         notif.is_none(),
         "OPS CHANNEL CLOSED: recv should return None after store is closed.\n\
-         Investigate: src/store/subscription.rs Subscription::recv() channel close path.\n\
+         Investigate: src/store/delivery/subscription.rs Subscription::recv() channel close path.\n\
          Common causes: recv blocking forever instead of returning None on closed channel."
     );
 }

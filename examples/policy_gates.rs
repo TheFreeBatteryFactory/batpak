@@ -136,16 +136,11 @@ fn try_transfer(store: &Store, pipeline: &Pipeline<TransferRequest>, transfer: T
             // Commit consumes the receipt (can't reuse it)
             let result: Result<_, StoreError> = pipeline.commit(receipt, |payload| {
                 let r = store.append(&coord, TRANSFER, &payload)?;
-                Ok(Committed {
-                    payload,
-                    event_id: r.event_id,
-                    sequence: r.sequence,
-                    hash: [0u8; 32],
-                })
+                Ok(CommitMetadata::from_append_receipt(r))
             });
 
             match result {
-                Ok(committed) => println!("    Committed: event_id={:032x}", committed.event_id),
+                Ok(committed) => println!("    Committed: event_id={:032x}", committed.event_id()),
                 Err(e) => println!("    Commit failed: {e}"),
             }
         }

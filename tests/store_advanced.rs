@@ -315,7 +315,7 @@ fn append_reaction_links_causation() {
         root_stored.event.event_kind(),
         kind_cmd,
         "PROPERTY: root event must retain its original EventKind after being stored.\n\
-         Investigate: src/store/mod.rs append, src/store/segment.rs write_frame.\n\
+         Investigate: src/store/mod.rs append, src/store/segment/mod.rs write_frame.\n\
          Common causes: event_kind field not serialised, wrong frame read back.\n\
          Run: cargo test --test store_advanced append_reaction_links_causation"
     );
@@ -323,7 +323,7 @@ fn append_reaction_links_causation() {
         react_stored.event.event_kind(),
         kind_evt,
         "PROPERTY: reaction event must retain its EventKind (kind_evt) after storage.\n\
-         Investigate: src/store/mod.rs append_reaction, src/store/segment.rs write_frame.\n\
+         Investigate: src/store/mod.rs append_reaction, src/store/segment/mod.rs write_frame.\n\
          Common causes: reaction inherits cause kind instead of its own, serialisation bug.\n\
          Run: cargo test --test store_advanced append_reaction_links_causation"
     );
@@ -448,7 +448,7 @@ fn subscription_receives_matching_events() {
     assert_eq!(
         count, 3,
         "PROPERTY: subscription must deliver exactly 3 notifications for 3 matching appends.\n\
-         Investigate: src/store/subscription.rs, src/store/mod.rs writer broadcast.\n\
+         Investigate: src/store/delivery/subscription.rs, src/store/mod.rs writer broadcast.\n\
          Common causes: broadcast channel dropped before all events sent, region filter too narrow.\n\
          Run: cargo test --test store_advanced subscription_receives_matching_events"
     );
@@ -496,7 +496,7 @@ fn subscription_filters_by_region() {
     assert_eq!(
         matching, 2,
         "PROPERTY: subscription filtered to entity:a must match exactly 2 of 3 appended events.\n\
-         Investigate: src/store/subscription.rs region filter, src/store/mod.rs broadcast.\n\
+         Investigate: src/store/delivery/subscription.rs region filter, src/store/mod.rs broadcast.\n\
          Common causes: region predicate not applied, entity prefix match too broad or too narrow.\n\
          Run: cargo test --test store_advanced subscription_filters_by_region"
     );
@@ -530,7 +530,7 @@ fn cursor_polls_events_in_order() {
         polled.len(),
         5,
         "PROPERTY: cursor must yield all 5 appended events when polled to exhaustion.\n\
-         Investigate: src/store/cursor.rs poll.\n\
+         Investigate: src/store/delivery/cursor.rs poll.\n\
          Common causes: cursor stops at segment boundary, region filter drops valid events.\n\
          Run: cargo test --test store_advanced cursor_polls_events_in_order"
     );
@@ -540,7 +540,7 @@ fn cursor_polls_events_in_order() {
         assert!(
             window[0].global_sequence < window[1].global_sequence,
             "PROPERTY: cursor must yield events in strictly ascending global_sequence order.\n\
-             Investigate: src/store/cursor.rs poll.\n\
+             Investigate: src/store/delivery/cursor.rs poll.\n\
              Common causes: cursor index not sorted on open, iterator yields unordered segments.\n\
              Run: cargo test --test store_advanced cursor_polls_events_in_order"
         );
@@ -569,7 +569,7 @@ fn cursor_poll_batch_respects_max() {
         batch1.len(),
         3,
         "PROPERTY: first poll_batch(3) on a 10-event stream must return exactly 3 events.\n\
-         Investigate: src/store/cursor.rs poll_batch.\n\
+         Investigate: src/store/delivery/cursor.rs poll_batch.\n\
          Common causes: max parameter ignored, cursor yields all remaining instead of bounded slice.\n\
          Run: cargo test --test store_advanced cursor_poll_batch_respects_max"
     );
@@ -579,7 +579,7 @@ fn cursor_poll_batch_respects_max() {
         batch2.len(),
         3,
         "PROPERTY: second poll_batch(3) must return exactly 3 more events.\n\
-         Investigate: src/store/cursor.rs poll_batch.\n\
+         Investigate: src/store/delivery/cursor.rs poll_batch.\n\
          Common causes: cursor position not advanced after first batch, events re-yielded.\n\
          Run: cargo test --test store_advanced cursor_poll_batch_respects_max"
     );
@@ -589,7 +589,7 @@ fn cursor_poll_batch_respects_max() {
         batch3.len(),
         4,
         "PROPERTY: third poll_batch must return the remaining 4 events.\n\
-         Investigate: src/store/cursor.rs poll_batch.\n\
+         Investigate: src/store/delivery/cursor.rs poll_batch.\n\
          Common causes: cursor position drifts, batch limit applied incorrectly to remainder.\n\
          Run: cargo test --test store_advanced cursor_poll_batch_respects_max"
     );
@@ -599,7 +599,7 @@ fn cursor_poll_batch_respects_max() {
         batch4.len(),
         0,
         "PROPERTY: poll_batch on an exhausted cursor must return an empty batch.\n\
-         Investigate: src/store/cursor.rs poll_batch.\n\
+         Investigate: src/store/delivery/cursor.rs poll_batch.\n\
          Common causes: cursor resets on empty, returns stale events after stream end.\n\
          Run: cargo test --test store_advanced cursor_poll_batch_respects_max"
     );
@@ -629,7 +629,7 @@ fn compact_does_not_lose_data() {
     assert_eq!(
         stats.event_count, 5,
         "PROPERTY: compact() must not lose any events — all 5 appended events must remain.\n\
-         Investigate: src/store/mod.rs compact, src/store/segment.rs compaction path.\n\
+         Investigate: src/store/mod.rs compact, src/store/segment/mod.rs compaction path.\n\
          Common causes: compaction drops events below tombstone horizon, segment replaced before flush.\n\
          Run: cargo test --test store_advanced compact_does_not_lose_data"
     );
@@ -696,7 +696,7 @@ fn compact_retention_removes_dropped_events_from_index() {
         let get_result = store.get(*dropped_id);
         let err = get_result.expect_err(
             "COMPACT RETENTION INDEX LEAK: get() should return NotFound after retention compaction dropped the event.\
-             Investigate: src/store/mod.rs compact(), src/store/index.rs clear()."
+             Investigate: src/store/mod.rs compact(), src/store/index/mod.rs clear()."
         );
         assert!(
             matches!(err, StoreError::NotFound(_)),
@@ -821,7 +821,7 @@ fn get_nonexistent_returns_not_found() {
     let result = store.get(0xDEAD);
     let err = result.expect_err(
         "PROPERTY: get() of a nonexistent event_id must return Err(StoreError::NotFound).\
-         Investigate: src/store/mod.rs get, src/store/reader.rs lookup.",
+         Investigate: src/store/mod.rs get, src/store/segment/scan.rs lookup.",
     );
     assert!(
         matches!(err, StoreError::NotFound(_)),
@@ -832,6 +832,8 @@ fn get_nonexistent_returns_not_found() {
 
 // --- apply_transition: typestate through the store ---
 
+batpak::define_state_machine!(document_state_seal, DocumentState { Draft, Published });
+
 #[test]
 fn apply_transition_persists_event() {
     let (store, _dir) = test_store();
@@ -839,7 +841,7 @@ fn apply_transition_persists_event() {
 
     // Simulate: Draft -> Published transition with a payload
     let kind = EventKind::custom(0xA, 1); // category 0xA, type 1
-    let transition = Transition::<(), (), serde_json::Value>::new(
+    let transition = Transition::<Draft, Published, serde_json::Value>::new(
         kind,
         serde_json::json!({"title": "hello", "from": "draft", "to": "published"}),
     );
@@ -892,7 +894,7 @@ fn query_with_clock_range_filters_events() {
         results.len(),
         5,
         "PROPERTY: clock_range [3,7] query must return exactly 5 events (clocks 3,4,5,6,7).\n\
-         Investigate: src/store/index.rs query clock_range filter.\n\
+         Investigate: src/store/index/mod.rs query clock_range filter.\n\
          Common causes: range bounds exclusive instead of inclusive, clock field misread from frame.\n\
          Run: cargo test --test store_advanced query_with_clock_range_filters_events"
     );
@@ -902,7 +904,7 @@ fn query_with_clock_range_filters_events() {
         assert!(
             entry.clock >= 3 && entry.clock <= 7,
             "PROPERTY: every result from a clock_range [3,7] query must have clock in [3,7], got {}.\n\
-             Investigate: src/store/index.rs query clock_range filter.\n\
+             Investigate: src/store/index/mod.rs query clock_range filter.\n\
              Common causes: range bounds off-by-one, filter applied before or after wrong index.\n\
              Run: cargo test --test store_advanced query_with_clock_range_filters_events",
             entry.clock
@@ -937,7 +939,7 @@ fn query_clock_range_with_scope_filter() {
         results.len(),
         3,
         "PROPERTY: entity:a with clock_range [1,3] must return exactly 3 events.\n\
-         Investigate: src/store/index.rs query clock_range + entity filter.\n\
+         Investigate: src/store/index/mod.rs query clock_range + entity filter.\n\
          Common causes: entity filter applied after range filter loses scope, range inclusive bounds wrong.\n\
          Run: cargo test --test store_advanced query_clock_range_with_scope_filter"
     );
@@ -975,7 +977,7 @@ fn query_by_fact_category() {
         results.len(),
         2,
         "PROPERTY: fact_category filter 0xA must match exactly 2 events (kind_a1 and kind_a2).\n\
-         Investigate: src/store/index.rs KindFilter::Category path.\n\
+         Investigate: src/store/index/mod.rs KindFilter::Category path.\n\
          Common causes: category nibble extracted from wrong byte, filter matches all kinds.\n\
          Run: cargo test --test store_advanced query_by_fact_category"
     );
@@ -1028,7 +1030,7 @@ fn fd_budget_evicts_oldest_segments() {
     assert!(
         segment_count > 2,
         "PROPERTY: writing 100 events with segment_max_bytes=512 must create more than 2 segment files.\n\
-         Investigate: src/store/writer.rs segment rotation logic.\n\
+         Investigate: src/store/write/writer.rs segment rotation logic.\n\
          Common causes: rotation threshold not honoured, all events written to one segment.\n\
          Run: cargo test --test store_advanced fd_budget_evicts_oldest_segments"
     );
@@ -1040,7 +1042,7 @@ fn fd_budget_evicts_oldest_segments() {
         entries.len(),
         100,
         "PROPERTY: stream must return all 100 appended events even when fd_budget forces LRU eviction.\n\
-         Investigate: src/store/reader.rs get_fd LRU cache, src/store/mod.rs stream.\n\
+         Investigate: src/store/segment/scan.rs get_fd LRU cache, src/store/mod.rs stream.\n\
          Common causes: evicted segment FD not re-opened on next access, stream skips closed segments.\n\
          Run: cargo test --test store_advanced fd_budget_evicts_oldest_segments"
     );
@@ -1058,7 +1060,7 @@ fn fd_budget_evicts_oldest_segments() {
         first.event.event_id(),
         first_again.event.event_id(),
         "PROPERTY: re-reading the same event after LRU fd eviction must return the identical event_id.\n\
-         Investigate: src/store/reader.rs get_fd LRU cache.\n\
+         Investigate: src/store/segment/scan.rs get_fd LRU cache.\n\
          Common causes: evicted segment FD reopened to wrong offset, cache key collision after eviction.\n\
          Run: cargo test --test store_advanced fd_budget_evicts_oldest_segments"
     );
@@ -1069,7 +1071,7 @@ fn fd_budget_evicts_oldest_segments() {
         last.event.event_kind(),
         "PROPERTY: EventKind must be identical for events written with the same kind, \
          even when read from different segments after LRU eviction.\n\
-         Investigate: src/store/reader.rs get_fd LRU cache, src/store/segment.rs read_frame.\n\
+         Investigate: src/store/segment/scan.rs get_fd LRU cache, src/store/segment/mod.rs read_frame.\n\
          Common causes: frame data corrupted during eviction cycle, wrong frame decoded after re-open.\n\
          Run: cargo test --test store_advanced fd_budget_evicts_oldest_segments"
     );
@@ -1123,7 +1125,7 @@ fn cold_start_skips_corrupt_segment_gracefully() {
     let err = match Store::open(config) {
         Ok(_) => panic!(
             "PROPERTY: Store::open must return Err when a segment file has an \
-             invalid magic header. Investigate: src/store/reader.rs scan_segment \
+             invalid magic header. Investigate: src/store/segment/scan.rs scan_segment \
              magic check. Common causes: magic bytes check skipped or returns \
              Ok(empty), corrupt file silently ignored."
         ),
@@ -1180,7 +1182,7 @@ fn corrupt_frame_in_segment_is_detected() {
     assert!(
         !segments.is_empty(),
         "PROPERTY: after appending events and syncing, at least one .fbat segment file must exist.\n\
-         Investigate: src/store/writer.rs sync, src/store/segment.rs write path.\n\
+         Investigate: src/store/write/writer.rs sync, src/store/segment/mod.rs write path.\n\
          Common causes: sync no-op, segment file never flushed to disk, wrong extension used.\n\
          Run: cargo test --test store_advanced corrupt_frame_in_segment_is_detected"
     );
@@ -1212,7 +1214,7 @@ fn corrupt_frame_in_segment_is_detected() {
             assert!(
                 stats.event_count <= 3,
                 "PROPERTY: a store opened with a corrupted segment must not report more events than were written — no phantom events allowed. Got {}.\n\
-                 Investigate: src/store/reader.rs scan_segment CRC check, src/store/mod.rs open.\n\
+                 Investigate: src/store/segment/scan.rs scan_segment CRC check, src/store/mod.rs open.\n\
                  Common causes: CRC check skipped, corrupt bytes decoded as valid frames.\n\
                  Run: cargo test --test store_advanced corrupt_frame_in_segment_is_detected",
                 stats.event_count
@@ -1386,7 +1388,7 @@ fn index_entry_causation_helpers() {
         entries.len(),
         2,
         "PROPERTY: stream must return exactly 2 events (root + reaction) for entity:helpers.\n\
-         Investigate: src/store/mod.rs stream, src/store/index.rs entity lookup.\n\
+         Investigate: src/store/mod.rs stream, src/store/index/mod.rs entity lookup.\n\
          Common causes: reaction event stored under wrong entity key, stream skips reaction frames.\n\
          Run: cargo test --test store_advanced index_entry_causation_helpers"
     );
@@ -1470,7 +1472,7 @@ fn append_with_flags_round_trips() {
     assert_eq!(
         stored.event.header.flags, flags,
         "PROPERTY: flags set via AppendOptions must round-trip through append→get.\n\
-         Investigate: src/store/mod.rs append_with_options, src/store/writer.rs handle_append.\n\
+         Investigate: src/store/mod.rs append_with_options, src/store/write/writer.rs handle_append.\n\
          Common causes: flags not propagated from AppendOptions to EventHeader, writer overwrites flags.\n\
          Run: cargo test --test store_advanced append_with_flags_round_trips"
     );
@@ -1540,7 +1542,7 @@ fn subscription_ops_map_transforms_notifications() {
     assert!(
         rx_result.is_some(),
         "PROPERTY: SubscriptionOps::map must pass through transformed notifications.\n\
-         Investigate: src/store/subscription.rs SubscriptionOps::map and recv.\n\
+         Investigate: src/store/delivery/subscription.rs SubscriptionOps::map and recv.\n\
          Common causes: map_fn not applied in recv loop, map returns None.\n\
          Run: cargo test --test store_advanced subscription_ops_map_transforms_notifications"
     );
@@ -1548,7 +1550,7 @@ fn subscription_ops_map_transforms_notifications() {
     assert_eq!(
         notif.kind, marker_kind,
         "PROPERTY: SubscriptionOps::map must apply the transformation function to notifications.\n\
-         Investigate: src/store/subscription.rs recv map_fn application.\n\
+         Investigate: src/store/delivery/subscription.rs recv map_fn application.\n\
          Common causes: map_fn ignored, original notification returned instead.\n\
          Run: cargo test --test store_advanced subscription_ops_map_transforms_notifications"
     );
@@ -1613,7 +1615,7 @@ fn subscription_ops_filter_chains_correctly() {
         result.len(),
         2,
         "PROPERTY: chained filter with AND semantics must pass only kind1 events (2 of 3).\n\
-         Investigate: src/store/subscription.rs SubscriptionOps::filter, recv.\n\
+         Investigate: src/store/delivery/subscription.rs SubscriptionOps::filter, recv.\n\
          Common causes: filters not chained, last filter replaces previous.\n\
          Run: cargo test --test store_advanced subscription_ops_filter_chains_correctly"
     );
@@ -1667,7 +1669,7 @@ fn subscription_ops_take_limits_count() {
         result.len(),
         3,
         "PROPERTY: SubscriptionOps::take(3) must return at most 3 notifications from 5 events.\n\
-         Investigate: src/store/subscription.rs SubscriptionOps::take, recv count check.\n\
+         Investigate: src/store/delivery/subscription.rs SubscriptionOps::take, recv count check.\n\
          Common causes: count not incremented in recv, limit check after return.\n\
          Run: cargo test --test store_advanced subscription_ops_take_limits_count"
     );
@@ -1686,7 +1688,7 @@ fn cursor_on_empty_store_returns_empty() {
     assert!(
         cursor.poll().is_none(),
         "PROPERTY: cursor.poll() on an empty store must return None.\n\
-         Investigate: src/store/cursor.rs poll.\n\
+         Investigate: src/store/delivery/cursor.rs poll.\n\
          Common causes: cursor starts with a non-zero position, index returns phantom entries.\n\
          Run: cargo test --test store_advanced cursor_on_empty_store_returns_empty"
     );
@@ -1695,7 +1697,7 @@ fn cursor_on_empty_store_returns_empty() {
     assert!(
         batch.is_empty(),
         "PROPERTY: cursor.poll_batch() on an empty store must return an empty Vec.\n\
-         Investigate: src/store/cursor.rs poll_batch.\n\
+         Investigate: src/store/delivery/cursor.rs poll_batch.\n\
          Run: cargo test --test store_advanced cursor_on_empty_store_returns_empty"
     );
 
@@ -1726,7 +1728,7 @@ fn cursor_sees_events_appended_after_creation() {
         batch.len(),
         3,
         "PROPERTY: cursor must see events appended after cursor creation (guaranteed delivery).\n\
-         Investigate: src/store/cursor.rs poll_batch, position tracking.\n\
+         Investigate: src/store/delivery/cursor.rs poll_batch, position tracking.\n\
          Common causes: cursor snapshots index at creation time and never refreshes.\n\
          Run: cargo test --test store_advanced cursor_sees_events_appended_after_creation"
     );
@@ -1779,7 +1781,7 @@ fn cursor_guaranteed_delivery_under_load() {
     assert_eq!(
         total, event_count,
         "PROPERTY: cursor must deliver exactly {event_count} events under concurrent load (guaranteed delivery).\n\
-         Investigate: src/store/cursor.rs poll_batch, src/store/index.rs.\n\
+         Investigate: src/store/delivery/cursor.rs poll_batch, src/store/index/mod.rs.\n\
          Common causes: index race conditions, cursor skips entries during concurrent writes.\n\
          Run: cargo test --test store_advanced cursor_guaranteed_delivery_under_load"
     );
@@ -1867,17 +1869,12 @@ fn pipeline_commit_bypass_persists() {
 
     let committed = Pipeline::<()>::commit_bypass(bypass_receipt, |p| -> Result<_, StoreError> {
         let r = store.append(&coord, kind, &p)?;
-        Ok(Committed {
-            payload: p,
-            event_id: r.event_id,
-            sequence: r.sequence,
-            hash: [0u8; 32],
-        })
+        Ok(CommitMetadata::from_append_receipt(r))
     })
     .expect("commit_bypass");
 
     // Verify persisted
-    let stored = store.get(committed.event_id).expect("get");
+    let stored = store.get(committed.event_id()).expect("get");
     assert_eq!(
         stored.event.event_kind(),
         kind,
@@ -1981,7 +1978,7 @@ fn cursor_empty_stream_returns_none() {
     assert!(
         cursor.poll().is_none(),
         "PROPERTY: Cursor on empty stream must return None, not fake data.\n\
-         Investigate: src/store/cursor.rs poll() when index query returns empty.\n\
+         Investigate: src/store/delivery/cursor.rs poll() when index query returns empty.\n\
          Common causes: returning default IndexEntry instead of None.\n\
          DEFENDS: FM-009 (Polite Downgrade)."
     );
@@ -1996,7 +1993,7 @@ fn cursor_poll_batch_empty_stream_returns_empty_vec() {
     assert!(
         batch.is_empty(),
         "PROPERTY: Cursor::poll_batch on empty stream must return empty vec.\n\
-         Investigate: src/store/cursor.rs poll_batch()."
+         Investigate: src/store/delivery/cursor.rs poll_batch()."
     );
 }
 
@@ -2024,7 +2021,7 @@ fn cursor_repoll_after_eof_sees_new_events() {
     assert!(
         entry.is_some(),
         "PROPERTY: Cursor must see new events appended after reaching EOF.\n\
-         Investigate: src/store/cursor.rs poll() position tracking.\n\
+         Investigate: src/store/delivery/cursor.rs poll() position tracking.\n\
          Common causes: position set to max, preventing future polls.\n\
          Run: cargo test --test store_advanced cursor_repoll_after_eof_sees_new_events"
     );
@@ -2059,7 +2056,7 @@ fn cursor_position_persists_no_duplicates() {
         remaining.len(),
         2,
         "PROPERTY: Cursor must not repeat events across poll calls.\n\
-         Investigate: src/store/cursor.rs position tracking.\n\
+         Investigate: src/store/delivery/cursor.rs position tracking.\n\
          Common causes: position reset between polls, global_sequence comparison wrong."
     );
 
@@ -2069,7 +2066,7 @@ fn cursor_position_persists_no_duplicates() {
         assert!(
             !first_seqs.contains(&entry.global_sequence),
             "PROPERTY: Cursor must not return duplicate events. Sequence {} appeared twice.\n\
-             Investigate: src/store/cursor.rs started flag and position comparison.",
+             Investigate: src/store/delivery/cursor.rs started flag and position comparison.",
             entry.global_sequence
         );
     }
@@ -2096,7 +2093,7 @@ fn cursor_poll_batch_respects_max_boundary() {
         batch.len(),
         3,
         "PROPERTY: poll_batch(3) with 10 available must return exactly 3.\n\
-         Investigate: src/store/cursor.rs poll_batch() max check."
+         Investigate: src/store/delivery/cursor.rs poll_batch() max check."
     );
 
     // Request batch of 100 — should return remaining 7
@@ -2105,7 +2102,7 @@ fn cursor_poll_batch_respects_max_boundary() {
         batch.len(),
         7,
         "PROPERTY: poll_batch(100) with 7 remaining must return exactly 7.\n\
-         Investigate: src/store/cursor.rs poll_batch() exhaustion."
+         Investigate: src/store/delivery/cursor.rs poll_batch() exhaustion."
     );
 
     // Request again — should be empty

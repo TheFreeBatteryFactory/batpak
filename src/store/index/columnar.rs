@@ -32,7 +32,7 @@
 //! layout and fully vectorisable for AoSoA once LLVM sees the uniform stride.
 
 use crate::event::EventKind;
-use crate::store::index::{ClockKey, DiskPos, IndexEntry, RoutingSummary};
+use crate::store::index::{projection_kind_matches, ClockKey, DiskPos, IndexEntry, RoutingSummary};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::any::TypeId;
@@ -40,6 +40,13 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 type ProjectionCandidates = (u64, u64, Vec<(u64, DiskPos)>);
+
+#[derive(Clone, Copy, Debug)]
+enum EntryQuery<'a> {
+    Kind(EventKind),
+    Category(u8),
+    Scope(&'a str),
+}
 
 // ---------------------------------------------------------------------------
 // Tile — AoSoA building block
@@ -63,9 +70,7 @@ type ProjectionCandidates = (u64, u64, Vec<(u64, DiskPos)>);
 pub(crate) struct Tile<const N: usize> {
     /// Event kinds stored in this tile; all entries have the same kind.
     pub kinds: Vec<EventKind>,
-    /// `global_sequence` values parallel to `kinds` and `entries`.
-    pub sequences: Vec<u64>,
-    /// Full index entries parallel to `kinds` and `sequences`.
+    /// Full index entries parallel to `kinds`.
     pub entries: Vec<Arc<IndexEntry>>,
     /// Number of valid elements currently stored in the tile.
     pub len: usize,
@@ -76,7 +81,6 @@ impl<const N: usize> Tile<N> {
     pub(crate) fn new() -> Self {
         Self {
             kinds: Vec::with_capacity(N),
-            sequences: Vec::with_capacity(N),
             entries: Vec::with_capacity(N),
             len: 0,
         }
@@ -89,10 +93,9 @@ impl<const N: usize> Tile<N> {
     }
 
     /// Append an entry.  Panics (debug only) if the tile is already full.
-    pub(crate) fn push(&mut self, kind: EventKind, sequence: u64, entry: Arc<IndexEntry>) {
+    pub(crate) fn push(&mut self, kind: EventKind, entry: Arc<IndexEntry>) {
         debug_assert!(!self.is_full(), "Tile<{N}>::push called on a full tile");
         self.kinds.push(kind);
-        self.sequences.push(sequence);
         self.entries.push(entry);
         self.len += 1;
     }
@@ -110,7 +113,6 @@ impl<const N: usize> Tile<N> {
 /// for tens of thousands of events.
 struct SoAInner {
     kinds: Vec<EventKind>,
-    sequences: Vec<u64>,
     entries: Vec<Arc<IndexEntry>>,
     /// scope → set of entity strings that have emitted at least one event in
     /// that scope.  Mirrors the role of `StoreIndex::scope_entities`.
@@ -121,7 +123,6 @@ impl SoAInner {
     fn new() -> Self {
         Self {
             kinds: Vec::new(),
-            sequences: Vec::new(),
             entries: Vec::new(),
             scope_entities: std::collections::HashMap::new(),
         }
@@ -129,7 +130,6 @@ impl SoAInner {
 
     fn from_entries(entries: &[Arc<IndexEntry>]) -> Self {
         let mut kinds = Vec::with_capacity(entries.len());
-        let mut sequences = Vec::with_capacity(entries.len());
         let mut built_entries = Vec::with_capacity(entries.len());
         let mut scope_entities = std::collections::HashMap::<Arc<str>, HashSet<Arc<str>>>::new();
 
@@ -137,14 +137,12 @@ impl SoAInner {
             let scope = entry.coord.scope_arc();
             let entity = entry.coord.entity_arc();
             kinds.push(entry.kind);
-            sequences.push(entry.global_sequence);
             built_entries.push(Arc::clone(entry));
             scope_entities.entry(scope).or_default().insert(entity);
         }
 
         Self {
             kinds,
-            sequences,
             entries: built_entries,
             scope_entities,
         }
@@ -155,30 +153,28 @@ impl SoAInner {
         let scope: Arc<str> = entry.coord.scope_arc();
         let entity: Arc<str> = entry.coord.entity_arc();
         self.kinds.push(entry.kind);
-        self.sequences.push(entry.global_sequence);
         self.entries.push(Arc::clone(entry));
         self.scope_entities.entry(scope).or_default().insert(entity);
+    }
+
+    fn query_entries(&self, mut matches: impl FnMut(EventKind) -> bool) -> Vec<Arc<IndexEntry>> {
+        self.kinds
+            .iter()
+            .zip(self.entries.iter())
+            .filter(|(kind, _)| matches(**kind))
+            .map(|(_, e)| Arc::clone(e))
+            .collect()
     }
 
     /// Return all entries whose `kind == target`.  Linear scan; cache-friendly
     /// because `kinds` is a packed `Vec<EventKind>` (2 bytes per element).
     fn query_by_kind(&self, target: EventKind) -> Vec<Arc<IndexEntry>> {
-        self.kinds
-            .iter()
-            .zip(self.entries.iter())
-            .filter(|(k, _)| **k == target)
-            .map(|(_, e)| Arc::clone(e))
-            .collect()
+        self.query_entries(|kind| kind == target)
     }
 
     /// Return all entries whose kind falls in `category` (upper 4 bits).
     fn query_by_category(&self, category: u8) -> Vec<Arc<IndexEntry>> {
-        self.kinds
-            .iter()
-            .zip(self.entries.iter())
-            .filter(|(k, _)| k.category() == category)
-            .map(|(_, e)| Arc::clone(e))
-            .collect()
+        self.query_entries(|kind| kind.category() == category)
     }
 
     /// Return all entries belonging to entities registered under `scope`.
@@ -195,7 +191,6 @@ impl SoAInner {
 
     fn clear(&mut self) {
         self.kinds.clear();
-        self.sequences.clear();
         self.entries.clear();
         self.scope_entities.clear();
     }
@@ -241,7 +236,6 @@ impl<const N: usize> AoSoAInner<N> {
         let scope: Arc<str> = entry.coord.scope_arc();
         let entity: Arc<str> = entry.coord.entity_arc();
         let kind = entry.kind;
-        let seq = entry.global_sequence;
 
         // Determine whether the last tile can accept this entry: same kind and not full.
         let can_append_to_last = self
@@ -254,22 +248,26 @@ impl<const N: usize> AoSoAInner<N> {
                 .tiles
                 .last_mut()
                 .expect("checked above that last() is Some"); // safe: is_some_and confirmed
-            t.push(kind, seq, Arc::clone(entry));
+            t.push(kind, Arc::clone(entry));
         } else {
             let mut tile = Tile::new();
-            tile.push(kind, seq, Arc::clone(entry));
+            tile.push(kind, Arc::clone(entry));
             self.tiles.push(tile);
         }
 
         self.scope_entities.entry(scope).or_default().insert(entity);
     }
 
-    /// Iterate every tile and collect entries whose kind matches `target`.
-    fn query_by_kind(&self, target: EventKind) -> Vec<Arc<IndexEntry>> {
+    fn query_entries(&self, mut matches: impl FnMut(EventKind) -> bool) -> Vec<Arc<IndexEntry>> {
         let mut out = Vec::new();
         for tile in &self.tiles {
             // All elements in a tile share the same kind; skip non-matching tiles fast.
-            if tile.kinds.first().copied() != Some(target) {
+            if tile
+                .kinds
+                .first()
+                .copied()
+                .is_none_or(|kind| !matches(kind))
+            {
                 continue;
             }
             for e in tile.entries.iter().take(tile.len) {
@@ -279,19 +277,15 @@ impl<const N: usize> AoSoAInner<N> {
         out
     }
 
+    /// Iterate every tile and collect entries whose kind matches `target`.
+    fn query_by_kind(&self, target: EventKind) -> Vec<Arc<IndexEntry>> {
+        self.query_entries(|kind| kind == target)
+    }
+
     /// Return all entries whose kind falls in `category` (upper 4 bits).
     /// Skips entire tiles whose kind doesn't match the category.
     fn query_by_category(&self, category: u8) -> Vec<Arc<IndexEntry>> {
-        let mut out = Vec::new();
-        for tile in &self.tiles {
-            if tile.kinds.first().is_none_or(|k| k.category() != category) {
-                continue;
-            }
-            for e in tile.entries.iter().take(tile.len) {
-                out.push(Arc::clone(e));
-            }
-        }
-        out
+        self.query_entries(|kind| kind.category() == category)
     }
 
     /// Collect entries belonging to entities in `scope`.
@@ -338,7 +332,6 @@ pub(crate) struct CachedProjectionSlot {
 
 struct EntityGroup {
     kinds: Vec<EventKind>,
-    sequences: Vec<u64>,
     entries: Vec<Arc<IndexEntry>>,
     generation: u64,
     cached_projections: std::collections::HashMap<TypeId, CachedProjectionSlot>,
@@ -377,14 +370,12 @@ impl SoAoSInner {
             let entity = slice[0].coord.entity_arc();
             let mut group = EntityGroup {
                 kinds: Vec::with_capacity(slice.len()),
-                sequences: Vec::with_capacity(slice.len()),
                 entries: Vec::with_capacity(slice.len()),
                 generation: slice.len() as u64,
                 cached_projections: std::collections::HashMap::new(),
             };
             for entry in slice {
                 group.kinds.push(entry.kind);
-                group.sequences.push(entry.global_sequence);
                 group.entries.push(Arc::clone(entry));
                 scope_entities
                     .entry(entry.coord.scope_arc())
@@ -408,23 +399,21 @@ impl SoAoSInner {
             .entry(Arc::clone(&entity))
             .or_insert_with(|| EntityGroup {
                 kinds: Vec::new(),
-                sequences: Vec::new(),
                 entries: Vec::new(),
                 generation: 0,
                 cached_projections: std::collections::HashMap::new(),
             });
         group.kinds.push(entry.kind);
-        group.sequences.push(entry.global_sequence);
         group.entries.push(Arc::clone(entry));
         group.generation = group.generation.saturating_add(1);
         self.scope_entities.entry(scope).or_default().insert(entity);
     }
 
-    fn query_by_kind(&self, target: EventKind) -> Vec<Arc<IndexEntry>> {
+    fn query_entries(&self, mut matches: impl FnMut(EventKind) -> bool) -> Vec<Arc<IndexEntry>> {
         let mut out = Vec::new();
         for group in self.groups.values() {
             for (i, &kind) in group.kinds.iter().enumerate() {
-                if kind == target {
+                if matches(kind) {
                     out.push(Arc::clone(&group.entries[i]));
                 }
             }
@@ -432,16 +421,12 @@ impl SoAoSInner {
         out
     }
 
+    fn query_by_kind(&self, target: EventKind) -> Vec<Arc<IndexEntry>> {
+        self.query_entries(|kind| kind == target)
+    }
+
     fn query_by_category(&self, category: u8) -> Vec<Arc<IndexEntry>> {
-        let mut out = Vec::new();
-        for group in self.groups.values() {
-            for (i, &kind) in group.kinds.iter().enumerate() {
-                if kind.category() == category {
-                    out.push(Arc::clone(&group.entries[i]));
-                }
-            }
-        }
-        out
+        self.query_entries(|kind| kind.category() == category)
     }
 
     fn query_by_scope(&self, scope: &str) -> Vec<Arc<IndexEntry>> {
@@ -466,19 +451,14 @@ impl SoAoSInner {
         relevant_kinds: &[EventKind],
     ) -> Option<ProjectionCandidates> {
         let group = self.groups.get(entity)?;
-        let match_all = relevant_kinds.is_empty();
         let mut candidates = Vec::new();
         let mut watermark = None;
 
-        for ((&kind, &sequence), entry) in group
-            .kinds
-            .iter()
-            .zip(group.sequences.iter())
-            .zip(group.entries.iter())
-        {
-            if !match_all && !relevant_kinds.contains(&kind) {
+        for (&kind, entry) in group.kinds.iter().zip(group.entries.iter()) {
+            if !projection_kind_matches(relevant_kinds, kind) {
                 continue;
             }
+            let sequence = entry.global_sequence;
             watermark = Some(sequence);
             candidates.push((sequence, entry.disk_pos));
         }
@@ -643,57 +623,83 @@ impl ColumnarIndex {
         }
     }
 
-    /// Return all entries whose `kind` exactly matches `target`, sorted by
-    /// `global_sequence` (ascending).
+    /// Return all entries matching `query`, sorted by `global_sequence`
+    /// (ascending).
     ///
-    /// For SoA the result is already in insertion order (= ascending
-    /// `global_sequence`).  For AoSoA tile order is also insertion order, but
-    /// we sort the collected results to guarantee stable output regardless of
-    /// tile interleaving between different kinds.
-    pub(crate) fn query_by_kind(&self, target: EventKind) -> Vec<Arc<IndexEntry>> {
-        let mut results = match &self.inner {
-            ColumnarVariant::SoA(lock) => lock.read().query_by_kind(target),
+    /// Overlay-specific inner scans may already preserve insertion order, but
+    /// the final sort keeps the public result stable across layouts.
+    fn query_sorted(&self, query: EntryQuery<'_>) -> Vec<Arc<IndexEntry>> {
+        let mut results = match (&self.inner, query) {
+            (ColumnarVariant::SoA(lock), EntryQuery::Kind(kind)) => lock.read().query_by_kind(kind),
+            (ColumnarVariant::SoA(lock), EntryQuery::Category(category)) => {
+                lock.read().query_by_category(category)
+            }
+            (ColumnarVariant::SoA(lock), EntryQuery::Scope(scope)) => {
+                lock.read().query_by_scope(scope)
+            }
             #[cfg(test)]
-            ColumnarVariant::AoSoA8(lock) => lock.read().query_by_kind(target),
+            (ColumnarVariant::AoSoA8(lock), EntryQuery::Kind(kind)) => {
+                lock.read().query_by_kind(kind)
+            }
             #[cfg(test)]
-            ColumnarVariant::AoSoA16(lock) => lock.read().query_by_kind(target),
-            ColumnarVariant::AoSoA64(lock) => lock.read().query_by_kind(target),
-            ColumnarVariant::SoAoS(lock) => lock.read().query_by_kind(target),
+            (ColumnarVariant::AoSoA8(lock), EntryQuery::Category(category)) => {
+                lock.read().query_by_category(category)
+            }
+            #[cfg(test)]
+            (ColumnarVariant::AoSoA8(lock), EntryQuery::Scope(scope)) => {
+                lock.read().query_by_scope(scope)
+            }
+            #[cfg(test)]
+            (ColumnarVariant::AoSoA16(lock), EntryQuery::Kind(kind)) => {
+                lock.read().query_by_kind(kind)
+            }
+            #[cfg(test)]
+            (ColumnarVariant::AoSoA16(lock), EntryQuery::Category(category)) => {
+                lock.read().query_by_category(category)
+            }
+            #[cfg(test)]
+            (ColumnarVariant::AoSoA16(lock), EntryQuery::Scope(scope)) => {
+                lock.read().query_by_scope(scope)
+            }
+            (ColumnarVariant::AoSoA64(lock), EntryQuery::Kind(kind)) => {
+                lock.read().query_by_kind(kind)
+            }
+            (ColumnarVariant::AoSoA64(lock), EntryQuery::Category(category)) => {
+                lock.read().query_by_category(category)
+            }
+            (ColumnarVariant::AoSoA64(lock), EntryQuery::Scope(scope)) => {
+                lock.read().query_by_scope(scope)
+            }
+            (ColumnarVariant::SoAoS(lock), EntryQuery::Kind(kind)) => {
+                lock.read().query_by_kind(kind)
+            }
+            (ColumnarVariant::SoAoS(lock), EntryQuery::Category(category)) => {
+                lock.read().query_by_category(category)
+            }
+            (ColumnarVariant::SoAoS(lock), EntryQuery::Scope(scope)) => {
+                lock.read().query_by_scope(scope)
+            }
         };
         results.sort_by_key(|e| e.global_sequence);
         results
+    }
+
+    /// Return all entries whose `kind` exactly matches `target`, sorted by
+    /// `global_sequence` (ascending).
+    pub(crate) fn query_by_kind(&self, target: EventKind) -> Vec<Arc<IndexEntry>> {
+        self.query_sorted(EntryQuery::Kind(target))
     }
 
     /// Return all entries whose kind falls in `category` (upper 4 bits),
     /// sorted by `global_sequence` (ascending).
     pub(crate) fn query_by_category(&self, category: u8) -> Vec<Arc<IndexEntry>> {
-        let mut results = match &self.inner {
-            ColumnarVariant::SoA(lock) => lock.read().query_by_category(category),
-            #[cfg(test)]
-            ColumnarVariant::AoSoA8(lock) => lock.read().query_by_category(category),
-            #[cfg(test)]
-            ColumnarVariant::AoSoA16(lock) => lock.read().query_by_category(category),
-            ColumnarVariant::AoSoA64(lock) => lock.read().query_by_category(category),
-            ColumnarVariant::SoAoS(lock) => lock.read().query_by_category(category),
-        };
-        results.sort_by_key(|e| e.global_sequence);
-        results
+        self.query_sorted(EntryQuery::Category(category))
     }
 
     /// Return all entries whose coordinate scope matches `scope`, sorted by
     /// `global_sequence` (ascending).
     pub(crate) fn query_by_scope(&self, scope: &str) -> Vec<Arc<IndexEntry>> {
-        let mut results = match &self.inner {
-            ColumnarVariant::SoA(lock) => lock.read().query_by_scope(scope),
-            #[cfg(test)]
-            ColumnarVariant::AoSoA8(lock) => lock.read().query_by_scope(scope),
-            #[cfg(test)]
-            ColumnarVariant::AoSoA16(lock) => lock.read().query_by_scope(scope),
-            ColumnarVariant::AoSoA64(lock) => lock.read().query_by_scope(scope),
-            ColumnarVariant::SoAoS(lock) => lock.read().query_by_scope(scope),
-        };
-        results.sort_by_key(|e| e.global_sequence);
-        results
+        self.query_sorted(EntryQuery::Scope(scope))
     }
 
     /// Invoke `f` with an immutable reference to the `Tile<8>` at `idx`.
@@ -914,12 +920,14 @@ impl ScanIndex {
     }
 
     fn query_base_by_category(&self, category: u8) -> Vec<Arc<IndexEntry>> {
-        let mut results: Vec<Arc<IndexEntry>> = self
+        let mut results = Vec::new();
+        for entries in self
             .by_fact
             .iter()
             .filter(|r| r.key().category() == category)
-            .flat_map(|r| r.value().values().map(Arc::clone).collect::<Vec<_>>())
-            .collect();
+        {
+            results.extend(entries.value().values().map(Arc::clone));
+        }
         results.sort_by_key(|e| e.global_sequence);
         results
     }
@@ -978,68 +986,60 @@ impl ScanIndex {
         }
     }
 
-    fn query_by_kind_route(&self, route: ScanRoute, kind: EventKind) -> Vec<Arc<IndexEntry>> {
-        match route {
-            ScanRoute::BaseAoS => self.query_base_by_kind(kind),
-            ScanRoute::SoA => self
-                .soa
-                .as_ref()
-                .expect("ScanCapabilities routed kind queries through missing SoA overlay")
-                .query_by_kind(kind),
-            ScanRoute::SoAoS => self
-                .entity_groups
-                .as_ref()
-                .expect("ScanCapabilities routed kind queries through missing SoAoS overlay")
-                .query_by_kind(kind),
-            ScanRoute::AoSoA64 => self
-                .tiles64
-                .as_ref()
-                .expect("ScanCapabilities routed kind queries through missing AoSoA64 overlay")
-                .query_by_kind(kind),
-        }
-    }
-
-    fn query_by_category_route(&self, route: ScanRoute, category: u8) -> Vec<Arc<IndexEntry>> {
-        match route {
-            ScanRoute::BaseAoS => self.query_base_by_category(category),
-            ScanRoute::SoA => self
-                .soa
-                .as_ref()
-                .expect("ScanCapabilities routed category queries through missing SoA overlay")
-                .query_by_category(category),
-            ScanRoute::SoAoS => self
-                .entity_groups
-                .as_ref()
-                .expect("ScanCapabilities routed category queries through missing SoAoS overlay")
-                .query_by_category(category),
-            ScanRoute::AoSoA64 => self
-                .tiles64
-                .as_ref()
-                .expect("ScanCapabilities routed category queries through missing AoSoA64 overlay")
-                .query_by_category(category),
-        }
-    }
-
-    fn query_by_scope_route(&self, route: ScanRoute, scope: &str) -> Vec<Arc<IndexEntry>> {
-        match route {
+    fn query_route(&self, route: ScanRoute, query: EntryQuery<'_>) -> Vec<Arc<IndexEntry>> {
+        match (route, query) {
+            (ScanRoute::BaseAoS, EntryQuery::Kind(kind)) => self.query_base_by_kind(kind),
+            (ScanRoute::BaseAoS, EntryQuery::Category(category)) => {
+                self.query_base_by_category(category)
+            }
             // Base AoS keeps the authoritative scope -> entity set, but not a
             // direct scope -> entries index. Callers pair this route with
             // `scope_entity_set` when they need the full entry list.
-            ScanRoute::BaseAoS => Vec::new(),
-            ScanRoute::SoA => self
+            (ScanRoute::BaseAoS, EntryQuery::Scope(_)) => Vec::new(),
+            (ScanRoute::SoA, EntryQuery::Kind(kind)) => self
                 .soa
                 .as_ref()
-                .expect("ScanCapabilities routed scope queries through missing SoA overlay")
+                .expect("ScanCapabilities routed queries through missing SoA overlay")
+                .query_by_kind(kind),
+            (ScanRoute::SoA, EntryQuery::Category(category)) => self
+                .soa
+                .as_ref()
+                .expect("ScanCapabilities routed queries through missing SoA overlay")
+                .query_by_category(category),
+            (ScanRoute::SoA, EntryQuery::Scope(scope)) => self
+                .soa
+                .as_ref()
+                .expect("ScanCapabilities routed queries through missing SoA overlay")
                 .query_by_scope(scope),
-            ScanRoute::SoAoS => self
+            (ScanRoute::SoAoS, EntryQuery::Kind(kind)) => self
                 .entity_groups
                 .as_ref()
-                .expect("ScanCapabilities routed scope queries through missing SoAoS overlay")
+                .expect("ScanCapabilities routed queries through missing SoAoS overlay")
+                .query_by_kind(kind),
+            (ScanRoute::SoAoS, EntryQuery::Category(category)) => self
+                .entity_groups
+                .as_ref()
+                .expect("ScanCapabilities routed queries through missing SoAoS overlay")
+                .query_by_category(category),
+            (ScanRoute::SoAoS, EntryQuery::Scope(scope)) => self
+                .entity_groups
+                .as_ref()
+                .expect("ScanCapabilities routed queries through missing SoAoS overlay")
                 .query_by_scope(scope),
-            ScanRoute::AoSoA64 => self
+            (ScanRoute::AoSoA64, EntryQuery::Kind(kind)) => self
                 .tiles64
                 .as_ref()
-                .expect("ScanCapabilities routed scope queries through missing AoSoA64 overlay")
+                .expect("ScanCapabilities routed queries through missing AoSoA64 overlay")
+                .query_by_kind(kind),
+            (ScanRoute::AoSoA64, EntryQuery::Category(category)) => self
+                .tiles64
+                .as_ref()
+                .expect("ScanCapabilities routed queries through missing AoSoA64 overlay")
+                .query_by_category(category),
+            (ScanRoute::AoSoA64, EntryQuery::Scope(scope)) => self
+                .tiles64
+                .as_ref()
+                .expect("ScanCapabilities routed queries through missing AoSoA64 overlay")
                 .query_by_scope(scope),
         }
     }
@@ -1127,7 +1127,7 @@ impl ScanIndex {
     ///
     /// For `Columnar`, delegates to [`ColumnarIndex::query_by_kind`].
     pub(crate) fn query_by_kind(&self, kind: EventKind) -> Vec<Arc<IndexEntry>> {
-        self.query_by_kind_route(self.capabilities().by_kind, kind)
+        self.query_route(self.capabilities().by_kind, EntryQuery::Kind(kind))
     }
 
     /// Return all entries whose coordinate scope matches `scope`, sorted by
@@ -1140,7 +1140,7 @@ impl ScanIndex {
     ///
     /// For `Columnar`, delegates to [`ColumnarIndex::query_by_scope`].
     pub(crate) fn query_by_scope(&self, scope: &str) -> Vec<Arc<IndexEntry>> {
-        self.query_by_scope_route(self.capabilities().by_scope, scope)
+        self.query_route(self.capabilities().by_scope, EntryQuery::Scope(scope))
     }
 
     /// Return all entries whose kind falls in `category` (upper 4 bits),
@@ -1150,7 +1150,10 @@ impl ScanIndex {
     /// the category. For `Columnar`, delegates to
     /// [`ColumnarIndex::query_by_category`].
     pub(crate) fn query_by_category(&self, category: u8) -> Vec<Arc<IndexEntry>> {
-        self.query_by_category_route(self.capabilities().by_category, category)
+        self.query_route(
+            self.capabilities().by_category,
+            EntryQuery::Category(category),
+        )
     }
 
     /// Return the set of entity strings registered under `scope` (Maps variant only).
@@ -1251,8 +1254,8 @@ mod tests {
             correlation_id: seq as u128,
             causation_id: None,
             coord,
-            entity_id: crate::store::interner::InternId::sentinel(),
-            scope_id: crate::store::interner::InternId::sentinel(),
+            entity_id: crate::store::index::interner::InternId::sentinel(),
+            scope_id: crate::store::index::interner::InternId::sentinel(),
             kind,
             wall_ms: seq * 1000,
             clock: u32::try_from(seq).expect("test seq fits u32"),

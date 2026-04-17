@@ -1,8 +1,11 @@
+pub(crate) mod columnar;
+pub(crate) mod interner;
+
+use self::columnar::{CachedProjectionSlot, ScanIndex};
+use self::interner::StringInterner;
 use crate::coordinate::Coordinate;
 use crate::event::{EventKind, HashChain};
-use crate::store::columnar::{CachedProjectionSlot, ScanIndex};
 use crate::store::config::IndexConfig;
-use crate::store::interner::StringInterner;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -54,6 +57,30 @@ impl VisibilitySnapshot {
             .cancelled_ranges
             .iter()
             .any(|(start, end)| sequence >= *start && sequence < *end)
+    }
+}
+
+#[inline]
+pub(crate) fn projection_kind_matches(relevant_kinds: &[EventKind], kind: EventKind) -> bool {
+    match relevant_kinds {
+        [] => true,
+        [only] => *only == kind,
+        [first, second] => *first == kind || *second == kind,
+        many => many.contains(&kind),
+    }
+}
+
+fn extend_visible_entries<'a, I>(
+    out: &mut Vec<IndexEntry>,
+    entries: I,
+    visibility: &VisibilitySnapshot,
+) where
+    I: IntoIterator<Item = &'a Arc<IndexEntry>>,
+{
+    for entry in entries {
+        if visibility.is_visible(entry.global_sequence) {
+            out.push(entry.as_ref().clone());
+        }
     }
 }
 
@@ -299,9 +326,9 @@ pub struct IndexEntry {
     /// Entity and scope coordinates for this event.
     pub coord: Coordinate,
     /// Interned entity string ID for compact checkpoint serialization.
-    pub(crate) entity_id: crate::store::interner::InternId,
+    pub(crate) entity_id: self::interner::InternId,
     /// Interned scope string ID for compact checkpoint serialization.
-    pub(crate) scope_id: crate::store::interner::InternId,
+    pub(crate) scope_id: self::interner::InternId,
     /// Event kind (type discriminant).
     pub kind: EventKind,
     /// HLC wall clock milliseconds — for global causal ordering.
@@ -874,11 +901,9 @@ impl StoreIndex {
         self.streams
             .get(entity)
             .map(|r| {
-                r.value()
-                    .values()
-                    .filter(|arc| visibility.is_visible(arc.global_sequence))
-                    .map(|arc| arc.as_ref().clone())
-                    .collect()
+                let mut entries = Vec::with_capacity(r.value().len());
+                extend_visible_entries(&mut entries, r.value().values(), &visibility);
+                entries
             })
             .unwrap_or_default()
     }
@@ -893,16 +918,15 @@ impl StoreIndex {
         use crate::coordinate::KindFilter;
         let mut candidates: Vec<IndexEntry> = if let Some(ref prefix) = region.entity_prefix {
             // Entity prefix → scan streams map for matching keys
-            self.streams
+            let mut candidates = Vec::new();
+            for stream in self
+                .streams
                 .iter()
                 .filter(|r| r.key().as_ref().starts_with(prefix.as_ref()))
-                .flat_map(|r| {
-                    r.value()
-                        .values()
-                        .map(|arc| arc.as_ref().clone())
-                        .collect::<Vec<_>>()
-                })
-                .collect()
+            {
+                extend_visible_entries(&mut candidates, stream.value().values(), &visibility);
+            }
+            candidates
         } else if let Some(ref scope) = region.scope {
             // Scope → delegate to scan index
             let scope_entries = self.scan.query_by_scope(scope.as_ref());
@@ -914,20 +938,17 @@ impl StoreIndex {
             } else {
                 // Fallback for Maps mode: look up entities in scope, collect their streams
                 if let Some(entities) = self.scan.scope_entity_set(scope.as_ref()) {
-                    entities
-                        .iter()
-                        .flat_map(|entity| {
-                            self.streams
-                                .get(entity.as_ref())
-                                .map(|r| {
-                                    r.value()
-                                        .values()
-                                        .map(|arc| arc.as_ref().clone())
-                                        .collect::<Vec<_>>()
-                                })
-                                .unwrap_or_default()
-                        })
-                        .collect()
+                    let mut candidates = Vec::new();
+                    for entity in &entities {
+                        if let Some(stream) = self.streams.get(entity.as_ref()) {
+                            extend_visible_entries(
+                                &mut candidates,
+                                stream.value().values(),
+                                &visibility,
+                            );
+                        }
+                    }
+                    candidates
                 } else {
                     Vec::new()
                 }
@@ -954,28 +975,25 @@ impl StoreIndex {
                         .map(|arc| arc.as_ref().clone())
                         .collect()
                 }
-                KindFilter::Any => self
-                    .streams
-                    .iter()
-                    .flat_map(|r| {
-                        r.value()
-                            .values()
-                            .map(|arc| arc.as_ref().clone())
-                            .collect::<Vec<_>>()
-                    })
-                    .collect(),
+                KindFilter::Any => {
+                    let mut candidates = Vec::new();
+                    for stream in self.streams.iter() {
+                        extend_visible_entries(
+                            &mut candidates,
+                            stream.value().values(),
+                            &visibility,
+                        );
+                    }
+                    candidates
+                }
             }
         } else {
             // Region::all() with no filters — return everything
-            self.streams
-                .iter()
-                .flat_map(|r| {
-                    r.value()
-                        .values()
-                        .map(|arc| arc.as_ref().clone())
-                        .collect::<Vec<_>>()
-                })
-                .collect()
+            let mut candidates = Vec::new();
+            for stream in self.streams.iter() {
+                extend_visible_entries(&mut candidates, stream.value().values(), &visibility);
+            }
+            candidates
         };
 
         // Apply remaining filters that weren't used for the initial candidate set.
@@ -1125,11 +1143,10 @@ impl StoreIndex {
         }
 
         let stream = self.streams.get(entity)?;
-        let match_all = relevant_kinds.is_empty();
         let mut items = Vec::new();
         let mut watermark = None;
         for entry in stream.value().values() {
-            if !match_all && !relevant_kinds.contains(&entry.kind) {
+            if !projection_kind_matches(relevant_kinds, entry.kind) {
                 continue;
             }
             watermark = Some(entry.global_sequence);
@@ -1199,8 +1216,8 @@ mod tests {
             event_id: seq as u128 + 1,
             correlation_id: seq as u128 + 1,
             causation_id: None,
-            entity_id: crate::store::interner::InternId::sentinel(),
-            scope_id: crate::store::interner::InternId::sentinel(),
+            entity_id: self::interner::InternId::sentinel(),
+            scope_id: self::interner::InternId::sentinel(),
             coord,
             kind: EventKind::custom(0xF, 1),
             wall_ms: seq,

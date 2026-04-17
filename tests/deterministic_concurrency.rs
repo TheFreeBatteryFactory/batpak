@@ -285,7 +285,7 @@ fn loom_batch_visibility_no_prefix_exposure() {
                  This is a partial batch exposure — the SequenceGate did not prevent\n\
                  a reader from seeing a strict prefix of the batch.\n\
                  Slots: [{s0}, {s1}, {s2}], visible: {vis}.\n\
-                 Investigate: src/store/index.rs SequenceGate::publish ordering."
+                 Investigate: src/store/index/mod.rs SequenceGate::publish ordering."
             );
         });
 

@@ -38,7 +38,7 @@ impl Gate<ColdStartContext> for ColdStartGate {
                 format!(
                     "Cold start took {}ms for {} events (max: {}ms). \
                      Investigate: src/store/mod.rs Store::open cold start scan, \
-                     src/store/reader.rs scan_segment.",
+                     src/store/segment/scan.rs scan_segment.",
                     ctx.cold_start_ms, ctx.event_count, self.max_ms
                 ),
             )
@@ -177,8 +177,8 @@ impl Gate<PerfContext> for WriteThroughputGate {
                 "write_throughput",
                 format!(
                     "Write throughput {:.0} events/sec < minimum {:.0}. \
-                     Investigate: src/store/writer.rs handle_append (10-step commit), \
-                     src/store/segment.rs write_frame, CRC overhead.",
+                     Investigate: src/store/write/writer.rs handle_append (10-step commit), \
+                     src/store/segment/mod.rs write_frame, CRC overhead.",
                     ctx.events_per_sec, self.min_events_per_sec
                 ),
             )
@@ -206,7 +206,7 @@ impl Gate<PerfContext> for QueryLatencyGate {
                 "query_latency",
                 format!(
                     "Query latency {:.1}µs > max {:.1}µs. \
-                     Investigate: src/store/index.rs query() DashMap scan, \
+                     Investigate: src/store/index/mod.rs query() DashMap scan, \
                      Region::matches_event hot path.",
                     ctx.query_us, self.max_us_per_query
                 ),
@@ -235,8 +235,8 @@ impl Gate<PerfContext> for ProjectionGate {
                 "projection_replay",
                 format!(
                     "Projection replay {:.1}ms > max {:.1}ms for {} events. \
-                     Investigate: src/store/projection_flow.rs project(), \
-                     src/store/reader.rs read_entry deserialization.",
+                     Investigate: src/store/projection/flow.rs project(), \
+                     src/store/segment/scan.rs read_entry deserialization.",
                     ctx.projection_ms, self.max_ms, ctx.event_count
                 ),
             )
@@ -389,7 +389,7 @@ impl Gate<BatchPerfContext> for BatchThroughputGate {
                 format!(
                     "Batch throughput {:.0} events/sec < minimum {:.0}. \
                      Batch size: {}, batches: {}. \
-                     Investigate: src/store/writer.rs handle_append_batch, \
+                     Investigate: src/store/write/writer.rs handle_append_batch, \
                      two-phase commit overhead.",
                     ctx.batch_events_per_sec,
                     self.min_events_per_sec,
@@ -559,25 +559,25 @@ fn multi_gate_collects_all_denials() {
     // Verify context has the "investigate" pointers
     assert!(
         denials[0].message.contains("writer.rs"),
-        "PROPERTY: WriteThroughputGate denial must point to src/store/writer.rs for investigation.\n\
+        "PROPERTY: WriteThroughputGate denial must point to src/store/write/writer.rs for investigation.\n\
          Investigate: WriteThroughputGate::evaluate() denial message in tests/perf_gates.rs.\n\
          Common causes: Gate message missing 'writer.rs' investigation pointer, or \
          message format changed without updating this assertion.\n\
          Run: cargo test --test perf_gates multi_gate_collects_all_denials"
     );
     assert!(
-        denials[1].message.contains("index.rs"),
-        "PROPERTY: QueryLatencyGate denial must point to src/store/index.rs for investigation.\n\
+        denials[1].message.contains("index/mod.rs"),
+        "PROPERTY: QueryLatencyGate denial must point to src/store/index/mod.rs for investigation.\n\
          Investigate: QueryLatencyGate::evaluate() denial message in tests/perf_gates.rs.\n\
          Common causes: Gate message missing 'index.rs' investigation pointer, or \
          message format changed without updating this assertion.\n\
          Run: cargo test --test perf_gates multi_gate_collects_all_denials"
     );
     assert!(
-        denials[2].message.contains("reader.rs"),
-        "PROPERTY: ProjectionGate denial must point to src/store/reader.rs for investigation.\n\
+        denials[2].message.contains("scan.rs"),
+        "PROPERTY: ProjectionGate denial must point to src/store/segment/scan.rs for investigation.\n\
          Investigate: ProjectionGate::evaluate() denial message in tests/perf_gates.rs.\n\
-         Common causes: Gate message missing 'reader.rs' investigation pointer, or \
+         Common causes: Gate message missing 'scan.rs' investigation pointer, or \
          message format changed without updating this assertion.\n\
          Run: cargo test --test perf_gates multi_gate_collects_all_denials"
     );
@@ -618,7 +618,7 @@ impl Gate<CorrectnessContext> for FdEvictionGate {
             Err(Denial::new(
                 "fd_eviction_integrity",
                 "Data corrupted after FD cache eviction. \
-                 Investigate: src/store/reader.rs get_fd() LRU eviction, \
+                 Investigate: src/store/segment/scan.rs get_fd() LRU eviction, \
                  try_clone() correctness.",
             ))
         }
@@ -637,8 +637,8 @@ impl Gate<CorrectnessContext> for CrossSegmentGate {
             Err(Denial::new(
                 "cross_segment_reads",
                 "Cannot read events across segment boundaries. \
-                 Investigate: src/store/writer.rs STEP 7 rotation, \
-                 src/store/reader.rs read_entry offset calculation.",
+                 Investigate: src/store/write/writer.rs STEP 7 rotation, \
+                 src/store/segment/scan.rs read_entry offset calculation.",
             ))
         }
     }
@@ -692,7 +692,7 @@ impl Gate<CorrectnessContext> for CursorCompletenessGate {
             Err(Denial::new(
                 "cursor_completeness",
                 "Cursor missed events (possibly global_sequence=0). \
-                 Investigate: src/store/cursor.rs poll() started flag.",
+                 Investigate: src/store/delivery/cursor.rs poll() started flag.",
             ))
         }
     }
@@ -710,7 +710,7 @@ impl Gate<CorrectnessContext> for SnapshotBootGate {
             Err(Denial::new(
                 "snapshot_bootable",
                 "Snapshot did not produce a bootable store. \
-                 Investigate: src/store/mod.rs snapshot(), src/store/reader.rs scan_segment.",
+                 Investigate: src/store/mod.rs snapshot(), src/store/segment/scan.rs scan_segment.",
             ))
         }
     }
@@ -920,7 +920,7 @@ fn append_throughput_gate() {
         }
         panic!(
             "APPEND THROUGHPUT GATE FAILED: {:.0} events/sec < 5000 minimum.\n\
-             Investigate: src/store/writer.rs handle_append.",
+             Investigate: src/store/write/writer.rs handle_append.",
             events_per_sec
         );
     }
@@ -975,7 +975,7 @@ fn projection_latency_gate() {
         }
         panic!(
             "PROJECTION LATENCY GATE FAILED: {:.1}ms > 5000ms max.\n\
-             Investigate: src/store/projection_flow.rs project(), src/store/reader.rs.",
+             Investigate: src/store/projection/flow.rs project(), src/store/segment/scan.rs.",
             projection_ms
         );
     }
@@ -1040,7 +1040,7 @@ fn projection_cold_path_gate() {
         }
         panic!(
             "PROJECTION COLD-PATH GATE FAILED: {:.1}ms > 50ms max.\n\
-             Investigate: src/store/projection_flow.rs, src/store/reader.rs read_events_batch.",
+             Investigate: src/store/projection/flow.rs, src/store/segment/scan.rs read_events_batch.",
             projection_ms
         );
     }
@@ -1072,8 +1072,8 @@ impl Gate<LifecycleContext> for LifecycleLatencyGate {
                 "lifecycle_latency",
                 format!(
                     "{} {} took {}ms for {} events (max: {}ms). \
-                     Investigate: src/store/index_rebuild.rs planner lanes, \
-                     src/store/mmap_index.rs, src/store/checkpoint.rs, src/store/index.rs restore materialization.",
+                     Investigate: src/store/cold_start/rebuild.rs planner lanes, \
+                     src/store/cold_start/mmap.rs, src/store/cold_start/checkpoint.rs, src/store/index/mod.rs restore materialization.",
                     ctx.corpus, ctx.phase, ctx.elapsed_ms, ctx.event_count, self.max_ms
                 ),
             )

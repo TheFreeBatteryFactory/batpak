@@ -1,3 +1,4 @@
+use crate::store::cold_start::ColdStartPolicy;
 use crate::store::RestartPolicy;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -238,6 +239,16 @@ pub struct StoreConfig {
     pub fault_injector: Option<Arc<dyn FaultInjector>>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ValidatedStoreConfig {
+    pub(crate) pressure_retry_threshold: usize,
+    pub(crate) require_idempotency_keys: bool,
+    pub(crate) incremental_projection: bool,
+    pub(crate) cold_start: ColdStartPolicy,
+    pub(crate) shutdown_drain_limit: usize,
+    pub(crate) group_commit_drain_budget: u32,
+}
+
 impl StoreConfig {
     /// Create a StoreConfig with required data_dir and sensible defaults.
     /// All numeric defaults are documented. Override fields after construction
@@ -259,12 +270,11 @@ impl StoreConfig {
         }
     }
 
-    /// Validate config fields. Returns an error for values that would cause
-    /// silent breakage (deadlocks, infinite rotation, etc.).
+    /// Build the validated runtime policy derived from the caller-provided config.
     ///
     /// # Errors
     /// Returns `StoreError::Configuration` for invalid field values.
-    pub(crate) fn validate(&self) -> Result<(), crate::store::StoreError> {
+    pub(crate) fn validated(&self) -> Result<ValidatedStoreConfig, crate::store::StoreError> {
         if self.segment_max_bytes == 0 {
             return Err(crate::store::StoreError::Configuration(
                 "segment_max_bytes must be > 0".into(),
@@ -311,7 +321,31 @@ impl StoreConfig {
         // appends before syncing); 1 = per-event sync (default single-event behavior);
         // N > 1 = drain up to N-1 additional appends before syncing.
         // All values are valid; no range check needed.
-        Ok(())
+        let pressure_retry_threshold = self
+            .writer
+            .channel_capacity
+            .saturating_mul(usize::from(self.writer.pressure_retry_threshold_pct))
+            .div_ceil(100)
+            .max(1);
+        let group_commit_drain_budget = if self.batch.group_commit_max_batch == 0 {
+            u32::MAX
+        } else if self.batch.group_commit_max_batch == 1 {
+            0
+        } else {
+            self.batch.group_commit_max_batch.saturating_sub(1)
+        };
+
+        Ok(ValidatedStoreConfig {
+            pressure_retry_threshold,
+            require_idempotency_keys: self.batch.group_commit_max_batch > 1,
+            incremental_projection: self.index.incremental_projection,
+            cold_start: ColdStartPolicy::new(
+                self.index.enable_checkpoint,
+                self.index.enable_mmap_index,
+            ),
+            shutdown_drain_limit: self.writer.shutdown_drain_limit,
+            group_commit_drain_budget,
+        })
     }
 
     /// Set the maximum segment file size in bytes before rotation.

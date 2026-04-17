@@ -218,24 +218,22 @@ fn pipeline_commit_with_receipt() {
 
     let committed = pipeline
         .commit(receipt, |payload| {
-            Ok::<_, String>(Committed {
-                payload,
-                event_id: 12345,
-                sequence: 0,
-                hash: [0u8; 32],
-            })
+            assert_eq!(payload, "data");
+            Ok::<_, String>(CommitMetadata::new(12345, 0, [0u8; 32]))
         })
         .expect("commit should succeed");
 
     assert_eq!(
-        committed.payload, "data",
+        committed.payload(),
+        &"data".to_string(),
         "PIPELINE COMMIT PAYLOAD: committed payload should match the proposal value.\n\
          Investigate: src/pipeline/mod.rs Pipeline::commit.\n\
          Common causes: payload not forwarded from Receipt into commit closure.\n\
          Run: cargo test --test gate_pipeline pipeline_commit_with_receipt"
     );
     assert_eq!(
-        committed.event_id, 12345,
+        committed.event_id(),
+        12345,
         "PIPELINE COMMIT EVENT_ID: committed event_id should match what the closure returns.\n\
          Investigate: src/pipeline/mod.rs Pipeline::commit.\n\
          Common causes: commit closure result not propagated into Committed struct.\n\
@@ -482,51 +480,35 @@ fn proposal_map_transforms_payload() {
 }
 
 #[test]
-fn committed_serde_round_trip() {
-    let committed = batpak::pipeline::Committed {
-        payload: "test".to_string(),
-        event_id: 0xDEAD_BEEF_CAFE_BABE_1234_5678_9ABC_DEF0,
-        sequence: 42,
-        hash: [0xAA; 32],
-    };
+fn committed_accessors_expose_only_read_only_metadata() {
+    let committed = batpak::pipeline::Pipeline::<()>::commit_bypass(
+        batpak::pipeline::Pipeline::<()>::bypass(
+            Proposal::new("test".to_string()),
+            &STRAGGLERS_TEST_BYPASS,
+        ),
+        |_| {
+            Ok::<_, String>(CommitMetadata::new(
+                0xDEAD_BEEF_CAFE_BABE_1234_5678_9ABC_DEF0,
+                42,
+                [0xAA; 32],
+            ))
+        },
+    )
+    .expect("commit");
 
-    // Serialize to msgpack then back — exercises u128_bytes wire format
-    let bytes = rmp_serde::to_vec_named(&committed).expect("serialize Committed");
-    let decoded: batpak::pipeline::Committed<String> =
-        rmp_serde::from_slice(&bytes).expect("deserialize Committed");
-
     assert_eq!(
-        decoded.payload, "test",
-        "PROPERTY: Committed payload must survive msgpack serialization round-trip unchanged.\n\
-         Investigate: src/pipeline/mod.rs Committed Serialize/Deserialize impls.\n\
-         Common causes: payload field not tagged with serde attribute, or msgpack \
-         encoding changing string encoding between versions.\n\
-         Run: cargo test --test gate_pipeline committed_serde_round_trip"
+        committed.payload(),
+        &"test".to_string(),
+        "PROPERTY: Committed payload accessor must expose the original payload without making the proof forgeable.\n\
+         Investigate: src/pipeline/mod.rs Committed::payload()."
     );
     assert_eq!(
-        decoded.event_id, 0xDEAD_BEEF_CAFE_BABE_1234_5678_9ABC_DEF0,
-        "PROPERTY: Committed event_id must round-trip through u128_bytes wire format without loss.\n\
-         Investigate: src/pipeline/mod.rs src/wire.rs u128_bytes serde helper.\n\
-         Common causes: u128_bytes encoding as little-endian but decoding as big-endian, \
-         or serde_as attribute missing on the event_id field.\n\
-         Run: cargo test --test gate_pipeline committed_serde_round_trip"
+        committed.event_id(),
+        0xDEAD_BEEF_CAFE_BABE_1234_5678_9ABC_DEF0,
+        "PROPERTY: Committed event_id accessor must surface persisted metadata."
     );
-    assert_eq!(
-        decoded.sequence, 42,
-        "PROPERTY: Committed sequence must survive msgpack serialization round-trip unchanged.\n\
-         Investigate: src/pipeline/mod.rs Committed Serialize/Deserialize impls.\n\
-         Common causes: sequence field not included in serialization, or deserialized \
-         into wrong numeric type causing truncation.\n\
-         Run: cargo test --test gate_pipeline committed_serde_round_trip"
-    );
-    assert_eq!(
-        decoded.hash, [0xAA; 32],
-        "PROPERTY: Committed hash must survive msgpack serialization round-trip unchanged.\n\
-         Investigate: src/pipeline/mod.rs Committed Serialize/Deserialize impls.\n\
-         Common causes: hash field serialized as a sequence vs bytes causing length mismatch, \
-         or serde_bytes attribute missing from the hash field.\n\
-         Run: cargo test --test gate_pipeline committed_serde_round_trip"
-    );
+    assert_eq!(committed.sequence(), 42);
+    assert_eq!(committed.hash(), &[0xAA; 32]);
 }
 
 #[test]

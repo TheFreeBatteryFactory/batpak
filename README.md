@@ -1,192 +1,128 @@
 # batpak
 
-Sync-first event sourcing for Rust: append-only log, causal metadata, policy gates, projections, subscriptions, and typestate-friendly workflows without an async runtime.
-
-This README is the primary entrypoint. If you only read one document, read
-this one. The rest of the docs should exist to go deeper, not to replace the
-front door.
-
-## Start In 5 Minutes
-
-```bash
-cargo xtask setup --install-tools
-cargo run --example quickstart
-```
-
-If you just want the crate:
-
-```bash
-cargo add batpak
-```
-
-```rust
-use batpak::prelude::*;
-
-let config = StoreConfig::new("./batpak-data")
-    .with_sync_every_n_events(100)
-    .with_sync_mode(SyncMode::SyncData);
-let store = Store::open(config)?;
-
-let coord = Coordinate::new("player:alice", "room:dungeon")?;
-let kind = EventKind::custom(0xF, 1);
-let receipt = store.append(&coord, kind, &serde_json::json!({"x": 10, "y": 20}))?;
-println!("stored {} at {}", receipt.event_id, receipt.sequence);
-
-store.close()?;
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
-
-## Pick Your Lane
-
-- User lane: `cargo build`, `cargo test`, `cargo run --example quickstart`
-- Maintainer lane: `cargo xtask doctor`, `cargo xtask install-hooks`, `cargo xtask ci`, `cargo xtask preflight` (gold standard before pushing; one canonical devcontainer proof session)
-- Perf lane: `cargo xtask bench --surface neutral|native [--save|--compare|--compile]`
-- Coverage lane: `cargo xtask cover [--ci|--json|--threshold N]`
+Sync-first event sourcing for Rust: append-only segments, causal metadata, policy gates,
+and typed projections — no async runtime.
 
 ## Mental Model
 
-Think about batpak in five layers:
-
-- `Coordinate`: who and where
-- `Event`: what happened
-- `Gate` / `Receipt`: may this happen
-- `Pipeline`: approve then commit
-- `Store`: persist, query, replay, subscribe
-
-The runtime stays sync on purpose. Async integration happens around it, not
-inside it.
-
-## What You Get
-
-- Append-only segment store with CRC32 integrity
-- Optional Blake3 hash chains
-- Causal metadata and region queries
-- **Atomic batch append**: multi-event commit with two-phase markers, crash recovery, and intra-batch causation
-- Fault injection framework (`dangerous-test-hooks` feature) for chaos testing batch and write paths
-- Gate / receipt workflow for policy enforcement
-- Event-sourced projections with optional native file-backed cache
-- Optional append-time DAG `lane`/`depth` hints without giving up writer-owned HLC wall time, counter, or sequence
-- `subscribe_lossy` / `cursor_guaranteed` delivery names that say what they do
-- `close(self) -> Closed` for explicit durable shutdown; `Drop` is best-effort only
-- Query/read operations yield `StoredEvent<serde_json::Value>` at the storage boundary
-
-## Projection Lanes
-
-`JsonValueInput` is the ergonomic default replay lane. Start there when you want
-the clearest projection code and easiest onboarding.
-
-`RawMsgpackInput` is the performance lane. Use it when replay cost matters and
-you want to deserialize directly from MessagePack bytes inside the projection.
-
-- `cargo run --example event_sourced_counter` shows the default JSON lane
-- `cargo run --example raw_projection_counter` shows the raw replay lane
-
-The current `benches/replay_lanes.rs` witness surface shows raw replay ahead of
-`JsonValueInput` on the 1k-event counter-shaped workload in the current tree, so
-raw replay should be treated as real engineering value, not as an obscure
-trick. Treat that as a benchmark witness, not a timeless guarantee.
-
-## Storage Upgrade Notes
-
-Recent unreleased work changed the cold-start artifact formats together so
-append-time DAG `lane`/`depth` hints survive every restore path:
-
-- SIDX footers now use `SDX2`
-- checkpoints are now v4
-- mmap index snapshots are now v3
-
-Compatibility stays additive:
-
-- old SIDX footers are ignored and reopen falls back to scan
-- checkpoint v3 loads with root `lane=0` / `depth=0`
-- mmap v1/v2 loads with root `lane=0` / `depth=0`
-
-The full operator procedure for upgrades, mixed-version fleets, and rollback
-posture lives in [`REFERENCE.md`](REFERENCE.md).
-
-Caller control stays intentionally narrow: `AppendPositionHint` only supplies
-`lane` and `depth`. The writer still owns `wall_ms`, `counter`, and `sequence`.
-
-## Docs
-
-Keep the live docs small and root-first:
-
-- [GUIDE.md](GUIDE.md) for workflows and usage patterns
-- [REFERENCE.md](REFERENCE.md) for architecture, tuning, topology, replay lanes, and invariants
-- [CONTRIBUTING.md](CONTRIBUTING.md) for repo workflow
-- [CHANGELOG.md](CHANGELOG.md) for release history
-- [AGENTS.md](AGENTS.md) for agent-facing repo guidance
-
-The goal is one real front door plus a small handful of actual docs, not a
-maze of half-authoritative pages.
-
-## Features
-
-- `blake3` (default): hash-chain verification
-- `dangerous-test-hooks`: explicit test-only runtime hooks
-
-## Canonical Commands
-
-```bash
-cargo xtask doctor
-cargo xtask ci
-cargo xtask docs
-cargo xtask preflight    # CI + coverage + docs in one canonical devcontainer session
-cargo xtask perf-gates   # catastrophic-regression perf guards; interpret on stable hardware
-cargo xtask cover        # coverage feedback with retained artifacts under target/xtask-cover/last-run
+```
+coordinate → event → guard → pipeline → store
 ```
 
-`just` remains available as shorthand, but `cargo xtask` is the canonical command surface.
+**coordinate**: an (entity, scope) pair. Every event lives at a coordinate.
 
-## Dev Speed Setup
+**event**: a typed payload sealed with a UUID v7 ID, HLC timestamp, per-entity clock, and
+Blake3 hash chain link.
 
-batpak keeps repository-tracked Cargo config portable. Put machine-specific
-speedups in `~/.cargo/config.toml`, not in this repo. Cargo does not
-automatically load a repo-local `.cargo/config.local.toml`.
+**guard**: a `Gate` evaluates a `Proposal` and issues a `Receipt` or `Denial`. A `GateSet`
+composes gates. Evaluation is fail-fast by default.
 
-Recommended tools:
+**pipeline**: `Pipeline::evaluate` runs the gates; `Pipeline::commit` persists through a
+caller-supplied closure. The `Receipt` is the unforgeable proof gates passed.
 
-```bash
-cargo install cargo-nextest cargo-llvm-cov sccache
-rustup component add llvm-tools-preview
+**store**: the persistence engine — append-only segments, in-memory index, background
+writer thread, projections, subscriptions.
+
+## One Event Through The System
+
+`store.append(&coord, kind, &payload)` serializes the payload to MessagePack, wraps it in
+an `Event<Vec<u8>>`, and sends it as a `WriterCommand::Append` through a one-shot flume
+channel. The calling thread parks waiting for the writer's response.
+
+The writer thread receives the command and calls `WriterState::handle_append()`, which
+executes a ten-step commit protocol: reads the entity's latest `IndexEntry` from the
+in-memory DashMap; runs CAS and idempotency checks; computes `prev_hash` from the latest
+entry, or uses the genesis `[0u8; 32]` for first-ever events; advances the per-entity
+clock; sets the HLC wall-clock position monotonically; computes the Blake3 event hash
+chained to `prev_hash`; encodes the wire frame as `[len:u32 BE][crc32:u32 BE][MessagePack
+FramePayload]`; rotates the active `.fbat` segment if the size threshold is crossed, sealing
+it and writing the SIDX footer; writes the frame to the active segment; and inserts the
+`IndexEntry` into all index structures, calls `index.publish(global_seq + 1)` to make it
+visible to readers, then broadcasts a `Notification` to subscribers.
+
+The event now lives in three index structures: a per-entity `BTreeMap<ClockKey,
+Arc<IndexEntry>>` ordered by HLC then clock, an O(1) `by_id` DashMap, and the `latest`
+chain head. Readers access it via `store.get(id)` (index lookup then disk read),
+`store.query(&region)` (index scan, no disk I/O), or `store.stream(entity)` (BTreeMap
+range scan, no disk I/O).
+
+## Store Internals At A Glance
+
+Seven subdirectories organize the store by concern. Flat files alongside them
+(`append.rs`, `config.rs`, `error.rs`, `lifecycle.rs`, `stats.rs`,
+`hidden_ranges.rs`) hold types that belong to the store root and don't fit
+neatly into one subdirectory.
+
+```
+store/
+├── write/        writer thread, staging, fanout, submit/tickets/outbox/fences
+├── segment/      on-disk .fbat frame format and SIDX footer
+├── index/        in-memory query engine: streams, by_id, columnar overlays, interner
+├── cold_start/   open/restore: mmap → checkpoint → SIDX rebuild → frame scan
+├── projection/   state reconstruction: replay, cache, watcher
+├── ancestry/     causal graph walking: by hash chain or by HLC clock
+└── delivery/     push subscriptions (lossy) and pull cursors (guaranteed)
 ```
 
-Recommended `~/.cargo/config.toml` shape:
+## Public Surface
 
-```toml
-[build]
-rustc-wrapper = "sccache"
+**Append** — `append`, `append_reaction`, `append_batch`, `append_with_options`,
+`apply_transition`. Each returns an `AppendReceipt`. Non-blocking variants via `submit`
+return an `AppendTicket` you `.wait()` later.
 
-[target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "target-cpu=native"]
-```
+**Query** — `stream(entity)`, `by_scope(scope)`, `by_fact(kind)`, `query(&region)`,
+`get(event_id)`, `walk_ancestors(id, limit)`. All return from the in-memory index; only
+`get` and `walk_ancestors` read from disk.
 
-If you want to try `mold`, benchmark it against the current linker on this
-machine before adopting it:
+**Projection** — `project::<T>(entity, &freshness)` folds events into any type
+implementing `EventSourced`. `project_if_changed` skips work when nothing changed.
+`watch_projection` returns a `ProjectionWatcher` that re-projects on subscription events.
+Two replay lanes: `JsonValueInput` (default, ergonomic) and `RawMsgpackInput` (perf).
 
-```toml
-[target.x86_64-unknown-linux-gnu]
-linker = "clang"
-rustflags = ["-C", "link-arg=-fuse-ld=mold", "-C", "target-cpu=native"]
-```
+**Delivery** — `subscribe_lossy(&region)` for push-based broadcast (may drop under load).
+`cursor_guaranteed(&region)` for pull-based ordered delivery (never drops). `react_loop`
+spawns a background thread that subscribes, calls user logic, and appends derived events.
 
-Daily-loop commands:
+**Control plane** — `submit`/`try_submit` for non-blocking fire-and-ticket. `outbox()` for
+staged batch assembly. `begin_visibility_fence()` for atomic write groups. `open`, `close`,
+`sync`, `snapshot`, `compact` for lifecycle. `stats()` and `diagnostics()` for
+observability.
 
-```bash
-cargo nextest run
-cargo nextest run --all-features
-cargo llvm-cov nextest
-cargo build --timings
-```
+## Commands
 
-## Docs Policy
+| Command | What it does |
+|---|---|
+| `cargo xtask doctor` | Check tools and env |
+| `cargo xtask ci` | Full test + lint + structural checks |
+| `cargo xtask cover` | Coverage with retained artifacts |
+| `cargo xtask bench --surface neutral` | Criterion benchmark suite |
+| `cargo xtask perf-gates` | Catastrophic-regression guards (stable hardware only) |
+| `cargo xtask preflight` | CI + coverage + docs in one session (gold standard before push) |
+| `cargo xtask docs` | Build and check documentation |
+| `cargo xtask release --dry-run` | Release preflight |
 
-- Keep the README as the main human and agent entrypoint.
-- Keep `GUIDE.md` for workflows and usage.
-- Keep `REFERENCE.md` for technical truth that would bloat the README.
+## What This Is Not
 
-That gives us one smart front door plus a few deliberate root-level docs,
-instead of a sprawl or a single unreadable wall of text.
+**No async runtime in production.** No tokio, no async-std, no futures in `[dependencies]`.
+Async callers integrate at the edges via `spawn_blocking` or flume's `recv_async`.
+
+**No product or domain concepts.** No users, orders, accounts, or payments in the library.
+Only coordinates, events, gates, pipelines, and the store.
+
+**No external database substrate.** Segments are native coordinate-addressed append logs.
+No LMDB, no redb, no SQLite.
+
+**No concurrent writers.** One writer thread owns commit order. Multiple readers are fine.
+Two processes sharing a store directory will corrupt it.
+
+**No per-entry integrity.** Each frame carries a CRC32. Cold-start artifacts carry a
+full-file CRC. There is no per-byte or per-field checksum beyond that.
+
+**No mixed-version concurrent operation.** Stop all writers before upgrading. Different
+binary versions must not share an open store simultaneously.
+
+See [GUIDE.md](GUIDE.md) for human-first workflows and usage patterns. See
+[REFERENCE.md](REFERENCE.md) for the full technical reference and invariant catalog.
 
 ## License
 

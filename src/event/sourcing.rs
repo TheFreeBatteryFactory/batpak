@@ -66,8 +66,9 @@ pub trait EventSourced: Sized {
     /// Replay decode mode used for this projection.
     type Input: ProjectionInput;
 
-    /// Reconstructs state by folding over a slice of events; returns `None`
-    /// if the slice is empty or invalid.
+    /// Reconstructs state by folding over a slice of events.
+    ///
+    /// `None` means the stream is valid but produces no state.
     fn from_events(events: &[ProjectionEvent<Self>]) -> Option<Self>;
     /// Advances state by incorporating a single event.
     fn apply_event(&mut self, event: &ProjectionEvent<Self>);
@@ -88,9 +89,13 @@ pub trait EventSourced: Sized {
     /// cached state at a watermark and calling `apply_event()` only for events
     /// newer than that watermark, instead of replaying from scratch.
     ///
-    /// Opt-in — `false` by default. Only set to `true` if `from_events()` is a
-    /// pure fold over `apply_event()` (i.e., the incremental result is identical
-    /// to the full-replay result for any suffix of events).
+    /// Opt-in — `false` by default.
+    ///
+    /// Only set to `true` if `from_events()` is a pure fold over
+    /// `apply_event()` and `apply_event()` is infallible for every event the
+    /// projection accepts. The incremental replay path has no separate error
+    /// channel; violating this contract makes cached incremental replay diverge
+    /// from full replay.
     fn supports_incremental_apply() -> bool {
         false
     }

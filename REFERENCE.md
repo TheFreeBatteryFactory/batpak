@@ -74,15 +74,15 @@ The store is sync by design. Async integration belongs around it, not inside it.
 - `src/coordinate/mod.rs`: `Coordinate`, `Region`, `KindFilter`
 - `src/event/`: event model and replay-lane types
 - `src/store/config.rs`: `StoreConfig`, `IndexTopology`
-- `src/store/contracts.rs`: `AppendOptions`, `AppendPositionHint`, batch contracts
-- `src/store/control_plane.rs`: tickets, outbox, visibility fence
-- `src/store/fanout.rs`: notification fanout and internal committed-event envelopes
-- `src/store/writer.rs`: writer thread and commit flow
-- `src/store/staging.rs`: shared committed-event staging packets
-- `src/store/index.rs`: in-memory index and visibility gate
-- `src/store/columnar.rs`: base AoS plus optional overlays
-- `src/store/projection_flow.rs`: replay, incremental apply, cache path
-- `src/store/watch.rs`: projection watcher
+- `src/store/append.rs`: `AppendOptions`, `AppendPositionHint`, batch contracts
+- `src/store/write/control.rs`: tickets, outbox, visibility fence
+- `src/store/write/fanout.rs`: notification fanout and internal committed-event envelopes
+- `src/store/write/writer.rs`: writer thread and commit flow
+- `src/store/write/staging.rs`: shared committed-event staging packets
+- `src/store/index/mod.rs`: in-memory index and visibility gate
+- `src/store/index/columnar.rs`: base AoS plus optional overlays
+- `src/store/projection/flow.rs`: replay, incremental apply, cache path
+- `src/store/projection/watch.rs`: projection watcher
 - `tools/integrity/src/architecture_lints.rs`: parser-backed truth-surface checks
 - `tools/xtask/src/main.rs`: CLI entrypoint and dispatch only
 - `tools/xtask/src/bench.rs`: benchmark surface and compile orchestration

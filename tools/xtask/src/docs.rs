@@ -119,7 +119,18 @@ fn render_markdown_page(title: &str, markdown: &str) -> String {
 fn rewrite_root_doc_links(markdown: &str) -> String {
     let mut rewritten = markdown.to_string();
     for doc in ROOT_DOCS {
-        rewritten = rewritten.replace(doc.source_path, doc.output_name);
+        rewritten = rewritten.replace(
+            &format!("]({})", doc.source_path),
+            &format!("]({})", doc.output_name),
+        );
+        rewritten = rewritten.replace(
+            &format!("]: {}", doc.source_path),
+            &format!("]: {}", doc.output_name),
+        );
+        rewritten = rewritten.replace(
+            &format!("]: <{}>", doc.source_path),
+            &format!("]: <{}>", doc.output_name),
+        );
     }
     rewritten
 }

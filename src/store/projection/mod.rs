@@ -1,3 +1,6 @@
+pub(crate) mod flow;
+pub(crate) mod watch;
+
 use crate::store::StoreError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

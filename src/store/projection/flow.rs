@@ -1,9 +1,9 @@
 use crate::event::{Event, EventSourced, JsonValueInput, ProjectionInput, RawMsgpackInput};
-use crate::store::columnar::CachedProjectionSlot;
 use crate::store::config::duration_micros;
+use crate::store::index::columnar::CachedProjectionSlot;
 use crate::store::index::DiskPos;
 use crate::store::index::ProjectionReplayPlan;
-use crate::store::{projection, Freshness, Store, StoreError};
+use crate::store::{Freshness, Store, StoreError};
 use std::any::TypeId;
 use std::hash::{Hash, Hasher};
 
@@ -170,26 +170,26 @@ fn compute_strategy(
 
 pub(crate) trait ReplayInput: ProjectionInput {
     fn read_batch(
-        reader: &crate::store::reader::Reader,
+        reader: &crate::store::segment::scan::Reader,
         positions: &[&DiskPos],
     ) -> Result<Vec<Event<Self::Payload>>, StoreError>;
 
     fn read_one(
-        reader: &crate::store::reader::Reader,
+        reader: &crate::store::segment::scan::Reader,
         pos: &DiskPos,
     ) -> Result<Event<Self::Payload>, StoreError>;
 }
 
 impl ReplayInput for JsonValueInput {
     fn read_batch(
-        reader: &crate::store::reader::Reader,
+        reader: &crate::store::segment::scan::Reader,
         positions: &[&DiskPos],
     ) -> Result<Vec<Event<Self::Payload>>, StoreError> {
         reader.read_events_batch(positions)
     }
 
     fn read_one(
-        reader: &crate::store::reader::Reader,
+        reader: &crate::store::segment::scan::Reader,
         pos: &DiskPos,
     ) -> Result<Event<Self::Payload>, StoreError> {
         reader.read_event_only(pos)
@@ -198,14 +198,14 @@ impl ReplayInput for JsonValueInput {
 
 impl ReplayInput for RawMsgpackInput {
     fn read_batch(
-        reader: &crate::store::reader::Reader,
+        reader: &crate::store::segment::scan::Reader,
         positions: &[&DiskPos],
     ) -> Result<Vec<Event<Self::Payload>>, StoreError> {
         reader.read_raw_events_batch(positions)
     }
 
     fn read_one(
-        reader: &crate::store::reader::Reader,
+        reader: &crate::store::segment::scan::Reader,
         pos: &DiskPos,
     ) -> Result<Event<Self::Payload>, StoreError> {
         reader.read_event_raw_only(pos)
@@ -338,7 +338,7 @@ where
             // Fire prefetch early so I/O overlaps with group-local CPU work.
             let t_prefetch = std::time::Instant::now();
             if store.cache.capabilities().supports_prefetch {
-                let predicted_meta = projection::CacheMeta {
+                let predicted_meta = super::CacheMeta {
                     watermark: replay.watermark,
                     cached_at_us: replay.cached_at_us,
                 };
@@ -387,7 +387,7 @@ where
     let dispatch = match preparation {
         ProjectionPreparation::Empty => ProjectionDispatch::Empty,
         ProjectionPreparation::Planned(prepared) => prepared.dispatch::<T>(
-            store.config.index.incremental_projection,
+            store.runtime.incremental_projection,
             store.cache.capabilities().is_noop,
         ),
     };
@@ -439,33 +439,27 @@ where
         ProjectionDispatch::GroupLocalIncremental { slot, replay } => {
             match serde_json::from_slice::<T>(&slot.bytes) {
                 Ok(mut cached_state) => {
-                    let cached_watermark = slot.watermark;
-                    for item in replay
-                        .plan
-                        .items
-                        .iter()
-                        .filter(|i| i.global_sequence > cached_watermark)
-                    {
-                        let event = I::read_one(&store.reader, &item.disk_pos)?;
-                        cached_state.apply_event(&event);
-                    }
-                    // Store back to both caches.
-                    if let Ok(new_bytes) = serde_json::to_vec(&cached_state) {
-                        let new_meta = projection::CacheMeta {
-                            watermark: replay.watermark,
-                            cached_at_us: replay.cached_at_us,
-                        };
-                        if let Err(e) = store.cache.put(&replay.cache_key, &new_bytes, new_meta) {
-                            tracing::warn!("incremental cache put failed: {e}");
-                        }
-                        let _ = store.index.store_cached_projection(
+                    apply_incremental_events::<T, I, State>(
+                        store,
+                        &ReplayExecution {
                             entity,
-                            replay.type_id,
-                            new_bytes,
-                            replay.watermark,
-                            replay.cached_at_us,
-                        );
-                    }
+                            freshness,
+                            replay: &replay,
+                            started_at: t_start,
+                        },
+                        &mut cached_state,
+                        slot.watermark,
+                    )?;
+                    store_projection_value(
+                        store,
+                        &ReplayExecution {
+                            entity,
+                            freshness,
+                            replay: &replay,
+                            started_at: t_start,
+                        },
+                        &cached_state,
+                    );
                     if let Some(t) = timings.as_deref_mut() {
                         t.total_us = duration_micros(t_start.elapsed());
                     }
@@ -549,43 +543,16 @@ where
                 }
             };
 
-            if !is_fresh
-                && T::supports_incremental_apply()
-                && store.config.index.incremental_projection
+            if !is_fresh && T::supports_incremental_apply() && store.runtime.incremental_projection
             {
-                let cached_watermark = meta.watermark;
-                let delta_entries: Vec<_> = execution
-                    .replay
-                    .plan
-                    .items
-                    .iter()
-                    .filter(|item| item.global_sequence > cached_watermark)
-                    .collect();
                 if let Ok(mut cached_state) = serde_json::from_slice::<T>(&bytes) {
-                    for de in &delta_entries {
-                        let event = I::read_one(&store.reader, &de.disk_pos)?;
-                        cached_state.apply_event(&event);
-                    }
-                    if let Ok(new_bytes) = serde_json::to_vec(&cached_state) {
-                        let new_meta = projection::CacheMeta {
-                            watermark: execution.replay.watermark,
-                            cached_at_us: execution.replay.cached_at_us,
-                        };
-                        if let Err(e) =
-                            store
-                                .cache
-                                .put(&execution.replay.cache_key, &new_bytes, new_meta)
-                        {
-                            tracing::warn!("incremental cache put failed: {e}");
-                        }
-                        let _ = store.index.store_cached_projection(
-                            execution.entity,
-                            execution.replay.type_id,
-                            new_bytes,
-                            execution.replay.watermark,
-                            execution.replay.cached_at_us,
-                        );
-                    }
+                    apply_incremental_events::<T, I, State>(
+                        store,
+                        &execution,
+                        &mut cached_state,
+                        meta.watermark,
+                    )?;
+                    store_projection_value(store, &execution, &cached_state);
                     if let Some(t) = timings.as_deref_mut() {
                         t.total_us = duration_micros(execution.started_at.elapsed());
                     }
@@ -682,22 +649,7 @@ where
     // Cache store-back
     let t_store = std::time::Instant::now();
     if let Some(ref value) = result {
-        if let Ok(bytes) = serde_json::to_vec(value) {
-            let meta = projection::CacheMeta {
-                watermark: execution.replay.watermark,
-                cached_at_us: execution.replay.cached_at_us,
-            };
-            if let Err(error) = store.cache.put(&execution.replay.cache_key, &bytes, meta) {
-                tracing::warn!("cache put failed (non-fatal): {error}");
-            }
-            let _ = store.index.store_cached_projection(
-                execution.entity,
-                execution.replay.type_id,
-                bytes,
-                execution.replay.watermark,
-                execution.replay.cached_at_us,
-            );
-        }
+        store_projection_value(store, &execution, value);
     }
     if let Some(t) = timings.as_deref_mut() {
         t.cache_store_us = duration_micros(t_store.elapsed());
@@ -705,6 +657,54 @@ where
     }
 
     Ok(result)
+}
+
+fn apply_incremental_events<T, I, State>(
+    store: &Store<State>,
+    execution: &ReplayExecution<'_>,
+    cached_state: &mut T,
+    cached_watermark: u64,
+) -> Result<(), StoreError>
+where
+    T: EventSourced + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    I: ReplayInput<Payload = <T::Input as ProjectionInput>::Payload>,
+{
+    for item in execution
+        .replay
+        .plan
+        .items
+        .iter()
+        .filter(|item| item.global_sequence > cached_watermark)
+    {
+        let event = I::read_one(&store.reader, &item.disk_pos)?;
+        cached_state.apply_event(&event);
+    }
+    Ok(())
+}
+
+fn store_projection_value<T, State>(
+    store: &Store<State>,
+    execution: &ReplayExecution<'_>,
+    value: &T,
+) where
+    T: serde::Serialize,
+{
+    if let Ok(bytes) = serde_json::to_vec(value) {
+        let meta = super::CacheMeta {
+            watermark: execution.replay.watermark,
+            cached_at_us: execution.replay.cached_at_us,
+        };
+        if let Err(error) = store.cache.put(&execution.replay.cache_key, &bytes, meta) {
+            tracing::warn!("cache put failed (non-fatal): {error}");
+        }
+        let _ = store.index.store_cached_projection(
+            execution.entity,
+            execution.replay.type_id,
+            bytes,
+            execution.replay.watermark,
+            execution.replay.cached_at_us,
+        );
+    }
 }
 
 #[cfg(test)]

@@ -126,6 +126,13 @@ impl PartialOrd for DagPosition {
         if self.lane != other.lane || self.depth != other.depth {
             return None; // different lanes or depths are incomparable
         }
-        Some(self.sequence.cmp(&other.sequence))
+        let sequence_order = self.sequence.cmp(&other.sequence);
+        if sequence_order != std::cmp::Ordering::Equal {
+            return Some(sequence_order);
+        }
+        if self.wall_ms == other.wall_ms && self.counter == other.counter {
+            return Some(std::cmp::Ordering::Equal);
+        }
+        None
     }
 }

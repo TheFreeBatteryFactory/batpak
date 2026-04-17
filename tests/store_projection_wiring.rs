@@ -92,7 +92,7 @@ fn project_calls_prefetch_only_when_supported() {
     assert!(
         prefetch_called.load(Ordering::SeqCst),
         "PROPERTY: Store::project must call cache.prefetch() when the cache advertises prefetch support.\n\
-         Investigate: src/store/mod.rs project(), src/store/projection.rs CacheCapabilities."
+         Investigate: src/store/mod.rs project(), src/store/projection/mod.rs CacheCapabilities."
     );
 
     store.close().expect("close");

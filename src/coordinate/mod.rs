@@ -201,7 +201,7 @@ impl Region {
     }
 
     /// Match against individual fields — avoids circular dep on store::Notification.
-    /// Called by Subscription::recv() to filter events. [FILE:src/store/subscription.rs]
+    /// Called by Subscription::recv() to filter events. [FILE:src/store/delivery/subscription.rs]
     pub fn matches_event(&self, entity: &str, scope: &str, kind: EventKind) -> bool {
         if let Some(ref prefix) = self.entity_prefix {
             if !entity.starts_with(prefix.as_ref()) {

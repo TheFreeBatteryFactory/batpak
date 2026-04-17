@@ -69,7 +69,7 @@ fn partial_batch_crash_idempotent_retry() {
         "PROPERTY: idempotent retry must produce exactly 15 unique events (0..15).\n\
          Keys 5..10 were duplicates from phase 1 and must be deduplicated.\n\
          Got {} events.\n\
-         Investigate: src/store/writer.rs idempotency check in handle_append.",
+         Investigate: src/store/write/writer.rs idempotency check in handle_append.",
         events.len()
     );
     store2.close().expect("close");

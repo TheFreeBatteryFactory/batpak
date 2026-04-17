@@ -95,7 +95,7 @@ impl Gate<FuzzChaosContext> for FuzzThroughputGate {
                 "fuzz_throughput",
                 format!(
                     "frame_decode fuzz {:.0} ops/sec < min {:.0}. \
-                    Investigate: src/store/segment.rs frame_decode hot path.",
+                    Investigate: src/store/segment/mod.rs frame_decode hot path.",
                     ctx.frame_decode_fuzz_ops_per_sec, self.min_frame_ops
                 ),
             ));
@@ -137,7 +137,7 @@ impl Gate<FuzzChaosContext> for ChaosWriteGate {
                 "chaos_write_resilience",
                 format!(
                     "{} errors under concurrent write stress. \
-                    Investigate: src/store/writer.rs lock ordering, channel capacity.",
+                    Investigate: src/store/write/writer.rs lock ordering, channel capacity.",
                     ctx.concurrent_write_errors
                 ),
             ));
@@ -147,7 +147,7 @@ impl Gate<FuzzChaosContext> for ChaosWriteGate {
                 "chaos_write_resilience",
                 format!(
                     "Concurrent write throughput {:.0} events/sec < min {:.0}. \
-                    Investigate: src/store/writer.rs contention.",
+                    Investigate: src/store/write/writer.rs contention.",
                     ctx.concurrent_write_throughput, self.min_throughput
                 ),
             ));
@@ -166,14 +166,14 @@ impl Gate<FuzzChaosContext> for ChaosIntegrityGate {
             return Err(Denial::new(
                 "chaos_data_integrity",
                 "CAS contention produced incorrect results. \
-                 Investigate: src/store/writer.rs CAS under entity lock.",
+                 Investigate: src/store/write/writer.rs CAS under entity lock.",
             ));
         }
         if !ctx.data_integrity_after_corruption {
             return Err(Denial::new(
                 "chaos_data_integrity",
                 "Store panicked or produced incorrect data after segment corruption. \
-                 Investigate: src/store/segment.rs frame_decode, CRC validation.",
+                 Investigate: src/store/segment/mod.rs frame_decode, CRC validation.",
             ));
         }
         if ctx.segment_rotation_data_loss > 0 {
@@ -181,7 +181,7 @@ impl Gate<FuzzChaosContext> for ChaosIntegrityGate {
                 "chaos_data_integrity",
                 format!(
                     "{} events lost during rapid segment rotation. \
-                    Investigate: src/store/writer.rs STEP 7 rotation.",
+                    Investigate: src/store/write/writer.rs STEP 7 rotation.",
                     ctx.segment_rotation_data_loss
                 ),
             ));
@@ -190,7 +190,7 @@ impl Gate<FuzzChaosContext> for ChaosIntegrityGate {
             return Err(Denial::new(
                 "chaos_data_integrity",
                 "Cursor missed events or delivered duplicates. \
-                 Investigate: src/store/cursor.rs poll() position tracking.",
+                 Investigate: src/store/delivery/cursor.rs poll() position tracking.",
             ));
         }
         Ok(())
@@ -210,7 +210,7 @@ impl Gate<FuzzChaosContext> for ChaosSubscriptionGate {
                 "chaos_subscription_health",
                 format!(
                     "Subscription delivery rate {:.1}% < min {:.1}%. \
-                    Investigate: src/store/writer.rs broadcast, channel capacity.",
+                    Investigate: src/store/write/writer.rs broadcast, channel capacity.",
                     ctx.subscription_delivery_rate * 100.0,
                     self.min_delivery_rate * 100.0
                 ),
@@ -600,7 +600,7 @@ fn run_extended_fuzz_chaos() {
     assert_eq!(
         total_entries, total_ok as usize,
         "EXTENDED CHAOS: index has {total_entries} entries but {total_ok} events written. \
-         Data loss detected. Investigate: src/store/writer.rs + src/store/index.rs."
+         Data loss detected. Investigate: src/store/write/writer.rs + src/store/index/mod.rs."
     );
 
     // Close and reopen to verify durability (cold-start verification).
@@ -622,7 +622,7 @@ fn run_extended_fuzz_chaos() {
         cold_entries, total_ok as usize,
         "COLD START DATA LOSS: wrote {total_ok} events, but only {cold_entries} survived cold start.\n\
          This means events were in-memory but not durable on disk.\n\
-         Investigate: src/store/writer.rs sync paths, segment rotation durability.\n\
+         Investigate: src/store/write/writer.rs sync paths, segment rotation durability.\n\
          Run: cargo test --test fuzz_chaos_feedback"
     );
     store2.close().expect("close cold start store");
@@ -647,7 +647,7 @@ fn run_extended_fuzz_chaos() {
                     "ext_frame_throughput",
                     format!(
                         "Extended frame fuzz {:.0} ops/sec < 50K. \
-                    Investigate: src/store/segment.rs",
+                    Investigate: src/store/segment/mod.rs",
                         ctx.frame_ops
                     ),
                 ))
@@ -687,7 +687,7 @@ fn run_extended_fuzz_chaos() {
                     "ext_store_throughput",
                     format!(
                         "Extended store throughput {:.0} events/sec < 1K. \
-                    Investigate: src/store/writer.rs",
+                    Investigate: src/store/write/writer.rs",
                         ctx.store_throughput
                     ),
                 ))
@@ -707,7 +707,7 @@ fn run_extended_fuzz_chaos() {
                     "ext_zero_data_loss",
                     format!(
                         "{} events lost in extended chaos. \
-                    Investigate: src/store/writer.rs + src/store/index.rs",
+                    Investigate: src/store/write/writer.rs + src/store/index/mod.rs",
                         ctx.data_loss
                     ),
                 ))

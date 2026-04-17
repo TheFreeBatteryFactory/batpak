@@ -91,7 +91,7 @@ fn chaos_corrupted_segment_bytes() {
     assert!(
         !segments.is_empty(),
         "CHAOS PROPERTY: writing 20 events must produce at least one .fbat segment file.\n\
-         Investigate: src/store/segment.rs open_writer, src/store/writer.rs STEP 7 rotation.\n\
+         Investigate: src/store/segment/mod.rs open_writer, src/store/write/writer.rs STEP 7 rotation.\n\
          Common causes: segment file extension mismatch, data_dir not flushed before read_dir.\n\
          Run: cargo test --test chaos_testing chaos_corrupted_segment_bytes"
     );
@@ -149,7 +149,7 @@ fn chaos_corrupted_segment_bytes() {
                      CrcMismatch/CorruptSegment/Serialization/Io/Coordinate error, \
                      but got variant: {e}\n\
                      Investigate: src/store/mod.rs Store::open, \
-                     src/store/segment.rs frame_decode error mapping.\n\
+                     src/store/segment/mod.rs frame_decode error mapping.\n\
                      Common causes: new error variant added without updating open() \
                      match arm, raw unwrap() escaping as opaque error.\n\
                      Run: cargo test --test chaos_testing chaos_corrupted_segment_bytes"
@@ -220,14 +220,14 @@ fn chaos_concurrent_writer_stress() {
     assert!(
         total_ok > 0,
         "CHAOS PROPERTY: at least one write must succeed under concurrent stress across {n_threads} threads.\n\
-         Investigate: src/store/writer.rs lock acquisition, src/store/segment.rs open_writer.\n\
+         Investigate: src/store/write/writer.rs lock acquisition, src/store/segment/mod.rs open_writer.\n\
          Common causes: mutex poisoning on first write error, segment open failure blocking all writers.\n\
          Run: cargo test --test chaos_testing chaos_concurrent_writer_stress"
     );
     assert_eq!(
         total_err, 0,
         "CHAOS PROPERTY: zero write errors expected under concurrent stress, got {total_err}.\n\
-         Investigate: src/store/writer.rs lock ordering, src/store/segment.rs rotate.\n\
+         Investigate: src/store/write/writer.rs lock ordering, src/store/segment/mod.rs rotate.\n\
          Common causes: race on segment rotation, fd_budget exhaustion under concurrent open, poisoned Mutex from a prior panic.\n\
          Run: cargo test --test chaos_testing chaos_concurrent_writer_stress"
     );
@@ -239,7 +239,7 @@ fn chaos_concurrent_writer_stress() {
         assert!(
             !entries.is_empty(),
             "CHAOS PROPERTY: every writer thread must have its events present in the index after store close.\n\
-             Investigate: src/store/index.rs insert, src/store/writer.rs STEP 5 index update.\n\
+             Investigate: src/store/index/mod.rs insert, src/store/write/writer.rs STEP 5 index update.\n\
              Common causes: index update skipped on rotation, thread-local writes not flushed before stream() call.\n\
              Run: cargo test --test chaos_testing chaos_concurrent_writer_stress"
         );
@@ -300,7 +300,7 @@ fn chaos_cas_contention() {
                 assert!(
                     winning_receipt.is_none(),
                     "CHAOS PROPERTY: CAS must allow exactly ONE winner, but got a second.\n\
-                     Investigate: src/store/writer.rs CAS check under entity lock.\n\
+                     Investigate: src/store/write/writer.rs CAS check under entity lock.\n\
                      Common causes: entity lock not held across sequence read + write."
                 );
                 winning_receipt = Some(receipt);
@@ -322,7 +322,7 @@ fn chaos_cas_contention() {
         losers,
         n_threads - 1,
         "CHAOS PROPERTY: all threads except the CAS winner must receive a conflict error (expected {}, got {losers}).\n\
-         Investigate: src/store/writer.rs CAS rejection path, StoreError::SequenceMismatch variant.\n\
+         Investigate: src/store/write/writer.rs CAS rejection path, StoreError::SequenceMismatch variant.\n\
          Run: cargo test --test chaos_testing chaos_cas_contention",
         n_threads - 1
     );
@@ -331,7 +331,7 @@ fn chaos_cas_contention() {
         assert!(
             err_msg.contains("CAS failed"),
             "CHAOS PROPERTY: CAS losers must get SequenceMismatch, got: {err_msg}\n\
-             Investigate: src/store/writer.rs CAS rejection, StoreError::SequenceMismatch.\n\
+             Investigate: src/store/write/writer.rs CAS rejection, StoreError::SequenceMismatch.\n\
              Run: cargo test --test chaos_testing chaos_cas_contention"
         );
     }
@@ -342,7 +342,7 @@ fn chaos_cas_contention() {
         entries.len(),
         2, // seed + 1 winner
         "CHAOS PROPERTY: stream should have exactly 2 events (seed + CAS winner), got {}.\n\
-         Investigate: src/store/writer.rs handle_append commit path.",
+         Investigate: src/store/write/writer.rs handle_append commit path.",
         entries.len()
     );
 
@@ -400,7 +400,7 @@ fn chaos_idempotency_concurrent() {
         assert_eq!(
             *id, first,
             "CHAOS PROPERTY: all concurrent idempotent appends with the same key must return the same event_id.\n\
-             Investigate: src/store/writer.rs idempotency check, src/store/index.rs idempotency_key lookup.\n\
+             Investigate: src/store/write/writer.rs idempotency check, src/store/index/mod.rs idempotency_key lookup.\n\
              Common causes: idempotency map not protected by the same lock as the append, two threads both pass the key-absent check.\n\
              Run: cargo test --test chaos_testing chaos_idempotency_concurrent"
         );
@@ -412,7 +412,7 @@ fn chaos_idempotency_concurrent() {
         entries.len(),
         1,
         "CHAOS PROPERTY: idempotent append with the same key from {n_threads} concurrent threads must store exactly 1 event, got {}.\n\
-         Investigate: src/store/writer.rs idempotency dedup, src/store/index.rs stream().\n\
+         Investigate: src/store/write/writer.rs idempotency dedup, src/store/index/mod.rs stream().\n\
          Common causes: dedup check races with concurrent insert, idempotency_key stored per-segment losing cross-segment dedup.\n\
          Run: cargo test --test chaos_testing chaos_idempotency_concurrent",
         entries.len()
@@ -470,7 +470,7 @@ fn chaos_rapid_segment_rotation() {
     assert!(
         segment_count > 1,
         "CHAOS PROPERTY: with a 256-byte segment limit, {iterations} events must span more than one segment file (got {segment_count}).\n\
-         Investigate: src/store/writer.rs STEP 7 rotation trigger, src/store/segment.rs segment_max_bytes enforcement.\n\
+         Investigate: src/store/write/writer.rs STEP 7 rotation trigger, src/store/segment/mod.rs segment_max_bytes enforcement.\n\
          Common causes: byte budget checked after write instead of before, segment size accumulated incorrectly.\n\
          Run: cargo test --test chaos_testing chaos_rapid_segment_rotation"
     );
@@ -481,7 +481,7 @@ fn chaos_rapid_segment_rotation() {
         entries.len(),
         iterations,
         "CHAOS PROPERTY: no events must be lost across {segment_count} segment rotations (expected {iterations}, got {}).\n\
-         Investigate: src/store/writer.rs STEP 7 rotation, src/store/reader.rs multi-segment scan, src/store/index.rs insert.\n\
+         Investigate: src/store/write/writer.rs STEP 7 rotation, src/store/segment/scan.rs multi-segment scan, src/store/index/mod.rs insert.\n\
          Common causes: index entry for last event in a segment dropped on rotation, reader skips sealed segments.\n\
          Run: cargo test --test chaos_testing chaos_rapid_segment_rotation",
         entries.len()
@@ -496,7 +496,7 @@ fn chaos_rapid_segment_rotation() {
         first.event.event_id(),
         entries[0].event_id,
         "CHAOS PROPERTY: store.get() for the first indexed event_id must return the matching event.\n\
-         Investigate: src/store/reader.rs get(), src/store/index.rs lookup offset.\n\
+         Investigate: src/store/segment/scan.rs get(), src/store/index/mod.rs lookup offset.\n\
          Common causes: index stores wrong file offset after rotation, event_id collision from monotonic-clock reset.\n\
          Run: cargo test --test chaos_testing chaos_rapid_segment_rotation"
     );
@@ -504,7 +504,7 @@ fn chaos_rapid_segment_rotation() {
         last.event.event_id(),
         entries[entries.len() - 1].event_id,
         "CHAOS PROPERTY: store.get() for the last indexed event_id must return the matching event.\n\
-         Investigate: src/store/reader.rs get(), src/store/segment.rs seek by offset.\n\
+         Investigate: src/store/segment/scan.rs get(), src/store/segment/mod.rs seek by offset.\n\
          Common causes: final segment not flushed before get(), write buffer not committed on sync().\n\
          Run: cargo test --test chaos_testing chaos_rapid_segment_rotation"
     );
@@ -599,8 +599,8 @@ fn chaos_batch_atomicity_concurrent() {
             entries.len() == expected_count || entries.is_empty(),
             "CHAOS PROPERTY: batch atomicity - entity {} must have {} or 0 events, got {}.\n\
              Partial batches indicate atomicity violation.\n\
-             Investigate: src/store/writer.rs handle_append_batch atomic publish, \
-             src/store/index.rs insert_batch all-or-nothing.",
+             Investigate: src/store/write/writer.rs handle_append_batch atomic publish, \
+             src/store/index/mod.rs insert_batch all-or-nothing.",
             coord.entity(),
             expected_count,
             entries.len()
@@ -677,8 +677,8 @@ fn chaos_batch_cross_segment_rotation() {
         20,
         "CHAOS PROPERTY: batch spanning segment rotation must commit all items.\n\
          Expected 20 events, got {}.\n\
-         Investigate: src/store/reader.rs cross-segment batch recovery, \
-         src/store/writer.rs mid-batch rotation handling.",
+         Investigate: src/store/segment/scan.rs cross-segment batch recovery, \
+         src/store/write/writer.rs mid-batch rotation handling.",
         entries.len()
     );
 
@@ -735,7 +735,7 @@ fn chaos_frame_decode_random_bombardment() {
         err_count > ok_count,
         "CHAOS PROPERTY: the vast majority of random-byte frames must be rejected by frame_decode (CRC collision probability ~1/2^32), \
          but accepted={ok_count} >= rejected={err_count} across {iterations} iterations.\n\
-         Investigate: src/store/segment.rs frame_decode CRC check, crc32 polynomial selection.\n\
+         Investigate: src/store/segment/mod.rs frame_decode CRC check, crc32 polynomial selection.\n\
          Common causes: CRC validation accidentally skipped, CRC field not checked against payload, wrong byte range fed to CRC.\n\
          Run: cargo test --test chaos_testing chaos_frame_decode_random_bombardment"
     );
@@ -796,7 +796,7 @@ fn chaos_subscription_write_storm() {
         received == iterations,
         "PROPERTY: every append() broadcasts before returning, so a subscriber joined after all \
          writes must see exactly {iterations} notifications, got {received}.\n\
-         Investigate: src/store/writer.rs (broadcast send path), src/store/index.rs (region filter).\n\
+         Investigate: src/store/write/writer.rs (broadcast send path), src/store/index/mod.rs (region filter).\n\
          Run: cargo test --test chaos_testing chaos_subscription_write_storm"
     );
 
@@ -842,7 +842,7 @@ fn chaos_cursor_completeness_concurrent() {
         seen.len(),
         n,
         "CHAOS PROPERTY: cursor must deliver every event exactly once — expected {n} events, got {}.\n\
-         Investigate: src/store/cursor.rs poll(), src/store/index.rs stream() ordering.\n\
+         Investigate: src/store/delivery/cursor.rs poll(), src/store/index/mod.rs stream() ordering.\n\
          Common causes: cursor position not advanced after yielding last entry in a segment, stream() returns fewer entries than appended.\n\
          Run: cargo test --test chaos_testing chaos_cursor_completeness_concurrent",
         seen.len()
@@ -856,7 +856,7 @@ fn chaos_cursor_completeness_concurrent() {
         unique.len(),
         seen.len(),
         "CHAOS PROPERTY: cursor must not deliver any event more than once ({} unique out of {} delivered).\n\
-         Investigate: src/store/cursor.rs position tracking, src/store/index.rs stream() dedup.\n\
+         Investigate: src/store/delivery/cursor.rs position tracking, src/store/index/mod.rs stream() dedup.\n\
          Common causes: cursor resets position to segment start on re-poll, index entries duplicated across segment rotation.\n\
          Run: cargo test --test chaos_testing chaos_cursor_completeness_concurrent",
         unique.len(),
@@ -902,7 +902,7 @@ fn chaos_truncated_segment_recovers() {
         written_entries.len(),
         n_events,
         "CHAOS PROPERTY: all {n_events} appended events must appear in the index before close, got {}.\n\
-         Investigate: src/store/writer.rs STEP 5 index update, src/store/index.rs insert.\n\
+         Investigate: src/store/write/writer.rs STEP 5 index update, src/store/index/mod.rs insert.\n\
          Common causes: index update deferred past sync(), events buffered but not flushed.\n\
          Run: cargo test --test chaos_testing chaos_truncated_segment_recovers",
         written_entries.len()
@@ -926,7 +926,7 @@ fn chaos_truncated_segment_recovers() {
     assert!(
         !segments.is_empty(),
         "CHAOS PROPERTY: writing {n_events} events must produce at least one .fbat segment file.\n\
-         Investigate: src/store/segment.rs open_writer, src/store/writer.rs STEP 7 rotation.\n\
+         Investigate: src/store/segment/mod.rs open_writer, src/store/write/writer.rs STEP 7 rotation.\n\
          Common causes: segment file extension mismatch, data_dir not flushed before read_dir.\n\
          Run: cargo test --test chaos_testing chaos_truncated_segment_recovers"
     );
@@ -942,7 +942,7 @@ fn chaos_truncated_segment_recovers() {
     assert!(
         original_data.len() > 64,
         "CHAOS PROPERTY: the last segment must contain more than 64 bytes to allow meaningful truncation (got {} bytes).\n\
-         Investigate: src/store/segment.rs header write, src/store/writer.rs event serialization.\n\
+         Investigate: src/store/segment/mod.rs header write, src/store/write/writer.rs event serialization.\n\
          Common causes: segment header larger than expected, events too small to exceed header.\n\
          Run: cargo test --test chaos_testing chaos_truncated_segment_recovers",
         original_data.len()
@@ -974,7 +974,7 @@ fn chaos_truncated_segment_recovers() {
     assert!(
         !recovered_entries.is_empty(),
         "CHAOS PROPERTY: after tail truncation, cold-start recovery must restore at least some events; got zero.\n\
-         Investigate: src/store/mod.rs Store::open cold-start scan, src/store/segment.rs frame_decode error handling.\n\
+         Investigate: src/store/mod.rs Store::open cold-start scan, src/store/segment/mod.rs frame_decode error handling.\n\
          Common causes: open() bails out on first decode error instead of stopping at corrupt tail, segment skipped entirely on any error.\n\
          Run: cargo test --test chaos_testing chaos_truncated_segment_recovers"
     );
@@ -991,7 +991,7 @@ fn chaos_truncated_segment_recovers() {
             written_ids.contains(&entry.event_id),
             "CHAOS PROPERTY: every event recovered after truncation must match an originally written event_id; \
              found unknown id {:?}.\n\
-             Investigate: src/store/mod.rs cold-start replay, src/store/segment.rs frame_decode.\n\
+             Investigate: src/store/mod.rs cold-start replay, src/store/segment/mod.rs frame_decode.\n\
              Common causes: partial frame incorrectly accepted as valid, event_id reconstructed from corrupt bytes.\n\
              Run: cargo test --test chaos_testing chaos_truncated_segment_recovers",
             entry.event_id
@@ -1005,7 +1005,7 @@ fn chaos_truncated_segment_recovers() {
             fetched.event.event_id(),
             entry.event_id,
             "CHAOS PROPERTY: store.get() for a recovered event_id must return the matching event.\n\
-             Investigate: src/store/reader.rs get(), src/store/index.rs offset lookup.\n\
+             Investigate: src/store/segment/scan.rs get(), src/store/index/mod.rs offset lookup.\n\
              Common causes: index rebuilt with wrong file offsets during cold-start, truncated segment re-indexed past truncation point.\n\
              Run: cargo test --test chaos_testing chaos_truncated_segment_recovers"
         );

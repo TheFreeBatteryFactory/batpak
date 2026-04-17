@@ -43,13 +43,13 @@ fn bench_write_throughput(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
             b.iter_batched(
                 || open_bench_store(saturating_u32(count).saturating_add(1), SyncMode::default()),
-                |(store, dir, coord, kind)| {
+                |(store, _dir, coord, kind)| {
                     for i in 0..count {
                         store
                             .append(&coord, kind, &serde_json::json!({"i": i}))
                             .expect("append");
                     }
-                    (store, dir)
+                    store.close().expect("close throughput benchmark store");
                 },
                 BatchSize::SmallInput,
             );
@@ -70,13 +70,15 @@ fn bench_write_throughput(c: &mut Criterion) {
         durable.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
             b.iter_batched(
                 || open_bench_store(1, SyncMode::default()),
-                |(store, dir, coord, kind)| {
+                |(store, _dir, coord, kind)| {
                     for i in 0..count {
                         store
                             .append(&coord, kind, &serde_json::json!({"i": i}))
                             .expect("append");
                     }
-                    (store, dir)
+                    store
+                        .close()
+                        .expect("close durable throughput benchmark store");
                 },
                 BatchSize::SmallInput,
             );
@@ -130,7 +132,10 @@ fn bench_concurrent_write_throughput(c: &mut Criterion) {
                     for handle in handles {
                         handle.join().expect("join thread");
                     }
-                    store
+                    Arc::into_inner(store)
+                        .expect("no extra Arc clones remain after joining benchmark threads")
+                        .close()
+                        .expect("close concurrent throughput benchmark store");
                 },
                 BatchSize::SmallInput,
             );
@@ -159,13 +164,13 @@ fn bench_sync_mode_comparison(c: &mut Criterion) {
         group.bench_function(name, |b| {
             b.iter_batched(
                 || open_bench_store(1, sync_mode.clone()),
-                |(store, dir, coord, kind)| {
+                |(store, _dir, coord, kind)| {
                     for i in 0..count {
                         store
                             .append(&coord, kind, &serde_json::json!({"i": i}))
                             .expect("append");
                     }
-                    (store, dir)
+                    store.close().expect("close sync-mode benchmark store");
                 },
                 BatchSize::SmallInput,
             );

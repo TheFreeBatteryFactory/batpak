@@ -79,7 +79,7 @@ fn replay_determinism_cold_start_rebuilds_identical_index() {
         events.len(),
         20,
         "PROPERTY: Cold start must rebuild ALL events from segments.\n\
-         Investigate: src/store/reader.rs scan_segment, src/store/mod.rs Store::open index rebuild.\n\
+         Investigate: src/store/segment/scan.rs scan_segment, src/store/mod.rs Store::open index rebuild.\n\
          Common causes: segment scan skipping events, index not rebuilt from all segments."
     );
 
@@ -87,7 +87,7 @@ fn replay_determinism_cold_start_rebuilds_identical_index() {
         assert_eq!(
             entry.event_id, event_ids[i],
             "PROPERTY: Replayed event_id must match original at index {i}.\n\
-             Investigate: src/store/reader.rs scan_segment event ordering.\n\
+             Investigate: src/store/segment/scan.rs scan_segment event ordering.\n\
              Common causes: events reordered during cold start, BTreeMap key collision."
         );
     }
@@ -98,7 +98,7 @@ fn replay_determinism_cold_start_rebuilds_identical_index() {
         assert_eq!(
             stored.event.header.event_id, *eid,
             "PROPERTY: Replayed event must have correct event_id.\n\
-             Investigate: src/store/segment.rs frame_encode/frame_decode round-trip."
+             Investigate: src/store/segment/mod.rs frame_encode/frame_decode round-trip."
         );
         assert_eq!(
             stored.event.event_kind(),
@@ -134,7 +134,7 @@ fn idempotency_algebraic_duplicate_produces_no_new_event() {
     assert_eq!(
         r1.event_id, r2.event_id,
         "PROPERTY: Idempotent append must return same event_id.\n\
-         Investigate: src/store/writer.rs idempotency check (Step 1b).\n\
+         Investigate: src/store/write/writer.rs idempotency check (Step 1b).\n\
          Common causes: idempotency map not checked before append."
     );
 
@@ -143,7 +143,7 @@ fn idempotency_algebraic_duplicate_produces_no_new_event() {
         events.len(),
         1,
         "PROPERTY: Duplicate idempotent append must NOT create a second event.\n\
-         Investigate: src/store/writer.rs handle_append idempotency_key lookup.\n\
+         Investigate: src/store/write/writer.rs handle_append idempotency_key lookup.\n\
          Common causes: idempotency check after write instead of before."
     );
 }
@@ -178,7 +178,7 @@ fn round_trip_fidelity_append_get_preserves_payload() {
     assert_eq!(
         stored.coordinate, coord,
         "PROPERTY: Coordinate must survive storage round-trip.\n\
-         Investigate: src/store/writer.rs handle_append coordinate serialization."
+         Investigate: src/store/write/writer.rs handle_append coordinate serialization."
     );
 
     // Verify EventKind round-trips (category + type_id encoded in u16)
@@ -198,7 +198,7 @@ fn round_trip_fidelity_append_get_preserves_payload() {
     assert_eq!(
         stored.event.payload, payload,
         "PROPERTY: payload must survive append+get as a decoded JSON value.\n\
-         Investigate: src/store/mod.rs write serialization and src/store/reader.rs read decoding.\n\
+         Investigate: src/store/mod.rs write serialization and src/store/segment/scan.rs read decoding.\n\
          Common causes: decoding the outer frame into serde_json::Value directly, which turns \
          the inner MessagePack payload into a byte array instead of the original JSON object."
     );
@@ -230,8 +230,8 @@ proptest! {
             &stored.event.payload, &payload,
             "PROPERTY: append+get must preserve any JSON payload exactly. \
              A failing shrunk counterexample is the minimum input that breaks \
-             round-trip — investigate src/store/writer.rs serialization and \
-             src/store/reader.rs deserialization."
+             round-trip — investigate src/store/write/writer.rs serialization and \
+             src/store/segment/scan.rs deserialization."
         );
         prop_assert_eq!(
             stored.event.event_kind(), kind,
@@ -306,16 +306,11 @@ fn flow_connectivity_full_production_path() {
         let committed = pipeline
             .commit(receipt, |payload| -> Result<_, StoreError> {
                 let r = store.append(&coord, kind, &payload)?;
-                Ok(Committed {
-                    payload,
-                    event_id: r.event_id,
-                    sequence: r.sequence,
-                    hash: [0u8; 32],
-                })
+                Ok(CommitMetadata::from_append_receipt(r))
             })
             .expect("commit");
 
-        event_id = committed.event_id;
+        event_id = committed.event_id();
 
         // Step 3: Sync to disk
         store.sync().expect("sync");
@@ -345,7 +340,7 @@ fn flow_connectivity_full_production_path() {
         events.len(),
         1,
         "PROPERTY: Stream must find events written through pipeline flow.\n\
-         Investigate: src/store/mod.rs stream(), src/store/index.rs.\n\
+         Investigate: src/store/mod.rs stream(), src/store/index/mod.rs.\n\
          Common causes: entity key mismatch between append and stream."
     );
 
@@ -367,7 +362,7 @@ fn flow_connectivity_full_production_path() {
     assert!(
         entry.is_some(),
         "PROPERTY: Cursor must see events written through pipeline flow.\n\
-         Investigate: src/store/cursor.rs poll(), index global_sequence.\n\
+         Investigate: src/store/delivery/cursor.rs poll(), index global_sequence.\n\
          Common causes: cursor starting past the event's sequence."
     );
 }
@@ -416,7 +411,7 @@ fn errors_propagate_not_launder_to_defaults() {
     let result = store.get(999999);
     let err = result.expect_err(
         "PROPERTY: get() for nonexistent event must return Err(NotFound), not a default. \
-         Investigate: src/store/mod.rs get(), src/store/reader.rs read_entry.",
+         Investigate: src/store/mod.rs get(), src/store/segment/scan.rs read_entry.",
     );
     assert!(
         matches!(err, StoreError::NotFound(_)),
@@ -435,7 +430,7 @@ fn errors_propagate_not_launder_to_defaults() {
     let result = store.append_with_options(&coord, kind, &"should_fail", opts);
     let err = result.expect_err(
         "PROPERTY: CAS with wrong expected_sequence must return Err(SequenceMismatch). \
-         Investigate: src/store/writer.rs CAS check (Step 1a).",
+         Investigate: src/store/write/writer.rs CAS check (Step 1a).",
     );
     assert!(
         matches!(err, StoreError::SequenceMismatch { .. }),
@@ -515,7 +510,7 @@ fn commutativity_independent_entity_appends() {
         s2.stream("comm:alpha").len(),
         "PROPERTY: Independent entity appends must be commutative — \
          same number of events per entity regardless of append order.\n\
-         Investigate: src/store/index.rs entity stream storage."
+         Investigate: src/store/index/mod.rs entity stream storage."
     );
     assert_eq!(
         s1.stream("comm:beta").len(),

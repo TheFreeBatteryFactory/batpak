@@ -1,11 +1,11 @@
+use super::fanout::Notification;
 use crate::coordinate::{Coordinate, DagPosition};
 use crate::event::{Event, EventHeader, EventKind, HashChain, StoredEvent};
-use crate::store::contracts::checked_payload_len;
-use crate::store::contracts::{AppendOptions, BatchAppendItem, CausationRef};
-use crate::store::fanout::Notification;
+use crate::store::append::checked_payload_len;
+use crate::store::append::{AppendOptions, BatchAppendItem, CausationRef};
+use crate::store::index::interner::InternId;
 use crate::store::index::{DiskPos, IndexEntry, StoreIndex};
-use crate::store::interner::InternId;
-use crate::store::sidx::{kind_to_raw, SidxEntry};
+use crate::store::segment::sidx::{kind_to_raw, SidxEntry};
 use crate::store::StoreError;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -271,6 +271,12 @@ pub(crate) struct StagedCommittedEvent {
     hash_chain: HashChain,
 }
 
+pub(crate) struct MaterializedCommitViews {
+    pub(crate) index_entry: IndexEntry,
+    pub(crate) notification: Notification,
+    pub(crate) sidx_entry: SidxEntry,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct StagedCommitMeta {
     pub(crate) event_id: u128,
@@ -393,8 +399,13 @@ impl StagedCommittedEvent {
         )
     }
 
-    pub(crate) fn notification(&self) -> Notification {
-        Notification {
+    pub(crate) fn materialize_views(
+        &self,
+        disk_pos: DiskPos,
+        entity_id: InternId,
+        scope_id: InternId,
+    ) -> MaterializedCommitViews {
+        let notification = Notification {
             event_id: self.meta.event_id,
             correlation_id: self.meta.correlation_id,
             causation_id: self.meta.causation_id,
@@ -402,56 +413,42 @@ impl StagedCommittedEvent {
             kind: self.meta.kind,
             sequence: self.meta.global_sequence,
             position: self.position(),
-        }
-    }
-
-    pub(crate) fn index_entry(&self, index: &StoreIndex, disk_pos: DiskPos) -> IndexEntry {
-        let entity_id = index.interner.intern(self.entity());
-        let scope_id = index.interner.intern(self.scope());
-        self.index_entry_with_ids(disk_pos, entity_id, scope_id)
-    }
-
-    pub(crate) fn index_entry_with_ids(
-        &self,
-        disk_pos: DiskPos,
-        entity_id: InternId,
-        scope_id: InternId,
-    ) -> IndexEntry {
-        IndexEntry {
-            event_id: self.meta.event_id,
-            correlation_id: self.meta.correlation_id,
-            causation_id: self.meta.causation_id,
-            coord: self.coord().clone(),
-            entity_id,
-            scope_id,
-            kind: self.meta.kind,
-            wall_ms: self.timing.wall_ms,
-            clock: self.timing.clock,
-            dag_lane: self.timing.dag_lane,
-            dag_depth: self.timing.dag_depth,
-            hash_chain: self.hash_chain.clone(),
-            disk_pos,
-            global_sequence: self.meta.global_sequence,
-        }
-    }
-
-    pub(crate) fn sidx_entry(&self, disk_pos: DiskPos) -> SidxEntry {
-        SidxEntry {
-            event_id: self.meta.event_id,
-            entity_idx: 0,
-            scope_idx: 0,
-            kind: kind_to_raw(self.meta.kind),
-            wall_ms: self.timing.wall_ms,
-            clock: self.timing.clock,
-            dag_lane: self.timing.dag_lane,
-            dag_depth: self.timing.dag_depth,
-            prev_hash: self.hash_chain.prev_hash,
-            event_hash: self.hash_chain.event_hash,
-            frame_offset: disk_pos.offset,
-            frame_length: disk_pos.length,
-            global_sequence: self.meta.global_sequence,
-            correlation_id: self.meta.correlation_id,
-            causation_id: self.meta.causation_id.unwrap_or(0),
+        };
+        MaterializedCommitViews {
+            index_entry: IndexEntry {
+                event_id: self.meta.event_id,
+                correlation_id: self.meta.correlation_id,
+                causation_id: self.meta.causation_id,
+                coord: notification.coord.clone(),
+                entity_id,
+                scope_id,
+                kind: self.meta.kind,
+                wall_ms: self.timing.wall_ms,
+                clock: self.timing.clock,
+                dag_lane: self.timing.dag_lane,
+                dag_depth: self.timing.dag_depth,
+                hash_chain: self.hash_chain.clone(),
+                disk_pos,
+                global_sequence: self.meta.global_sequence,
+            },
+            notification,
+            sidx_entry: SidxEntry {
+                event_id: self.meta.event_id,
+                entity_idx: 0,
+                scope_idx: 0,
+                kind: kind_to_raw(self.meta.kind),
+                wall_ms: self.timing.wall_ms,
+                clock: self.timing.clock,
+                dag_lane: self.timing.dag_lane,
+                dag_depth: self.timing.dag_depth,
+                prev_hash: self.hash_chain.prev_hash,
+                event_hash: self.hash_chain.event_hash,
+                frame_offset: disk_pos.offset,
+                frame_length: disk_pos.length,
+                global_sequence: self.meta.global_sequence,
+                correlation_id: self.meta.correlation_id,
+                causation_id: self.meta.causation_id.unwrap_or(0),
+            },
         }
     }
 

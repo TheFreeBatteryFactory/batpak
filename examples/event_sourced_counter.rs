@@ -66,13 +66,14 @@ impl EventSourced for CounterState {
             // Reader delivers payloads as typed serde_json::Value (already
             // decoded from the on-disk msgpack frame), so we can deserialize
             // directly from the Value without re-parsing bytes.
-            if let Ok(payload) = serde_json::from_value::<IncrementedBy>(event.payload.clone()) {
-                self.value += payload.amount;
-                if payload.amount > 0 {
-                    self.total_increments += 1;
-                } else {
-                    self.total_decrements += 1;
-                }
+            let payload = serde_json::from_value::<IncrementedBy>(event.payload.clone()).expect(
+                "CounterState::apply_event expects replay payloads that match IncrementedBy",
+            );
+            self.value += payload.amount;
+            if payload.amount > 0 {
+                self.total_increments += 1;
+            } else {
+                self.total_decrements += 1;
             }
         }
     }

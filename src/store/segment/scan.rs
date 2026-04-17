@@ -1,6 +1,6 @@
 use crate::coordinate::Coordinate;
-use crate::event::header::SidxReconstructionFields;
 use crate::event::{Event, EventHeader, EventKind, HashChain, StoredEvent};
+use crate::store::cold_start::ColdStartIndexRow;
 use crate::store::segment::{self, FramePayload, SEGMENT_MAGIC};
 use crate::store::{DiskPos, StoreError};
 use dashmap::DashMap;
@@ -59,6 +59,25 @@ pub(crate) struct ScannedIndexEntry {
     /// `None` for slow-path scans (active segment, missing/corrupt SIDX) — the
     /// rebuild caller must synthesize a sequence in that case.
     pub global_sequence: Option<u64>,
+}
+
+impl ScannedIndexEntry {
+    pub(crate) fn from_cold_start_row(
+        row: &ColdStartIndexRow,
+        interner_strings: &[String],
+    ) -> Result<Self, StoreError> {
+        let (entity, scope) = row.resolve_strings(interner_strings)?;
+        Ok(Self {
+            header: row.to_event_header(),
+            entity,
+            scope,
+            hash_chain: row.hash_chain.clone(),
+            segment_id: row.disk_pos.segment_id,
+            offset: row.disk_pos.offset,
+            length: row.disk_pos.length,
+            global_sequence: Some(row.global_sequence),
+        })
+    }
 }
 
 /// Cross-segment batch recovery state.
@@ -500,47 +519,17 @@ impl Reader {
         let is_active = self.active_segment_id.load(Ordering::Acquire) == segment_id;
 
         if !is_active && batch_state.as_ref().is_none_or(|s| !s.in_batch) {
-            if let Ok(Some((sidx_entries, strings))) = crate::store::sidx::read_footer(path) {
+            if let Ok(Some((sidx_entries, strings))) = super::sidx::read_footer(path) {
                 for se in sidx_entries {
-                    let kind = crate::store::sidx::raw_to_kind(se.kind);
+                    let row = se.to_cold_start_row(segment_id);
+                    let kind = row.kind;
                     // Skip batch markers in SIDX fast path.
                     if kind == EventKind::SYSTEM_BATCH_BEGIN
                         || kind == EventKind::SYSTEM_BATCH_COMMIT
                     {
                         continue;
                     }
-                    let entity = strings
-                        .get(se.entity_idx as usize)
-                        .cloned()
-                        .unwrap_or_default();
-                    let scope = strings
-                        .get(se.scope_idx as usize)
-                        .cloned()
-                        .unwrap_or_default();
-                    sink(ScannedIndexEntry {
-                        header: EventHeader::from_sidx(SidxReconstructionFields {
-                            event_id: se.event_id,
-                            correlation_id: se.correlation_id,
-                            causation_id: (se.causation_id != 0).then_some(se.causation_id),
-                            wall_ms: se.wall_ms,
-                            clock: se.clock,
-                            lane: se.dag_lane,
-                            depth: se.dag_depth,
-                            event_kind: kind,
-                        }),
-                        entity,
-                        scope,
-                        hash_chain: crate::event::HashChain {
-                            prev_hash: se.prev_hash,
-                            event_hash: se.event_hash,
-                        },
-                        segment_id,
-                        offset: se.frame_offset,
-                        length: se.frame_length,
-                        // SIDX footer carries the original sequence — preserve it
-                        // so sparse `global_sequence` values survive cold-start rebuild.
-                        global_sequence: Some(se.global_sequence),
-                    })?;
+                    sink(ScannedIndexEntry::from_cold_start_row(&row, &strings)?)?;
                 }
                 return Ok(());
             }
@@ -960,18 +949,15 @@ impl Reader {
         Ok(payload.event)
     }
 
-    /// Read events by disk position without constructing Coordinates.
-    /// Returns `Event<serde_json::Value>` directly — suitable for projection
-    /// replay where only the event payload matters.
+    /// Convenience helper over point reads for projection replay.
+    ///
+    /// This preserves the replay surface shape, but it is not a vectored I/O
+    /// fast path yet: each position still goes through `read_event_only`.
     pub(crate) fn read_events_batch(
         &self,
         positions: &[&DiskPos],
     ) -> Result<Vec<Event<serde_json::Value>>, StoreError> {
-        let mut results = Vec::with_capacity(positions.len());
-        for pos in positions {
-            results.push(self.read_event_only(pos)?);
-        }
-        Ok(results)
+        self.read_batch_with(positions, Self::read_event_only)
     }
 
     /// Read a single event by disk position, leaving the payload as raw
@@ -1025,14 +1011,26 @@ impl Reader {
         Ok(payload.event)
     }
 
-    /// Read events by disk position, leaving payloads as raw MessagePack bytes.
+    /// Convenience helper over point reads that leaves payloads as raw
+    /// MessagePack bytes.
+    ///
+    /// This is not a vectored read path yet: it iterates `read_event_raw_only`
+    /// for each requested position.
     pub(crate) fn read_raw_events_batch(
         &self,
         positions: &[&DiskPos],
     ) -> Result<Vec<Event<Vec<u8>>>, StoreError> {
+        self.read_batch_with(positions, Self::read_event_raw_only)
+    }
+
+    fn read_batch_with<T>(
+        &self,
+        positions: &[&DiskPos],
+        mut read_one: impl FnMut(&Self, &DiskPos) -> Result<T, StoreError>,
+    ) -> Result<Vec<T>, StoreError> {
         let mut results = Vec::with_capacity(positions.len());
         for pos in positions {
-            results.push(self.read_event_raw_only(pos)?);
+            results.push(read_one(self, pos)?);
         }
         Ok(results)
     }
@@ -1069,7 +1067,7 @@ mod tests {
             buf.len(),
             256,
             "ACQUIRE BUFFER: expected buffer of size 256, got {}.\n\
-             Check: src/store/reader.rs acquire_buffer() vec allocation.",
+             Check: src/store/segment/scan.rs acquire_buffer() vec allocation.",
             buf.len()
         );
         // All bytes should be zero-initialized.
@@ -1105,14 +1103,14 @@ mod tests {
             64,
             "PROPERTY: re-acquired buffer must match the requested size, \
              regardless of whether it came from the pool or a fresh allocation. \
-             Investigate: src/store/reader.rs acquire_buffer resize path."
+             Investigate: src/store/segment/scan.rs acquire_buffer resize path."
         );
         assert!(
             buf2.iter().all(|&b| b == 0),
             "PROPERTY: re-acquired buffer must be zero-filled. A non-zero byte \
              means the previous user's data leaked into the new acquirer, \
              which is a memory-safety / information-disclosure bug. \
-             Investigate: src/store/reader.rs acquire_buffer fill path."
+             Investigate: src/store/segment/scan.rs acquire_buffer fill path."
         );
     }
 
@@ -1166,7 +1164,7 @@ mod tests {
             buf.len(),
             512,
             "PROPERTY: acquire_buffer on a fresh reader must return the \
-             requested size. Investigate: src/store/reader.rs allocation \
+             requested size. Investigate: src/store/segment/scan.rs allocation \
              path when pool is empty."
         );
         assert!(

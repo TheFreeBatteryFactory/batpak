@@ -34,7 +34,7 @@
 //! let receipt = pipeline.evaluate(&(), proposal)?;
 //! let committed = pipeline.commit(receipt, |p| -> Result<_, StoreError> {
 //!     let r = store.append(&coord, kind, &p)?;
-//!     Ok(Committed { payload: p, event_id: r.event_id, sequence: r.sequence, hash: [0u8; 32] })
+//!     Ok(CommitMetadata::from_append_receipt(r))
 //! })?;
 //! # Ok(())
 //! # }
@@ -77,7 +77,7 @@ pub mod wire; // serde helpers — no deps, must come first
 compile_error!(
     "INVARIANT 2: batpak does not have an async Store API. \
      Async callers use spawn_blocking() or flume recv_async(). \
-     See: src/store/subscription.rs for the async pattern."
+     See: src/store/delivery/subscription.rs for the async pattern."
 );
 
 // sha256 is not a declared feature — suppress cfg warning for this guard

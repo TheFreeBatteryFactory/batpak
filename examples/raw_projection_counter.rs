@@ -52,10 +52,10 @@ impl EventSourced for RawCounterState {
         if event.header.event_kind != INCREMENTED && event.header.event_kind != DECREMENTED {
             return;
         }
-        if let Ok(delta) = rmp_serde::from_slice::<Delta>(&event.payload) {
-            self.value += delta.amount;
-            self.total_events += 1;
-        }
+        let delta = rmp_serde::from_slice::<Delta>(&event.payload)
+            .expect("RawCounterState::apply_event expects replay payloads that decode as Delta");
+        self.value += delta.amount;
+        self.total_events += 1;
     }
 
     fn relevant_event_kinds() -> &'static [EventKind] {

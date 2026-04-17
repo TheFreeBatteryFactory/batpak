@@ -20,7 +20,7 @@ fn compile_fail_tests() {
 
 mod typestate_runtime {
     // Generate a test state machine and typestate wrapper
-    batpak::define_state_machine!(TestLockState { Locked, Unlocked });
+    batpak::define_state_machine!(test_lock_state_seal, TestLockState { Locked, Unlocked });
     batpak::define_typestate!(TestLock<S: TestLockState> { holder: String, count: u32 });
 
     #[test]

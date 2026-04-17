@@ -60,7 +60,9 @@ pub(crate) fn repo_root() -> Result<PathBuf> {
         let manifest = current.join("Cargo.toml");
         if manifest.exists() {
             let contents = fs::read_to_string(&manifest).context("read manifest")?;
-            if contents.contains("[workspace]") {
+            let has_repo_markers =
+                current.join(".git").exists() || current.join("tools").join("xtask").exists();
+            if contents.contains("[workspace]") && has_repo_markers {
                 return Ok(current);
             }
         }

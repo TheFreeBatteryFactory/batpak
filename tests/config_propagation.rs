@@ -80,7 +80,7 @@ fn wall_ms_monotonic_under_clock_regression() {
             entry.wall_ms >= prev_wall_ms,
             "CLOCK REGRESSION BUG: entry[{i}] wall_ms={} < previous wall_ms={prev_wall_ms}.\n\
              The writer must clamp wall_ms to max(raw_ms, last_wall_ms) per entity.\n\
-             Check: src/store/writer.rs STEP 4 — HLC wall clock monotonicity.\n\
+             Check: src/store/write/writer.rs STEP 4 — HLC wall clock monotonicity.\n\
              Run: cargo test --test config_propagation wall_ms_monotonic",
             entry.wall_ms
         );
@@ -94,7 +94,7 @@ fn wall_ms_monotonic_under_clock_regression() {
         third_wall_ms >= 2_000_000,
         "CLOCK REGRESSION BUG: event after clock regression has wall_ms={third_wall_ms}, \
          expected >= 2000000 (the high-water mark at 2000s before regression).\n\
-         Check: src/store/writer.rs STEP 4 — raw_ms.max(last_ms)."
+         Check: src/store/write/writer.rs STEP 4 — raw_ms.max(last_ms)."
     );
 
     store.close().expect("close");
@@ -143,7 +143,7 @@ fn wall_ms_monotonic_per_entity_isolation() {
         entries_b[0].wall_ms, 500_000,
         "ENTITY ISOLATION BUG: entity B's wall_ms should be 500000 (its own timeline at 500s), \
          got {}. Wall_ms monotonicity must be per-entity, not global.\n\
-         Check: src/store/writer.rs STEP 4 — get_latest(entity) must be per-entity.",
+         Check: src/store/write/writer.rs STEP 4 — get_latest(entity) must be per-entity.",
         entries_b[0].wall_ms
     );
 
@@ -189,7 +189,7 @@ fn sync_mode_sync_data_does_not_panic() {
         entries.len(),
         10,
         "SYNC_MODE BUG: expected 10 events after SyncData sync, got {}.\n\
-         Check: src/store/segment.rs sync_with_mode, src/store/writer.rs sync sites.",
+         Check: src/store/segment/mod.rs sync_with_mode, src/store/write/writer.rs sync sites.",
         entries.len()
     );
 
@@ -333,7 +333,7 @@ fn writer_stack_size_custom_value_works() {
         entries.len(),
         10,
         "WRITER_STACK_SIZE BUG: store with custom stack_size failed to write events.\n\
-         Check: src/store/writer.rs WriterHandle::spawn — builder.stack_size()."
+         Check: src/store/write/writer.rs WriterHandle::spawn — builder.stack_size()."
     );
 
     store.close().expect("close");

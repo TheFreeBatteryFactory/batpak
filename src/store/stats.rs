@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::store::index_rebuild::OpenIndexReport;
+use crate::store::cold_start::rebuild::OpenIndexReport;
 use crate::store::RestartPolicy;
 
 /// Lightweight runtime statistics snapshot for the store.

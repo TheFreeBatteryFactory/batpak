@@ -1,6 +1,9 @@
 use crate::coordinate::Coordinate;
 use crate::event::{EventKind, StoredEvent};
-use crate::store::reader;
+use crate::store::cold_start::{
+    latest_segment_watermark, reject_symlink_leaf, ColdStartArtifactKind,
+};
+use crate::store::segment::scan as reader;
 use crate::store::segment::{self, Active, FramePayload};
 use crate::store::{
     Closed, CompactionConfig, CompactionStrategy, Open, Store, StoreDiagnostics, StoreError,
@@ -15,7 +18,7 @@ pub(crate) fn sync(store: &Store<Open>) -> Result<(), StoreError> {
         .as_ref()
         .expect("open store has writer")
         .tx
-        .send(crate::store::writer::WriterCommand::Sync { respond: tx })
+        .send(crate::store::write::writer::WriterCommand::Sync { respond: tx })
         .map_err(|_| StoreError::WriterCrashed)?;
     rx.recv().map_err(|_| StoreError::WriterCrashed)?
 }
@@ -27,7 +30,7 @@ pub(crate) fn snapshot(store: &Store<Open>, dest: &std::path::Path) -> Result<()
         destination = %dest.display()
     );
     sync(store)?;
-    reject_symlink_leaf(dest)?;
+    reject_symlink_leaf(dest, "snapshot destination")?;
     std::fs::create_dir_all(dest).map_err(StoreError::Io)?;
     let entries = std::fs::read_dir(&store.config.data_dir).map_err(StoreError::Io)?;
     for entry in entries.flatten() {
@@ -38,11 +41,11 @@ pub(crate) fn snapshot(store: &Store<Open>, dest: &std::path::Path) -> Result<()
             .unwrap_or(false);
         let is_visibility_metadata = path
             .file_name()
-            .map(|name| name == crate::store::visibility_ranges::VISIBILITY_RANGES_FILENAME)
+            .map(|name| name == crate::store::hidden_ranges::VISIBILITY_RANGES_FILENAME)
             .unwrap_or(false);
         if is_segment || is_visibility_metadata {
             let dest_path = dest.join(entry.file_name());
-            reject_symlink_leaf(&dest_path)?;
+            reject_symlink_leaf(&dest_path, "snapshot entry")?;
             std::fs::copy(&path, &dest_path).map_err(StoreError::Io)?;
         }
     }
@@ -189,12 +192,12 @@ pub(crate) fn compact(
 
     sync(store)?;
     store.index.clear();
-    crate::store::index_rebuild::rebuild_from_segments(
+    crate::store::cold_start::rebuild::rebuild_from_segments(
         &store.index,
         &store.reader,
         &store.config.data_dir,
     )?;
-    crate::store::index_rebuild::restore_cancelled_visibility_ranges(
+    crate::store::cold_start::rebuild::restore_cancelled_visibility_ranges(
         &store.index,
         &store.config.data_dir,
     );
@@ -219,7 +222,7 @@ pub(crate) fn close(mut store: Store<Open>) -> Result<Closed, StoreError> {
         .as_ref()
         .expect("open store has writer")
         .tx
-        .send(crate::store::writer::WriterCommand::Shutdown { respond: tx })
+        .send(crate::store::write::writer::WriterCommand::Shutdown { respond: tx })
         .map_err(|_| StoreError::WriterCrashed)?;
     let result = rx.recv().map_err(|_| StoreError::WriterCrashed)?;
 
@@ -239,56 +242,27 @@ pub(crate) fn close(mut store: Store<Open>) -> Result<Closed, StoreError> {
 /// preferred over checkpoint — writing both is redundant work that doubles
 /// close() cost at high event counts.
 fn write_cold_start_artifacts_on_close(store: &Store<Open>) -> Result<(), StoreError> {
-    let (seg_id, offset) = find_latest_segment_watermark(&store.config.data_dir)?;
-    if store.config.index.enable_mmap_index {
-        crate::store::mmap_index::write_mmap_index(
-            &store.index,
-            &store.config.data_dir,
-            seg_id,
-            offset,
-        )?;
-    } else if store.config.index.enable_checkpoint {
-        // Checkpoint is the fallback when mmap is not enabled.
-        crate::store::checkpoint::write_checkpoint(
-            &store.index,
-            &store.config.data_dir,
-            seg_id,
-            offset,
-        )?;
+    let (seg_id, offset) = latest_segment_watermark(&store.config.data_dir)?;
+    match store.runtime.cold_start.write_target() {
+        Some(ColdStartArtifactKind::MmapIndex) => {
+            crate::store::cold_start::mmap::write_mmap_index(
+                &store.index,
+                &store.config.data_dir,
+                seg_id,
+                offset,
+            )?;
+        }
+        Some(ColdStartArtifactKind::Checkpoint) => {
+            crate::store::cold_start::checkpoint::write_checkpoint(
+                &store.index,
+                &store.config.data_dir,
+                seg_id,
+                offset,
+            )?;
+        }
+        None => {}
     }
     Ok(())
-}
-
-/// Scan data_dir for the highest-numbered .fbat file and return (segment_id, file_size).
-fn find_latest_segment_watermark(data_dir: &std::path::Path) -> Result<(u64, u64), StoreError> {
-    let mut max: Option<(u64, std::path::PathBuf)> = None;
-    for entry in std::fs::read_dir(data_dir).map_err(StoreError::Io)? {
-        let entry = entry.map_err(StoreError::Io)?;
-        let path = entry.path();
-        let ext_ok = path
-            .extension()
-            .map(|ext| ext == crate::store::segment::SEGMENT_EXTENSION)
-            .unwrap_or(false);
-        if !ext_ok {
-            continue;
-        }
-        if let Some(id) = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.parse::<u64>().ok())
-        {
-            if max.as_ref().map(|(m, _)| id > *m).unwrap_or(true) {
-                max = Some((id, path));
-            }
-        }
-    }
-    match max {
-        Some((id, path)) => {
-            let offset = std::fs::metadata(&path).map_err(StoreError::Io)?.len();
-            Ok((id, offset))
-        }
-        None => Ok((0, 0)),
-    }
 }
 
 pub(crate) fn stats<State>(store: &Store<State>) -> StoreStats {
@@ -321,15 +295,5 @@ pub(crate) fn diagnostics<State>(store: &Store<State>) -> StoreDiagnostics {
         index_topology: store.index.topology_name(),
         tile_count: store.index.tile_count(),
         open_report: store.open_report.clone(),
-    }
-}
-
-fn reject_symlink_leaf(path: &std::path::Path) -> Result<(), StoreError> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(StoreError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("refusing to operate on symlink path {}", path.display()),
-        ))),
-        Ok(_) | Err(_) => Ok(()),
     }
 }
