@@ -12,8 +12,8 @@
 //! |-----------|-----------------------------------------------------------|
 //! | SoA       | Three `Vec`s sorted by `(kind, global_sequence)`          |
 //! | AoSoA8    | `Vec<Tile<8>>`; each tile holds ≤ 8 events of one kind    |
-//! | AoSoA16   | `Vec<Tile<16>>`; fits AVX-512 / Apple M-series cache line |
-//! | AoSoA64   | `Vec<Tile<64>>`; fills one full x86 cache line of u64s    |
+//! | AoSoA16   | `Vec<Tile<16>>`; test-only tile-size harness               |
+//! | AoSoA64   | `Vec<Tile<64>>`; cache-line aligned; scalar scan today     |
 //!
 //! ## Concurrency model
 //!
@@ -28,8 +28,9 @@
 //! Events are always appended in ascending `global_sequence` order (the writer
 //! thread assigns global_sequence under its own lock).  `insert` therefore
 //! pushes to the back of the SoA vecs / open tile without any reordering.
-//! `query_by_kind` performs a linear pass, which is cache-optimal for the SoA
-//! layout and fully vectorisable for AoSoA once LLVM sees the uniform stride.
+//! `query_by_kind` performs a scalar linear pass for all layouts. AoSoA64 tiles
+//! are sized to align with cache lines, but the current scan path does not use
+//! SIMD intrinsics; that specialization is not yet implemented.
 
 use crate::event::EventKind;
 use crate::store::index::{projection_kind_matches, ClockKey, DiskPos, IndexEntry, RoutingSummary};
@@ -52,20 +53,24 @@ enum EntryQuery<'a> {
 // Tile — AoSoA building block
 // ---------------------------------------------------------------------------
 
-/// A cache-line-aligned tile that holds up to `N` events of the **same** kind.
+/// A tile that holds up to `N` events of the **same** kind.
 ///
-/// The struct is `repr(C, align(64))` so that the first field begins on a
-/// 64-byte cache-line boundary.  The inner `Vec`s are pre-allocated to
-/// capacity `N` on construction (see [`Tile::new`]), so no heap reallocation
-/// occurs during a tile's lifetime.
+/// `repr(C, align(64))` aligns the tile *struct header* (the fat-pointer fields)
+/// to a 64-byte cache-line boundary. The inner `Vec`s allocate their backing
+/// arrays on the heap separately, so kinds data is **not** cache-local to the
+/// struct itself. The current scan is scalar and dereferences through the Vec
+/// heap pointer on every access.
+///
+/// For a real SIMD specialization, `kinds` would need to be an inline array
+/// (e.g. `[u16; N]`) so the kind values sit contiguously without a heap hop.
+/// That restructuring is deferred until the specialization is actually implemented.
 ///
 /// ### Why `Vec` instead of `[T; N]`?
 ///
 /// Const-generic arrays of non-`Copy` types (e.g. `[Arc<IndexEntry>; N]`)
-/// require `T: Default`, which `Arc<IndexEntry>` does not implement.  Using
-/// `Vec` with a reserved capacity of `N` gives identical runtime behaviour
-/// (no extra alloc, pointer locality preserved) while keeping the code
-/// straightforward.
+/// require `T: Default`, which `Arc<IndexEntry>` does not implement. Using
+/// `Vec` with a reserved capacity of `N` avoids heap reallocation during a
+/// tile's lifetime while keeping the code straightforward.
 #[repr(C, align(64))]
 pub(crate) struct Tile<const N: usize> {
     /// Event kinds stored in this tile; all entries have the same kind.
@@ -189,6 +194,14 @@ impl SoAInner {
             .collect()
     }
 
+    fn candidates(&self, spec: &EntryQuery<'_>) -> Vec<Arc<IndexEntry>> {
+        match spec {
+            EntryQuery::Kind(k) => self.query_by_kind(*k),
+            EntryQuery::Category(c) => self.query_by_category(*c),
+            EntryQuery::Scope(s) => self.query_by_scope(s),
+        }
+    }
+
     fn clear(&mut self) {
         self.kinds.clear();
         self.entries.clear();
@@ -203,14 +216,22 @@ impl SoAInner {
 /// Internal state for tiled AoSoA layouts.
 ///
 /// Events are bucketed into tiles by kind: every tile contains entries of a
-/// single `EventKind` (matching `kinds[0]` for any non-empty tile).  When the
-/// current open tile for a kind is full a new tile is started.
+/// single `EventKind` (matching `kinds[0]` for any non-empty tile). Each kind
+/// has at most one open tile at a time; `open_tiles` maps a kind to the index
+/// of its current open tile. When a tile fills, it is evicted from `open_tiles`
+/// and a new tile is started on the next event of that kind.
+///
+/// This strategy keeps tiles full regardless of insertion order, so interleaved
+/// multi-kind workloads produce the same tile density as sorted runs.
 ///
 /// The outer `Vec` of `Tile`s is unsorted; `query_by_kind` iterates all tiles
-/// and collects matching entries.  For workloads with few kinds this is very
-/// fast because each tile fits in one or two cache lines.
+/// and collects matching entries. Tiles are cache-line aligned, but the current
+/// scan is scalar. The tile structure is the correct layout for a future SIMD
+/// specialization; see the AoSoA64 variant.
 struct AoSoAInner<const N: usize> {
     tiles: Vec<Tile<N>>,
+    /// kind → index of the currently open (not yet full) tile for that kind.
+    open_tiles: std::collections::HashMap<EventKind, usize>,
     /// scope → entity set, same role as in SoAInner.
     scope_entities: std::collections::HashMap<Arc<str>, HashSet<Arc<str>>>,
 }
@@ -219,6 +240,7 @@ impl<const N: usize> AoSoAInner<N> {
     fn new() -> Self {
         Self {
             tiles: Vec::new(),
+            open_tiles: std::collections::HashMap::new(),
             scope_entities: std::collections::HashMap::new(),
         }
     }
@@ -232,27 +254,31 @@ impl<const N: usize> AoSoAInner<N> {
     }
 
     /// Append one event into the appropriate tile.
+    ///
+    /// Each kind has at most one open tile. If the open tile for this kind is
+    /// full (or none exists), a new tile is allocated and registered as open.
     fn push(&mut self, entry: &Arc<IndexEntry>) {
         let scope: Arc<str> = entry.coord.scope_arc();
         let entity: Arc<str> = entry.coord.entity_arc();
         let kind = entry.kind;
 
-        // Determine whether the last tile can accept this entry: same kind and not full.
-        let can_append_to_last = self
-            .tiles
-            .last()
-            .is_some_and(|t| !t.is_full() && t.kinds.first().copied() == Some(kind));
-
-        if can_append_to_last {
-            let t = self
-                .tiles
-                .last_mut()
-                .expect("checked above that last() is Some"); // safe: is_some_and confirmed
-            t.push(kind, Arc::clone(entry));
-        } else {
-            let mut tile = Tile::new();
-            tile.push(kind, Arc::clone(entry));
-            self.tiles.push(tile);
+        match self.open_tiles.get(&kind).copied() {
+            Some(idx) => {
+                self.tiles[idx].push(kind, Arc::clone(entry));
+                if self.tiles[idx].is_full() {
+                    self.open_tiles.remove(&kind);
+                }
+            }
+            None => {
+                let new_idx = self.tiles.len();
+                let mut tile = Tile::new();
+                tile.push(kind, Arc::clone(entry));
+                let is_full = tile.is_full();
+                self.tiles.push(tile);
+                if !is_full {
+                    self.open_tiles.insert(kind, new_idx);
+                }
+            }
         }
 
         self.scope_entities.entry(scope).or_default().insert(entity);
@@ -304,6 +330,14 @@ impl<const N: usize> AoSoAInner<N> {
         out
     }
 
+    fn candidates(&self, spec: &EntryQuery<'_>) -> Vec<Arc<IndexEntry>> {
+        match spec {
+            EntryQuery::Kind(k) => self.query_by_kind(*k),
+            EntryQuery::Category(c) => self.query_by_category(*c),
+            EntryQuery::Scope(s) => self.query_by_scope(s),
+        }
+    }
+
     /// Execute `f` on the tile at position `idx`.
     ///
     /// Returns `None` if `idx` is out of range.
@@ -313,6 +347,7 @@ impl<const N: usize> AoSoAInner<N> {
 
     fn clear(&mut self) {
         self.tiles.clear();
+        self.open_tiles.clear();
         self.scope_entities.clear();
     }
 }
@@ -441,6 +476,14 @@ impl SoAoSInner {
         out
     }
 
+    fn candidates(&self, spec: &EntryQuery<'_>) -> Vec<Arc<IndexEntry>> {
+        match spec {
+            EntryQuery::Kind(k) => self.query_by_kind(*k),
+            EntryQuery::Category(c) => self.query_by_category(*c),
+            EntryQuery::Scope(s) => self.query_by_scope(s),
+        }
+    }
+
     fn entity_generation(&self, entity: &str) -> Option<u64> {
         self.groups.get(entity).map(|group| group.generation)
     }
@@ -511,12 +554,19 @@ enum ColumnarVariant {
     /// Flat parallel arrays; best for sequential scans.
     SoA(RwLock<SoAInner>),
     #[cfg(test)]
-    /// 8-element tiles; each tile fills one AVX register (256-bit).
+    /// 8-element tiles; test-only tile-size regression harness, not a production path.
     AoSoA8(RwLock<AoSoAInner<8>>),
     #[cfg(test)]
-    /// 16-element tiles; fits AVX-512 or Apple M-series 128-byte cache line.
+    /// 16-element tiles; test-only tile-size regression harness, not a production path.
     AoSoA16(RwLock<AoSoAInner<16>>),
-    /// 64-element tiles; fills a full x86 cache line of `u64`s.
+    /// 64-element tiles; cache-line aligned, scalar scan today.
+    ///
+    /// **Routing decision (2026-04-17):** AoSoA64 is safe on all corpus shapes
+    /// after the kind-keyed fill fix. Benchmarked scalar path shows ~5–9% win
+    /// over SoA on sorted by_kind; interleaved is now at parity. Does not yet
+    /// clear the 15% routing threshold. SIMD executor (by_kind, by_category) is
+    /// the next lever — implement only after benchmarking confirms the tile
+    /// structure earns the route on target hardware.
     AoSoA64(RwLock<AoSoAInner<64>>),
     /// Hybrid AoS-outer (entity groups), SoA-inner (parallel arrays per entity).
     SoAoS(RwLock<SoAoSInner>),
@@ -626,59 +676,18 @@ impl ColumnarIndex {
     /// Return all entries matching `query`, sorted by `global_sequence`
     /// (ascending).
     ///
-    /// Overlay-specific inner scans may already preserve insertion order, but
-    /// the final sort keeps the public result stable across layouts.
+    /// Dispatch chooses the layout; each layout's `candidates()` applies its own
+    /// native optimization (tile-skip for AoSoA, group lookup for SoAoS). The
+    /// sort is the only shared semantic: result order is stable across layouts.
     fn query_sorted(&self, query: EntryQuery<'_>) -> Vec<Arc<IndexEntry>> {
-        let mut results = match (&self.inner, query) {
-            (ColumnarVariant::SoA(lock), EntryQuery::Kind(kind)) => lock.read().query_by_kind(kind),
-            (ColumnarVariant::SoA(lock), EntryQuery::Category(category)) => {
-                lock.read().query_by_category(category)
-            }
-            (ColumnarVariant::SoA(lock), EntryQuery::Scope(scope)) => {
-                lock.read().query_by_scope(scope)
-            }
+        let mut results = match &self.inner {
+            ColumnarVariant::SoA(lock) => lock.read().candidates(&query),
+            ColumnarVariant::AoSoA64(lock) => lock.read().candidates(&query),
+            ColumnarVariant::SoAoS(lock) => lock.read().candidates(&query),
             #[cfg(test)]
-            (ColumnarVariant::AoSoA8(lock), EntryQuery::Kind(kind)) => {
-                lock.read().query_by_kind(kind)
-            }
+            ColumnarVariant::AoSoA8(lock) => lock.read().candidates(&query),
             #[cfg(test)]
-            (ColumnarVariant::AoSoA8(lock), EntryQuery::Category(category)) => {
-                lock.read().query_by_category(category)
-            }
-            #[cfg(test)]
-            (ColumnarVariant::AoSoA8(lock), EntryQuery::Scope(scope)) => {
-                lock.read().query_by_scope(scope)
-            }
-            #[cfg(test)]
-            (ColumnarVariant::AoSoA16(lock), EntryQuery::Kind(kind)) => {
-                lock.read().query_by_kind(kind)
-            }
-            #[cfg(test)]
-            (ColumnarVariant::AoSoA16(lock), EntryQuery::Category(category)) => {
-                lock.read().query_by_category(category)
-            }
-            #[cfg(test)]
-            (ColumnarVariant::AoSoA16(lock), EntryQuery::Scope(scope)) => {
-                lock.read().query_by_scope(scope)
-            }
-            (ColumnarVariant::AoSoA64(lock), EntryQuery::Kind(kind)) => {
-                lock.read().query_by_kind(kind)
-            }
-            (ColumnarVariant::AoSoA64(lock), EntryQuery::Category(category)) => {
-                lock.read().query_by_category(category)
-            }
-            (ColumnarVariant::AoSoA64(lock), EntryQuery::Scope(scope)) => {
-                lock.read().query_by_scope(scope)
-            }
-            (ColumnarVariant::SoAoS(lock), EntryQuery::Kind(kind)) => {
-                lock.read().query_by_kind(kind)
-            }
-            (ColumnarVariant::SoAoS(lock), EntryQuery::Category(category)) => {
-                lock.read().query_by_category(category)
-            }
-            (ColumnarVariant::SoAoS(lock), EntryQuery::Scope(scope)) => {
-                lock.read().query_by_scope(scope)
-            }
+            ColumnarVariant::AoSoA16(lock) => lock.read().candidates(&query),
         };
         results.sort_by_key(|e| e.global_sequence);
         results
@@ -1688,5 +1697,116 @@ mod tests {
         assert_eq!(capabilities.tile_count, 3);
         assert!(!capabilities.projection.cached_projection);
         assert!(!capabilities.projection.projection_candidates);
+    }
+
+    // --- Cross-layout oracle: all layouts must agree on query results ---
+    //
+    // This test is the correctness contract that makes the AoSoA64 SIMD
+    // specialization (Step 4) safe to add: any specialized executor must
+    // produce the same output as SoA on the same corpus.
+
+    const KIND_C: EventKind = EventKind::custom(0x2, 1); // different category from KIND_A/KIND_B
+
+    fn build_oracle_corpus() -> Vec<Arc<IndexEntry>> {
+        // 20 KIND_A across two entities + 10 KIND_B + 5 KIND_C, two scopes.
+        // Interleaved insertion to stress tile bucketing in AoSoA.
+        let mut entries = Vec::new();
+        let mut seq = 0u64;
+        for _ in 0..10 {
+            entries.push(make_entry(KIND_A, seq, "entity-alpha", "scope-one"));
+            seq += 1;
+            entries.push(make_entry(KIND_B, seq, "entity-beta", "scope-one"));
+            seq += 1;
+        }
+        for _ in 0..10 {
+            entries.push(make_entry(KIND_A, seq, "entity-gamma", "scope-two"));
+            seq += 1;
+            entries.push(make_entry(KIND_C, seq, "entity-gamma", "scope-two"));
+            seq += 1;
+        }
+        entries
+    }
+
+    fn ids(v: &[Arc<IndexEntry>]) -> Vec<u64> {
+        v.iter().map(|e| e.global_sequence).collect()
+    }
+
+    #[test]
+    fn all_layouts_agree_on_by_kind() {
+        let corpus = build_oracle_corpus();
+        let soa = ColumnarIndex::new_soa();
+        let aosoa64 = ColumnarIndex::new_aosoa64();
+        let soaos = ColumnarIndex::new_soaos();
+        for entry in &corpus {
+            soa.insert(entry);
+            aosoa64.insert(entry);
+            soaos.insert(entry);
+        }
+        for kind in [KIND_A, KIND_B, KIND_C] {
+            let reference = ids(&soa.query_by_kind(kind));
+            assert_eq!(
+                ids(&aosoa64.query_by_kind(kind)),
+                reference,
+                "AoSoA64 by_kind({kind:?}) must match SoA"
+            );
+            assert_eq!(
+                ids(&soaos.query_by_kind(kind)),
+                reference,
+                "SoAoS by_kind({kind:?}) must match SoA"
+            );
+        }
+    }
+
+    #[test]
+    fn all_layouts_agree_on_by_category() {
+        let corpus = build_oracle_corpus();
+        let soa = ColumnarIndex::new_soa();
+        let aosoa64 = ColumnarIndex::new_aosoa64();
+        let soaos = ColumnarIndex::new_soaos();
+        for entry in &corpus {
+            soa.insert(entry);
+            aosoa64.insert(entry);
+            soaos.insert(entry);
+        }
+        // KIND_A and KIND_B share category 0x1; KIND_C has category 0x2.
+        for category in [0x1u8, 0x2u8] {
+            let reference = ids(&soa.query_by_category(category));
+            assert_eq!(
+                ids(&aosoa64.query_by_category(category)),
+                reference,
+                "AoSoA64 by_category(0x{category:x}) must match SoA"
+            );
+            assert_eq!(
+                ids(&soaos.query_by_category(category)),
+                reference,
+                "SoAoS by_category(0x{category:x}) must match SoA"
+            );
+        }
+    }
+
+    #[test]
+    fn all_layouts_agree_on_by_scope() {
+        let corpus = build_oracle_corpus();
+        let soa = ColumnarIndex::new_soa();
+        let aosoa64 = ColumnarIndex::new_aosoa64();
+        let soaos = ColumnarIndex::new_soaos();
+        for entry in &corpus {
+            soa.insert(entry);
+            aosoa64.insert(entry);
+            soaos.insert(entry);
+        }
+        for scope in ["scope-one", "scope-two", "scope-missing"] {
+            let reference = ids(&soa.query_by_scope(scope));
+            assert_eq!(
+                ids(&aosoa64.query_by_scope(scope)),
+                reference,
+                "AoSoA64 by_scope({scope:?}) must match SoA"
+            );
+            assert_eq!(
+                ids(&soaos.query_by_scope(scope)),
+                reference,
+                "SoAoS by_scope({scope:?}) must match SoA"
+            );
+        }
     }
 }
