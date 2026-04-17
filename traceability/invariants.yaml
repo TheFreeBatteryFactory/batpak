@@ -14,7 +14,7 @@
   artifacts:
     - ART-STORE-MOD
     - ART-STORE-ERROR
-    - ART-STORE-MAINTENANCE
+    - ART-STORE-LIFECYCLE
     - ART-STORE-RUNTIME-CONTRACTS
 - id: INV-STORE-ERROR-TAXONOMY
   statement: Store failure paths must preserve structured error variants instead of laundering failures into defaults or strings.
@@ -24,7 +24,7 @@
 - id: INV-PAYLOAD-LENGTH-EXACT
   statement: Serialized payload lengths must be computed exactly and rejected when they exceed the wire contract.
   artifacts:
-    - ART-STORE-CONTRACTS
+    - ART-STORE-APPEND
     - ART-STORE-RUNTIME-CONTRACTS
 - id: INV-CLOCK-NOW-US-LIVE
   statement: The store wall-clock helper must produce positive microsecond timestamps that advance with real time.
@@ -45,7 +45,7 @@
   statement: Cache prefetch behavior must be discoverable through an explicit capability surface.
   artifacts:
     - ART-PROJECTION
-    - ART-STORE-PROJECTION-FLOW
+    - ART-STORE-PROJECTION
     - ART-PROJECTION-TESTS
 - id: INV-NATIVE-DELETE-IDEMPOTENT
   statement: NativeCache prefix deletion remains safe and idempotent — repeating a delete_prefix call after entries are already removed must return 0 with no errors.
@@ -62,12 +62,12 @@
   artifacts:
     - ART-DETERMINISTIC-CONCURRENCY-TESTS
     - ART-STORE-MOD
-    - ART-STORE-MAINTENANCE
+    - ART-STORE-LIFECYCLE
 - id: INV-OBSERVABILITY-FAILURE-PATHS
   statement: Named flows emit enough telemetry to distinguish successful execution from cache-degraded or causal-reaction execution paths.
   artifacts:
     - ART-OBSERVABILITY-TESTS
-    - ART-STORE-PROJECTION-FLOW
+    - ART-STORE-PROJECTION
     - ART-STORE-MOD
 - id: INV-CANONICAL-CONTAINER-CI
   statement: The canonical Linux CI path executes inside the checked-in devcontainer image rather than a separately hand-installed host environment.
@@ -79,7 +79,7 @@
   statement: Group commit (batch > 1) structurally requires idempotency keys on every append, enforced at append time via StoreError::IdempotencyRequired.
   artifacts:
     - ART-STORE-MOD
-    - ART-STORE-CONTRACTS
+    - ART-STORE-APPEND
     - ART-GROUP-COMMIT-TESTS
 - id: INV-CHECKPOINT-V2-INTERNED
   statement: Index checkpoint v2 persists an interner snapshot and uses InternId u32s instead of raw strings, saving ~22 bytes per entry and enabling fast cold-start restore. SIDX footers provide per-segment fast path.
@@ -90,7 +90,7 @@
 - id: INV-MMAP-SEALED-READS
   statement: Sealed segment reads use zero-copy memory-mapped I/O via memmap2. Active segment uses FD cache with pread (Unix) or seek+read (Windows).
   artifacts:
-    - ART-STORE-READER
+    - ART-STORE-SCAN
     - ART-STORE-CONFIG
 - id: INV-COLUMNAR-REPLACES-DASHMAP
   statement: The scan index always keeps the base AoS by_fact and scope_entities maps, and may additionally fan out into SoA, SoAoS, and AoSoA64 overlays. IndexTopology is the live public model for enabling those overlays.
@@ -109,15 +109,15 @@
   artifacts:
     - ART-STORE-INDEX
     - ART-STORE-WRITER
-    - ART-STORE-VISIBILITY-RANGES
-    - ART-STORE-MAINTENANCE
+    - ART-STORE-HIDDEN-RANGES
+    - ART-STORE-LIFECYCLE
     - ART-STORE-REBUILD
     - ART-CONTROL-PLANE-TESTS
     - ART-ADR-CONTROL-PLANE
 - id: INV-SCHEMA-VERSION-ISOLATION
   statement: Cached projections are keyed by entity + schema_version. Different versions get separate cache slots, preventing stale cached values from being served to new code.
   artifacts:
-    - ART-STORE-PROJECTION-FLOW
+    - ART-STORE-PROJECTION
     - ART-UNIFIED-TESTS
 - id: INV-REPLAY-LANE-SELECTION
   statement: Projection replay lane selection stays sealed to the built-in `ProjectionInput` modes, with `ReplayLane` naming the live default-vs-raw split and `RawMsgpackInput` remaining a real throughput lane rather than doc-only decoration.
@@ -138,23 +138,23 @@
 - id: INV-BATCH-CRASH-RECOVERY
   statement: Incomplete batches (BEGIN without matching COMMIT) are discarded during cold-start segment scan. Cross-segment batch state persists across segment boundaries to handle batches spanning rotation points.
   artifacts:
-    - ART-STORE-READER
+    - ART-STORE-SCAN
     - ART-BATCH-TESTS
 - id: INV-PREPARED-BATCH-STAGING-EQUIVALENCE
   statement: Prepared-batch staging and fresh batch construction must commit, reopen, and publish the same runtime-visible outcomes; reused staged packets may optimize allocation but must not alter persisted or replayed semantics.
   artifacts:
     - ART-STORE-WRITER
-    - ART-STORE-CONTRACTS
+    - ART-STORE-APPEND
     - ART-BATCH-STAGING-REGRESSION
 - id: INV-POSITION-HINT-PERSISTENCE
   statement: Append position hints may supply only DAG lane/depth; writer-owned HLC wall/counter and sequence remain authoritative, and non-root lane/depth must survive live commit, mmap reopen, checkpoint reopen, SIDX-backed reconstruction, and full rebuild.
   artifacts:
-    - ART-STORE-CONTRACTS
+    - ART-STORE-APPEND
     - ART-STORE-WRITER
     - ART-STORE-REBUILD
     - ART-STORE-SIDX
     - ART-STORE-CHECKPOINT
-    - ART-STORE-MMAP-INDEX
+    - ART-STORE-MMAP
     - ART-DAG-POSITION-HINT-TESTS
     - ART-ADR-POSITION-HINTS
     - ART-DX-DOCS

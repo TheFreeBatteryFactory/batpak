@@ -21,6 +21,7 @@ pub fn check(repo_root: &Path, tracked_files: &[PathBuf]) -> Result<()> {
     check_release_hardening_patterns(repo_root, tracked_files)?;
     check_portable_context_links(repo_root)?;
     check_root_doc_site_contract(repo_root)?;
+    check_reference_doc_completeness(repo_root)?;
     check_live_docs_do_not_link_archives(repo_root)?;
     check_public_surface_truth(repo_root)?;
     Ok(())
@@ -191,6 +192,27 @@ fn check_for_stale_references(repo_root: &Path, tracked_files: &[PathBuf]) -> Re
         "subscribe(region)",
         "cursor(region)",
         "`test-support`",
+        // Old flat store paths — renamed to subdirectory layout in v0.6 restructure.
+        // Safe to ban: the new paths all have an intermediate directory component
+        // (e.g. store/write/writer.rs, store/index/mod.rs) so these literal strings
+        // cannot appear as substrings of current paths.
+        "store/contracts.rs",
+        "store/control_plane.rs",
+        "store/reader.rs",
+        "store/maintenance.rs",
+        "store/mmap_index.rs",
+        "store/index_rebuild.rs",
+        "store/visibility_ranges.rs",
+        "store/projection_flow.rs",
+        "store/ancestors.rs",
+        "store/ancestors_hash.rs",
+        "store/ancestors_clock.rs",
+        "store/subscription.rs",
+        "store/writer.rs",
+        "store/fanout.rs",
+        "store/staging.rs",
+        "store/cursor.rs",
+        "store/watch.rs",
     ];
     let allow = [
         repo_root.join("docs/adr/ADR-0003-cache-safety-assumptions.md"),
@@ -637,6 +659,27 @@ fn check_root_doc_site_contract(repo_root: &Path) -> Result<()> {
         !content.contains("mdbook"),
         "xtask docs surface must not depend on mdbook",
     )?;
+    Ok(())
+}
+
+fn check_reference_doc_completeness(repo_root: &Path) -> Result<()> {
+    let reference = repo_root.join("REFERENCE.md");
+    let content = fs::read_to_string(&reference).context("read REFERENCE.md")?;
+    for heading in [
+        "## Storage And Cold Start",
+        "## Public Surface Witnesses",
+        "## Tuning Highlights",
+        "## Benchmark Surfaces",
+        "## Invariants",
+        "## Authoritative Paths",
+        "Key tradeoffs:",
+        "Canonical commands:",
+    ] {
+        ensure(
+            content.contains(heading),
+            format!("REFERENCE.md is missing required section or anchor `{heading}`"),
+        )?;
+    }
     Ok(())
 }
 

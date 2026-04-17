@@ -28,13 +28,13 @@
 - id: FLOW-WALK-ANCESTORS
   summary: Ancestor traversal follows hash links when available and falls back to deterministic clock order otherwise.
   artifacts:
-    - ART-STORE-ANCESTORS
+    - ART-STORE-ANCESTRY
     - ART-STORE-ADVANCED
 - id: FLOW-PROJECT
   summary: Project checks cache capability, optionally prefetches, validates freshness, and replays on miss through the sealed replay-lane contract (`JsonValueInput` default lane vs `RawMsgpackInput` raw lane).
   artifacts:
     - ART-PROJECTION
-    - ART-STORE-PROJECTION-FLOW
+    - ART-STORE-PROJECTION
     - ART-EVENT-SOURCING
     - ART-PROJECTION-TESTS
     - ART-OBSERVABILITY-TESTS
@@ -46,39 +46,39 @@
 - id: FLOW-SYNC
   summary: Explicit sync hands control to the writer and returns only after the writer acknowledges durability work.
   artifacts:
-    - ART-STORE-MAINTENANCE
+    - ART-STORE-LIFECYCLE
     - ART-OBSERVABILITY-TESTS
 - id: FLOW-SNAPSHOT
   summary: Snapshot syncs first, then copies the sealed on-disk segment set plus hidden-visibility metadata into a destination directory.
   artifacts:
-    - ART-STORE-MAINTENANCE
+    - ART-STORE-LIFECYCLE
     - ART-OBSERVABILITY-TESTS
     - ART-REPLAY-TESTS
 - id: FLOW-COMPACT
   summary: Compaction syncs, merges sealed segments, rebuilds the index, and preserves observable store truth.
   artifacts:
-    - ART-STORE-MAINTENANCE
+    - ART-STORE-LIFECYCLE
     - ART-REPLAY-TESTS
     - ART-ADR-COMPACTION
 - id: FLOW-WATCH-PROJECTION
   summary: Watch-projection subscribes to entity events and re-projects on each notification, returning updated state to the caller.
   artifacts:
     - ART-STORE-MOD
-    - ART-STORE-PROJECTION-FLOW
+    - ART-STORE-PROJECTION
     - ART-UNIFIED-TESTS
 - id: FLOW-BATCH-APPEND
   summary: Atomic batch append validates limits, preflights idempotency, normalizes fresh or prepared items through the same staging packets, writes BEGIN marker, event frames, COMMIT marker, fsyncs, then atomically publishes to the in-memory index.
   artifacts:
     - ART-STORE-MOD
-    - ART-STORE-CONTRACTS
+    - ART-STORE-APPEND
     - ART-STORE-WRITER
     - ART-BATCH-TESTS
     - ART-BATCH-STAGING-REGRESSION
-    - ART-STORE-READER
+    - ART-STORE-SCAN
 - id: FLOW-BATCH-RECOVERY
   summary: Cold-start segment scan stages batch frames until COMMIT marker confirmed; incomplete batches (missing COMMIT) are discarded. State persists across segment boundaries.
   artifacts:
-    - ART-STORE-READER
+    - ART-STORE-SCAN
     - ART-BATCH-TESTS
 - id: FLOW-FAULT-INJECT
   summary: Fault injection hooks at writer critical points allow chaos testing of crash/error scenarios under the dangerous-test-hooks feature gate.
@@ -88,7 +88,7 @@
 - id: FLOW-CLOSE
   summary: Close routes shutdown through the writer so outstanding work drains before the store exits.
   artifacts:
-    - ART-STORE-MAINTENANCE
+    - ART-STORE-LIFECYCLE
     - ART-OBSERVABILITY-TESTS
 - id: FLOW-VISIBILITY-FENCE
   summary: Visibility fences stage durable writes behind a single active token, publish them atomically on commit, and keep cancelled ranges hidden across restart and snapshot flows.
@@ -96,7 +96,7 @@
     - ART-STORE-MOD
     - ART-STORE-INDEX
     - ART-STORE-WRITER
-    - ART-STORE-VISIBILITY-RANGES
+    - ART-STORE-HIDDEN-RANGES
     - ART-CONTROL-PLANE-TESTS
     - ART-ADR-CONTROL-PLANE
 - id: FLOW-OPEN-FASTPATH
@@ -104,8 +104,9 @@
   artifacts:
     - ART-STORE-MOD
     - ART-STORE-REBUILD
+    - ART-STORE-SCAN
     - ART-STORE-CHECKPOINT
-    - ART-STORE-MMAP-INDEX
-    - ART-STORE-VISIBILITY-RANGES
+    - ART-STORE-MMAP
+    - ART-STORE-HIDDEN-RANGES
     - ART-CONTROL-PLANE-TESTS
     - ART-ADR-CONTROL-PLANE

@@ -90,25 +90,25 @@
   kind: source
   paths:
     - src/store/error.rs
-- id: ART-STORE-CONTRACTS
+- id: ART-STORE-APPEND
   kind: source
   paths:
-    - src/store/contracts.rs
-- id: ART-STORE-ANCESTORS
+    - src/store/append.rs
+- id: ART-STORE-ANCESTRY
   kind: source
   paths:
-    - src/store/ancestors.rs
-    - src/store/ancestors_hash.rs
-    - src/store/ancestors_clock.rs
-- id: ART-STORE-PROJECTION-FLOW
+    - src/store/ancestry/mod.rs
+    - src/store/ancestry/by_hash.rs
+    - src/store/ancestry/by_clock.rs
+- id: ART-STORE-PROJECTION
   kind: source
   paths:
-    - src/store/projection_flow.rs
-    - src/store/watch.rs
-- id: ART-STORE-MAINTENANCE
+    - src/store/projection/flow.rs
+    - src/store/projection/watch.rs
+- id: ART-STORE-LIFECYCLE
   kind: source
   paths:
-    - src/store/maintenance.rs
+    - src/store/lifecycle.rs
 - id: ART-STORE-DANGEROUS-TEST-HOOKS
   kind: source
   paths:
@@ -120,34 +120,35 @@
 - id: ART-STORE-INDEX
   kind: source
   paths:
-    - src/store/index.rs
+    - src/store/index/mod.rs
 - id: ART-STORE-WRITER
   kind: source
   paths:
-    - src/store/fanout.rs
-    - src/store/writer.rs
-    - src/store/staging.rs
-    - src/store/control_plane.rs
+    - src/store/write/fanout.rs
+    - src/store/write/writer.rs
+    - src/store/write/staging.rs
+    - src/store/write/control.rs
 - id: ART-STORE-REBUILD
   kind: source
   paths:
-    - src/store/index_rebuild.rs
-- id: ART-STORE-MMAP-INDEX
+    - src/store/cold_start/mod.rs
+    - src/store/cold_start/rebuild.rs
+- id: ART-STORE-MMAP
   kind: source
   paths:
-    - src/store/mmap_index.rs
-- id: ART-STORE-VISIBILITY-RANGES
+    - src/store/cold_start/mmap.rs
+- id: ART-STORE-HIDDEN-RANGES
   kind: source
   paths:
-    - src/store/visibility_ranges.rs
+    - src/store/hidden_ranges.rs
 - id: ART-STORE-SEGMENT
   kind: source
   paths:
-    - src/store/segment.rs
+    - src/store/segment/mod.rs
 - id: ART-PROJECTION
   kind: source
   paths:
-    - src/store/projection.rs
+    - src/store/projection/mod.rs
 - id: ART-GUARD-RECEIPT
   kind: source
   paths:
@@ -212,27 +213,34 @@
 - id: ART-STORE-INTERNER
   kind: source
   paths:
-    - src/store/interner.rs
+    - src/store/index/interner.rs
 - id: ART-STORE-COLUMNAR
   kind: source
   paths:
-    - src/store/columnar.rs
+    - src/store/index/columnar.rs
 - id: ART-STORE-SIDX
   kind: source
   paths:
-    - src/store/sidx.rs
+    - src/store/segment/sidx.rs
 - id: ART-STORE-CHECKPOINT
   kind: source
   paths:
-    - src/store/checkpoint.rs
-- id: ART-STORE-READER
+    - src/store/cold_start/checkpoint.rs
+- id: ART-STORE-SCAN
   kind: source
   paths:
-    - src/store/reader.rs
+    - src/store/segment/scan.rs
 - id: ART-UNIFIED-TESTS
   kind: tests
   paths:
-    - tests/unified_red.rs
+    - tests/support/unified_red.rs
+    - tests/unified_cold_start_red.rs
+    - tests/unified_config_red.rs
+    - tests/unified_group_commit_red.rs
+    - tests/unified_projection_red.rs
+    - tests/unified_reader_red.rs
+    - tests/unified_topology_red.rs
+    - tests/unified_watch_red.rs
     - tests/index_topology.rs
 - id: ART-CONTROL-PLANE-TESTS
   kind: tests

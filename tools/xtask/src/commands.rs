@@ -371,11 +371,11 @@ fn assert_mutation_score(output_dir: &Path, min_catch_pct: u32) -> Result<()> {
     let tested = caught + missed;
 
     if tested == 0 {
-        eprintln!(
-            "mutants: no tested mutants found in {}; skipping score gate",
+        bail!(
+            "mutants: no tested mutants found in {}. Treating this as a failure because the \
+             mutation surface produced no evidence.",
             output_dir.display()
         );
-        return Ok(());
     }
 
     let score_pct = (caught * 100) / tested;
@@ -399,15 +399,16 @@ fn mutants_command(surface: MutantSurface, shard: Option<&str>) -> Vec<String> {
         MutantSurface::AllFeatures => [
             "mutants",
             "--file",
-            "src/store/*.rs",
+            "src/store/**/*.rs",
             "--file",
             "src/wire.rs",
             "--file",
             "src/guard/*.rs",
             "--file",
             "src/pipeline/*.rs",
+            // by_clock is not compiled when blake3 is enabled (--all-features).
             "--exclude",
-            "src/store/ancestors_clock.rs",
+            "src/store/ancestry/by_clock.rs",
             "--all-features",
             "--test-tool",
             "cargo",
@@ -418,9 +419,10 @@ fn mutants_command(surface: MutantSurface, shard: Option<&str>) -> Vec<String> {
         MutantSurface::NoDefaultFeatures => [
             "mutants",
             "--file",
-            "src/store/*.rs",
+            "src/store/**/*.rs",
+            // by_hash is not compiled when blake3 is disabled (--no-default-features).
             "--exclude",
-            "src/store/ancestors_hash.rs",
+            "src/store/ancestry/by_hash.rs",
             "--no-default-features",
             "--test-tool",
             "cargo",
@@ -445,7 +447,7 @@ fn run_mutants_surface(
     min_catch_pct: u32,
 ) -> Result<()> {
     let _ = std::fs::remove_dir_all(output_dir);
-    let _ = cargo(mutants_command(surface, shard));
+    cargo(mutants_command(surface, shard))?;
     assert_mutation_score(output_dir, min_catch_pct)
 }
 
@@ -635,7 +637,7 @@ mod tests {
             vec![
                 "mutants",
                 "--file",
-                "src/store/*.rs",
+                "src/store/**/*.rs",
                 "--file",
                 "src/wire.rs",
                 "--file",
@@ -643,7 +645,7 @@ mod tests {
                 "--file",
                 "src/pipeline/*.rs",
                 "--exclude",
-                "src/store/ancestors_clock.rs",
+                "src/store/ancestry/by_clock.rs",
                 "--all-features",
                 "--test-tool",
                 "cargo",
@@ -663,9 +665,9 @@ mod tests {
             vec![
                 "mutants",
                 "--file",
-                "src/store/*.rs",
+                "src/store/**/*.rs",
                 "--exclude",
-                "src/store/ancestors_hash.rs",
+                "src/store/ancestry/by_hash.rs",
                 "--no-default-features",
                 "--test-tool",
                 "cargo",
