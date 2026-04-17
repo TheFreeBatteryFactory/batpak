@@ -135,6 +135,11 @@ fn check_for_absolute_paths(repo_root: &Path, tracked_files: &[PathBuf]) -> Resu
     let absolute_unix = Regex::new(r"(?m)(file://|/Users/|/home/|/opt/|/tmp/)").unwrap();
     let allow = [
         repo_root.join(".devcontainer/Dockerfile"),
+        // devcontainer.json intentionally describes a Linux container's
+        // filesystem (mount points, CARGO_TARGET_DIR, workspaceFolder). Same
+        // rationale as the Dockerfile: not portable source, already scoped to
+        // a single OS by construction.
+        repo_root.join(".devcontainer/devcontainer.json"),
         repo_root.join("tools/integrity/src/main.rs"),
         repo_root.join("tools/integrity/src/architecture_lints.rs"),
     ];

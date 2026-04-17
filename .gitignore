@@ -1,11 +1,14 @@
 .claude/
 .codex/
+# Cargo build artifacts. `**/target/` catches nested targets in any sub-crate
+# (e.g. fixtures/downstream/target/, tools/integrity/target/). Keep the root
+# `/target/` line for clarity; `**/target/` is the real guarantee.
 /target/
+**/target/
 /Cargo.lock
 /.artifacts/
 /.integrity-cache/
 /.cache/
-/templates/minimal-app/target/
 /guide/book/
 *.profraw
 *.log
@@ -17,6 +20,8 @@
 .env.local
 .DS_Store
 .idea/
+.vscode/
 mutants*/
-tools/integrity/target/
-tools/integrity/Cargo.lock
+# Nested Cargo.lock files from path-dependency fixture crates — none of the
+# fixtures ship, so their lockfiles are cache, not source of truth.
+fixtures/*/Cargo.lock

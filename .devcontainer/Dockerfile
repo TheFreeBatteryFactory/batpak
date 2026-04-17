@@ -1,6 +1,11 @@
 FROM rust:bookworm
 
 ARG DEBIAN_FRONTEND=noninteractive
+# Host-matched UID/GID so files created inside the container appear owned
+# by the host user on the mounted workspace, not root or nobody.
+# Override via .devcontainer/devcontainer.json build args.
+ARG USER_UID=1000
+ARG USER_GID=1000
 ENV PATH="/usr/local/cargo/bin:${PATH}"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -9,7 +14,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     pkg-config \
     ca-certificates \
+    sudo \
     && rm -rf /var/lib/apt/lists/*
+
+# Non-root user matching host UID/GID. Passwordless sudo so the container
+# can still elevate when a tool really needs to (e.g. installing a one-off
+# apt package), without making every build run as root.
+RUN groupadd --gid ${USER_GID} dev \
+    && useradd --uid ${USER_UID} --gid ${USER_GID} -m -s /bin/bash dev \
+    && echo 'dev ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/dev \
+    && chmod 0440 /etc/sudoers.d/dev
 
 # Prefer prebuilt binaries for the heavyweight cargo subcommands so local
 # preflight cold-starts do not spend minutes compiling tooling from source.
@@ -25,7 +39,13 @@ RUN cargo binstall --no-confirm cargo-llvm-cov@0.8.5 || cargo install --locked c
 # so install cargo-mutants from source in the canonical container.
 RUN cargo install --locked cargo-mutants@27.0.0
 
-# Allow git operations on the mounted workspace (ownership mismatch in CI)
-RUN git config --global --add safe.directory /workspace/batpak
+# System-level safe.directory so every user in the container (root and dev)
+# sees the mounted workspace as trusted, regardless of UID mapping.
+RUN git config --system --add safe.directory /workspace/batpak
 
+# Give dev ownership of the cargo + rustup homes so cargo can write without
+# needing sudo. Installed-tool binaries in /usr/local/cargo/bin stay readable.
+RUN chown -R dev:dev /usr/local/cargo /usr/local/rustup
+
+USER dev
 WORKDIR /workspace/batpak
