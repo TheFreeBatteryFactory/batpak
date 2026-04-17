@@ -16,6 +16,7 @@ use crate::event::{Event, EventHeader, EventKind, HashChain};
 use crate::store::append::BatchAppendItem;
 use crate::store::config::ValidatedStoreConfig;
 use crate::store::index::{DiskPos, IndexEntry, StoreIndex};
+use crate::store::segment::sidx::{kind_to_raw, SidxEntry};
 use crate::store::segment::{self, Active, FramePayloadRef, Segment};
 use crate::store::{AppendReceipt, StoreConfig, StoreError};
 use flume::{Receiver, Sender};
@@ -318,20 +319,9 @@ impl FenceLedger {
     }
 }
 
-struct SidxRecord {
-    entry: crate::store::segment::sidx::SidxEntry,
-    coord: Coordinate,
-}
-
-impl SidxRecord {
-    fn record(self, collector: &mut crate::store::segment::sidx::SidxEntryCollector) {
-        collector.record(self.entry, self.coord.entity(), self.coord.scope());
-    }
-}
-
 struct CommitArtifacts {
     index_entry: IndexEntry,
-    sidx_record: SidxRecord,
+    sidx_entry: SidxEntry,
     notification: Notification,
     envelope: Option<CommittedEventEnvelope>,
 }
@@ -344,7 +334,7 @@ struct CommitInternedIds {
 
 struct BatchCommitArtifacts {
     entries: Vec<IndexEntry>,
-    sidx_records: Vec<SidxRecord>,
+    sidx_entries: Vec<SidxEntry>,
     notifications: Vec<Notification>,
     envelopes: Vec<CommittedEventEnvelope>,
 }
@@ -353,7 +343,7 @@ impl BatchCommitArtifacts {
     fn with_capacity(len: usize) -> Self {
         Self {
             entries: Vec::with_capacity(len),
-            sidx_records: Vec::with_capacity(len),
+            sidx_entries: Vec::with_capacity(len),
             notifications: Vec::with_capacity(len),
             envelopes: Vec::with_capacity(len),
         }
@@ -361,7 +351,7 @@ impl BatchCommitArtifacts {
 
     fn push(&mut self, committed: CommitArtifacts) {
         self.entries.push(committed.index_entry);
-        self.sidx_records.push(committed.sidx_record);
+        self.sidx_entries.push(committed.sidx_entry);
         self.notifications.push(committed.notification);
         if let Some(envelope) = committed.envelope {
             self.envelopes.push(envelope);
@@ -1226,7 +1216,7 @@ impl WriterState<'_> {
                 position_hint.depth,
             );
             computed.push(StagedCommittedEvent::new(
-                item.coord(),
+                item.coord().clone(),
                 meta,
                 timing,
                 HashChain {
@@ -1397,7 +1387,7 @@ impl WriterState<'_> {
             guards.dag_depth,
         );
         let staged = StagedCommittedEvent::new(
-            coord,
+            coord.clone(),
             meta,
             timing,
             HashChain {
@@ -1419,8 +1409,12 @@ impl WriterState<'_> {
             event.header.flags,
             emit_envelope,
         );
+        self.sidx_collector.record(
+            committed.sidx_entry,
+            committed.index_entry.coord.entity(),
+            committed.index_entry.coord.scope(),
+        );
         self.index.insert(committed.index_entry);
-        committed.sidx_record.record(&mut self.sidx_collector);
 
         debug!(event_id = %event.header.event_id, clock = clock, "append committed");
 
@@ -1571,7 +1565,9 @@ impl WriterState<'_> {
 
         // STEP 12/14: Materialize all post-write projections in one pass.
         let artifacts = self.materialize_batch_commit_artifacts(prepared, &computed, &receipts);
-        Self::record_sidx_records(artifacts.sidx_records, &mut self.sidx_collector);
+        for (sidx_entry, index_entry) in artifacts.sidx_entries.iter().zip(artifacts.entries.iter()) {
+            self.sidx_collector.record(sidx_entry.clone(), index_entry.coord.entity(), index_entry.coord.scope());
+        }
 
         // FAULT INJECTION: Before atomic publish to index
         #[cfg(feature = "dangerous-test-hooks")]
@@ -1633,8 +1629,8 @@ impl WriterState<'_> {
             // Encode frame.
             let frame_payload = FramePayloadRef {
                 event: &event,
-                entity: staged.entity(),
-                scope: staged.scope(),
+                entity: staged.coord.entity(),
+                scope: staged.coord.scope(),
             };
             let frame = segment::frame_encode(&frame_payload)
                 .map_err(|e| batch_failed(idx, BatchFailureStage::Encoding, e))?;
@@ -1689,28 +1685,65 @@ impl WriterState<'_> {
         flags: u8,
         emit_envelope: bool,
     ) -> CommitArtifacts {
-        let views =
-            staged.materialize_views(disk_pos, interned_ids.entity_id, interned_ids.scope_id);
+        let coord = staged.coord.clone();
+        let position = staged.position();
+        let notification = Notification {
+            event_id: staged.meta.event_id,
+            correlation_id: staged.meta.correlation_id,
+            causation_id: staged.meta.causation_id,
+            coord: coord.clone(),
+            kind: staged.meta.kind,
+            sequence: staged.meta.global_sequence,
+            position,
+        };
+        let index_entry = IndexEntry {
+            event_id: staged.meta.event_id,
+            correlation_id: staged.meta.correlation_id,
+            causation_id: staged.meta.causation_id,
+            coord: coord.clone(),
+            entity_id: interned_ids.entity_id,
+            scope_id: interned_ids.scope_id,
+            kind: staged.meta.kind,
+            wall_ms: staged.timing.wall_ms,
+            clock: staged.timing.clock,
+            dag_lane: staged.timing.dag_lane,
+            dag_depth: staged.timing.dag_depth,
+            hash_chain: staged.hash_chain.clone(),
+            disk_pos,
+            global_sequence: staged.meta.global_sequence,
+        };
+        let sidx_entry = SidxEntry {
+            event_id: staged.meta.event_id,
+            entity_idx: 0,
+            scope_idx: 0,
+            kind: kind_to_raw(staged.meta.kind),
+            wall_ms: staged.timing.wall_ms,
+            clock: staged.timing.clock,
+            dag_lane: staged.timing.dag_lane,
+            dag_depth: staged.timing.dag_depth,
+            prev_hash: staged.hash_chain.prev_hash,
+            event_hash: staged.hash_chain.event_hash,
+            frame_offset: disk_pos.offset,
+            frame_length: disk_pos.length,
+            global_sequence: staged.meta.global_sequence,
+            correlation_id: staged.meta.correlation_id,
+            causation_id: staged.meta.causation_id.unwrap_or(0),
+        };
         let envelope = if emit_envelope {
             staged
                 .stored_event(payload_bytes, flags)
                 .map(|stored| CommittedEventEnvelope {
-                    notification: views.notification.clone(),
+                    notification: notification.clone(),
                     stored,
                 })
                 .ok()
         } else {
             None
         };
-        let sidx_record = SidxRecord {
-            entry: views.sidx_entry,
-            coord: views.notification.coord.clone(),
-        };
-
         CommitArtifacts {
-            index_entry: views.index_entry,
-            sidx_record,
-            notification: views.notification,
+            index_entry,
+            sidx_entry,
+            notification,
             envelope,
         }
     }
@@ -1750,15 +1783,6 @@ impl WriterState<'_> {
         }
 
         artifacts
-    }
-
-    fn record_sidx_records(
-        records: Vec<SidxRecord>,
-        collector: &mut crate::store::segment::sidx::SidxEntryCollector,
-    ) {
-        for record in records {
-            record.record(collector);
-        }
     }
 
     fn broadcast_commit_artifacts(

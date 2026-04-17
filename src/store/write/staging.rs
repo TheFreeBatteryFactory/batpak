@@ -1,11 +1,9 @@
-use super::fanout::Notification;
 use crate::coordinate::{Coordinate, DagPosition};
 use crate::event::{Event, EventHeader, EventKind, HashChain, StoredEvent};
 use crate::store::append::checked_payload_len;
 use crate::store::append::{AppendOptions, BatchAppendItem, CausationRef};
 use crate::store::index::interner::InternId;
-use crate::store::index::{DiskPos, IndexEntry, StoreIndex};
-use crate::store::segment::sidx::{kind_to_raw, SidxEntry};
+use crate::store::index::StoreIndex;
 use crate::store::StoreError;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -235,46 +233,11 @@ impl PreparedBatchInternedIds {
 }
 
 #[derive(Clone)]
-pub(crate) struct StagedCoordinate {
-    coord: Coordinate,
-    entity: Arc<str>,
-    scope: Arc<str>,
-}
-
-impl StagedCoordinate {
-    pub(crate) fn from_coordinate(coord: &Coordinate) -> Self {
-        Self {
-            coord: coord.clone(),
-            entity: coord.entity_arc(),
-            scope: coord.scope_arc(),
-        }
-    }
-
-    pub(crate) fn coord(&self) -> &Coordinate {
-        &self.coord
-    }
-
-    pub(crate) fn entity(&self) -> &str {
-        self.entity.as_ref()
-    }
-
-    pub(crate) fn scope(&self) -> &str {
-        self.scope.as_ref()
-    }
-}
-
-#[derive(Clone)]
 pub(crate) struct StagedCommittedEvent {
-    coord: StagedCoordinate,
-    meta: StagedCommitMeta,
-    timing: StagedCommitTiming,
-    hash_chain: HashChain,
-}
-
-pub(crate) struct MaterializedCommitViews {
-    pub(crate) index_entry: IndexEntry,
-    pub(crate) notification: Notification,
-    pub(crate) sidx_entry: SidxEntry,
+    pub(crate) coord: Coordinate,
+    pub(crate) meta: StagedCommitMeta,
+    pub(crate) timing: StagedCommitTiming,
+    pub(crate) hash_chain: HashChain,
 }
 
 #[derive(Clone, Copy)]
@@ -333,29 +296,17 @@ impl StagedCommitTiming {
 
 impl StagedCommittedEvent {
     pub(crate) fn new(
-        coord: &Coordinate,
+        coord: Coordinate,
         meta: StagedCommitMeta,
         timing: StagedCommitTiming,
         hash_chain: HashChain,
     ) -> Self {
         Self {
-            coord: StagedCoordinate::from_coordinate(coord),
+            coord,
             meta,
             timing,
             hash_chain,
         }
-    }
-
-    pub(crate) fn coord(&self) -> &Coordinate {
-        self.coord.coord()
-    }
-
-    pub(crate) fn entity(&self) -> &str {
-        self.coord.entity()
-    }
-
-    pub(crate) fn scope(&self) -> &str {
-        self.coord.scope()
     }
 
     pub(crate) fn event_id(&self) -> u128 {
@@ -364,6 +315,16 @@ impl StagedCommittedEvent {
 
     pub(crate) fn global_sequence(&self) -> u64 {
         self.meta.global_sequence
+    }
+
+    pub(crate) fn position(&self) -> DagPosition {
+        DagPosition::with_hlc(
+            self.timing.wall_ms,
+            0,
+            self.timing.dag_depth,
+            self.timing.dag_lane,
+            self.timing.clock,
+        )
     }
 
     fn event_header(&self, payload_size: u32) -> EventHeader {
@@ -389,69 +350,6 @@ impl StagedCommittedEvent {
         Ok(event)
     }
 
-    pub(crate) fn position(&self) -> DagPosition {
-        DagPosition::with_hlc(
-            self.timing.wall_ms,
-            0,
-            self.timing.dag_depth,
-            self.timing.dag_lane,
-            self.timing.clock,
-        )
-    }
-
-    pub(crate) fn materialize_views(
-        &self,
-        disk_pos: DiskPos,
-        entity_id: InternId,
-        scope_id: InternId,
-    ) -> MaterializedCommitViews {
-        let notification = Notification {
-            event_id: self.meta.event_id,
-            correlation_id: self.meta.correlation_id,
-            causation_id: self.meta.causation_id,
-            coord: self.coord().clone(),
-            kind: self.meta.kind,
-            sequence: self.meta.global_sequence,
-            position: self.position(),
-        };
-        MaterializedCommitViews {
-            index_entry: IndexEntry {
-                event_id: self.meta.event_id,
-                correlation_id: self.meta.correlation_id,
-                causation_id: self.meta.causation_id,
-                coord: notification.coord.clone(),
-                entity_id,
-                scope_id,
-                kind: self.meta.kind,
-                wall_ms: self.timing.wall_ms,
-                clock: self.timing.clock,
-                dag_lane: self.timing.dag_lane,
-                dag_depth: self.timing.dag_depth,
-                hash_chain: self.hash_chain.clone(),
-                disk_pos,
-                global_sequence: self.meta.global_sequence,
-            },
-            notification,
-            sidx_entry: SidxEntry {
-                event_id: self.meta.event_id,
-                entity_idx: 0,
-                scope_idx: 0,
-                kind: kind_to_raw(self.meta.kind),
-                wall_ms: self.timing.wall_ms,
-                clock: self.timing.clock,
-                dag_lane: self.timing.dag_lane,
-                dag_depth: self.timing.dag_depth,
-                prev_hash: self.hash_chain.prev_hash,
-                event_hash: self.hash_chain.event_hash,
-                frame_offset: disk_pos.offset,
-                frame_length: disk_pos.length,
-                global_sequence: self.meta.global_sequence,
-                correlation_id: self.meta.correlation_id,
-                causation_id: self.meta.causation_id.unwrap_or(0),
-            },
-        }
-    }
-
     pub(crate) fn stored_event(
         &self,
         payload_bytes: &[u8],
@@ -467,7 +365,7 @@ impl StagedCommittedEvent {
         event.header.content_hash = self.hash_chain.event_hash;
 
         Ok(StoredEvent {
-            coordinate: self.coord().clone(),
+            coordinate: self.coord.clone(),
             event,
         })
     }
