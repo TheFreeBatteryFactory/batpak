@@ -226,8 +226,9 @@ while let Some(notif) = sub.recv() {
 }
 ```
 
-Use this for dashboards, live UI, and approximate live state. It may drop
-notifications under backpressure.
+Use this for dashboards, live UI, and approximate live state. The writer's
+fanout calls `try_send` into a bounded channel and drops the subscriber on
+`Full` — slow subscribers are dropped, not retained.
 
 ### `scan()`
 
@@ -253,12 +254,17 @@ while let Some(entry) = cursor.poll() {
 }
 ```
 
-Use cursor paths when you need guaranteed replay from the index.
+Use cursor paths when you need at-least-once replay from the index.
+Guarantee scope: at-least-once within process lifetime, or across process
+restart if `CursorWorkerConfig.checkpoint_id` is set.
 
 ### `cursor_worker`
 
 Use `cursor_worker(...)` for restartable background consumers with
-`RestartPolicy` and explicit batch processing.
+`RestartPolicy` and explicit batch processing. Set
+`CursorWorkerConfig.checkpoint_id: Option<String>` to persist resume
+position under `{data_dir}/cursors/{id}.ckpt` (written with parent-dir
+fsync). Without a `checkpoint_id`, resume is in-memory only.
 
 ## Control Plane
 
@@ -309,8 +315,9 @@ Use `store.writer_pressure()` for direct mailbox telemetry.
 
 ### Outbox batching
 
-Outbox staging is not yet typed in v1 — pass the raw kind + payload
-bytes here. Typed outbox staging lands in the next lock.
+`Outbox::stage` collects events for one batch-shaped commit. Pass the
+payload type's `KIND` constant so callsites stay free of literal
+category/type_id pairs:
 
 ```rust
 let mut outbox = store.outbox();
@@ -321,10 +328,10 @@ assert_eq!(receipts.len(), 1);
 
 ### Visibility fences
 
-`VisibilityFence` gives you durable-now, visible-later semantics.
-Fence submit is also still on the raw surface in v1 — use the payload
-type's `KIND` constant so callsites stay free of literal category/type_id
-pairs:
+`VisibilityFence` gives you durable-now, visible-on-commit semantics:
+writes go to disk through the normal commit path but stay invisible to
+readers until `fence.commit()` runs. Use the payload type's `KIND`
+constant so callsites stay free of literal category/type_id pairs:
 
 ```rust
 let fence = store.begin_visibility_fence()?;

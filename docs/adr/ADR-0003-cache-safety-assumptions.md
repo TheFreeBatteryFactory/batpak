@@ -14,4 +14,4 @@ Cache behavior is surfaced through an explicit capability API, and backend-speci
 - Tests can assert prefetch support intentionally.
 - Cache backends are explicit about what they support; agents and tools can query capabilities instead of assuming.
 - The current `NativeCache` requires no unsafe code; the surface that would have needed unsafe review is gone.
-- Future backends (if added) inherit the capability API and the no-implicit-features rule.
+- Any additional backend inherits the capability API and the no-implicit-features rule.

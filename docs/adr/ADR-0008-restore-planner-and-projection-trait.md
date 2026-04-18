@@ -35,8 +35,8 @@ Replay lane selection is automatic based on the associated type.
 `RoutingSummary` is the shared internal contract: chunk boundaries,
 entity run boundaries, counts, and sequence ranges. Consumed by
 restore, projection replay planning, and view materialization.
-Designed as `#[derive(Clone, Debug, Serialize, Deserialize)]` for
-future process-boundary portability.
+Designed as `#[derive(Clone, Debug, Serialize, Deserialize)]` to keep the
+option open for process-boundary portability.
 
 ## Consequences
 - Single-entity 1M-event restore no longer hits O(n log n) BTreeMap

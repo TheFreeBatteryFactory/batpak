@@ -9,7 +9,7 @@ The store needed a richer control surface around the existing synchronous API wi
 ## Decision
 The crate keeps the blocking `append` / `append_batch` API as the default surface, but implements it on top of additive control-plane primitives:
 
-- `submit*` plus tickets for enqueue-now / wait-later behavior
+- `submit*` plus tickets for non-blocking enqueue with a separate blocking wait on the ticket
 - `try_submit*` plus `Outcome` for soft-pressure and cancellation signaling
 - producer-side `Outbox`
 - public `VisibilityFence`

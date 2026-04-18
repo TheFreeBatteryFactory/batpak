@@ -7,9 +7,9 @@ Accepted
 
 `DagPosition` already carried branch coordinates (`lane`, `depth`) alongside the
 writer-owned HLC and per-entity sequence fields, but the public append surface
-did not let callers express non-root branch placement. Later cold-start
-artifacts also needed to preserve those branch coordinates consistently across
-live commit, mmap restore, checkpoint restore, SIDX-backed reconstruction, and
+did not let callers express non-root branch placement. Cold-start artifacts
+also needed to preserve those branch coordinates consistently across live
+commit, mmap restore, checkpoint restore, SIDX-backed reconstruction, and
 full frame-scan rebuild.
 
 That left two questions that needed to be answered explicitly:

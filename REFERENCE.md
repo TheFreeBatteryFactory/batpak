@@ -86,12 +86,12 @@ argument, the store exposes a typed sibling that infers the kind from
 - read: `by_fact_typed::<T>()`
 - typestate: `Transition::from_payload::<P: EventPayload>`
 
-Outbox staging, `append_batch` itself, and `VisibilityFence::submit` remain
-on the raw `EventKind` surface in the current lock. The raw surfaces stay
-available for callers that compute `EventKind` at runtime. See
-`docs/adr/ADR-0010-eventpayload-macro-surface.md` for scope, schema-evolution
-rules, and the explicitly deferred locks (projection synthesis, typed
-reactor ergonomics).
+The raw `EventKind` surfaces stay available for callers that compute
+`EventKind` at runtime; the typed siblings are additive. See
+`docs/adr/ADR-0010-eventpayload-macro-surface.md` for scope and
+schema-evolution rules. Typed reactor ergonomics
+(`#[derive(EventSourced)]`, `#[derive(MultiEventReactor)]`,
+`react_loop_typed`, `react_loop_multi`) are covered by ADR-0011.
 
 ## Runtime Map
 
