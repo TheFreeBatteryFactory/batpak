@@ -1,4 +1,4 @@
-// justifies: shared bench helpers are imported by different bench binaries; each bench binary only uses a subset so unused helpers are expected in every compile.
+// justifies: ADR-0005; shared bench helpers in benches/common/mod.rs are imported by different bench binaries; each bench binary only uses a subset so unused helpers are expected in every compile.
 #![allow(dead_code)]
 
 use criterion::measurement::WallTime;

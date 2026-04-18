@@ -1,4 +1,4 @@
-// justifies: test body exercises precondition-holds invariants; .unwrap is acceptable in test code where a panic is a test failure.
+// justifies: INV-TEST-PANIC-AS-ASSERTION; test body in tests/react_loop_typed.rs exercises precondition-holds invariants; .unwrap is acceptable in test code where a panic is a test failure.
 #![allow(clippy::unwrap_used, clippy::panic)]
 //! Integration tests for `react_loop_typed<T, R>` and the shared canal
 //! runner (Dispatch Chapter T4b).

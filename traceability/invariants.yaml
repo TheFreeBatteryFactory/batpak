@@ -171,3 +171,38 @@
   artifacts:
     - ART-STORE-FAULT
     - ART-STORE-CONFIG
+- id: INV-ALLOW-IS-DESIGN
+  statement: "Every `#[allow(...)]` in the repo is a deliberate design decision, not a silencer. The allow carries a `// justifies <prose>` comment on the same or preceding line that cites at least one resolvable anchor — an INV-id from this catalog, an `ADR-NNNN` under `docs/adr/`, or a concrete repo path (`src/...`, `tests/...`, `examples/...`, `batpak-macros/...`, `batpak-macros-support/...`) — so the rationale is traceable, not narrative-only."
+  artifacts:
+    - ART-DOCTOR
+    - ART-STRUCTURAL-CHECK
+    - ART-BUILD-RS
+- id: INV-EXAMPLES-OBSERVABLE-OUTPUT
+  statement: "Examples in examples/*.rs prove shipped behaviour by producing observable stdout/stderr output that a reader can see; print_stdout, print_stderr, wildcard match arms over enums, and bounded integer narrowing in teaching fixtures are expected for that role. The Teaches-header convention keeps each example focused on a single pattern."
+  artifacts:
+    - ART-EXAMPLES
+- id: INV-MACRO-BOUNDED-CAST
+  statement: "Narrowing integer casts inside batpak-macros (for example u64 to u8 or u64 to u16) are preceded by an explicit u8::MAX / u16::MAX comparison that returns an error before the cast, so clippy::cast_possible_truncation at the cast site cannot fire."
+  artifacts:
+    - ART-MACROS
+- id: INV-GENERATED-WITNESS-PIN
+  statement: "Derive-generated handler-signature pin consts (for example _HANDLER_PIN_<i>, __batpak_kind_collision_check_<Ident>) are type-check witnesses — they exist to make a mismatched handler signature fail compilation, have no runtime role, and embed the user's ident (often CamelCase or snake). non_upper_case_globals, non_snake_case, and dead_code are suppressed on those specific generated items only."
+  artifacts:
+    - ART-MACROS
+- id: INV-LITERAL-REGEX-UNWRAP-SAFE
+  statement: "unwrap / expect on regex::Regex::new with a literal string pattern inside tool code is safe because the pattern is a compile-time constant string with known-valid regex syntax; the call cannot fire in any reachable execution of the tool."
+  artifacts:
+    - ART-DOCTOR
+- id: INV-TEST-PANIC-AS-ASSERTION
+  statement: "Test bodies under tests/ use panic!, unwrap, and expect as the assertion style — when a test precondition, fixture setup, or invariant check fails, the panic is the test failure signal. File-level #![allow(clippy::unwrap_used, clippy::panic)] is the acceptable scope for this idiom."
+  artifacts:
+    - ART-TESTS
+- id: INV-BUILD-FAIL-FAST
+  statement: "build.rs halts the build on invariant violations with a cargo-parseable explanation. Panic sites are consolidated through the crate-private fail helper so the policy is expressed in one place; the file-level #![allow(clippy::panic)] attribute covers that single documented exit path."
+  artifacts:
+    - ART-BUILD-RS
+- id: INV-TYPESTATE-OPEN-HAS-WRITER
+  statement: "Store<Open> is only constructible by Store::open after the writer thread is initialized; Store::<Open>::writer_ref() is the single crate-private access point for the writer handle, and its expect is a typestate invariant assertion that cannot fail in reachable code."
+  artifacts:
+    - ART-STORE-MOD
+    - ART-STORE-LIFECYCLE

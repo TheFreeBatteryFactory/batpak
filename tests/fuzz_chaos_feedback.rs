@@ -1,4 +1,4 @@
-// justifies: fuzz+chaos feedback harness spawns threads, reports shrink traces to stderr, and uses unwrap/panic as assertion style while narrowing proptest-bounded counters.
+// justifies: INV-TEST-PANIC-AS-ASSERTION, INV-MACRO-BOUNDED-CAST; fuzz+chaos feedback harness in tests/fuzz_chaos_feedback.rs spawns threads, reports shrink traces to stderr, and uses unwrap/panic as assertion style while narrowing proptest-bounded counters.
 #![allow(
     clippy::panic,
     clippy::print_stderr,

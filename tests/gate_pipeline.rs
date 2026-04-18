@@ -1,4 +1,4 @@
-// justifies: gate+pipeline tests use panic! to surface expected-failure paths when a gate fires or a Receipt is reused.
+// justifies: INV-TEST-PANIC-AS-ASSERTION, INV-RECEIPT-SEALED; gate+pipeline tests in tests/gate_pipeline.rs use panic! to surface expected-failure paths when a gate fires or a Receipt is reused.
 #![allow(clippy::panic)]
 //! Gate and Pipeline integration tests.
 //! Registration order, fail-fast evaluation, Receipt TOCTOU guarantee, consumed-once.

@@ -281,3 +281,30 @@
     - CONTRIBUTING.md
     - AGENTS.md
     - templates/minimal-app/Cargo.toml
+- id: ART-EXAMPLES
+  kind: examples
+  paths:
+    - examples/batch_append.rs
+    - examples/chat_room.rs
+    - examples/cursor_worker.rs
+    - examples/dungeon_typestate.rs
+    - examples/event_sourced_counter.rs
+    - examples/outbox.rs
+    - examples/policy_gates.rs
+    - examples/quickstart.rs
+    - examples/raw_projection_counter.rs
+    - examples/raw_projection_counter_derived.rs
+    - examples/read_only.rs
+    - examples/submit_pipeline.rs
+    - examples/typed_reactor.rs
+    - examples/typed_reactor_multi.rs
+    - examples/visibility_fence.rs
+- id: ART-MACROS
+  kind: source
+  paths:
+    - batpak-macros/src/lib.rs
+    - batpak-macros-support/src/lib.rs
+- id: ART-TESTS
+  kind: tests
+  paths:
+    - tests

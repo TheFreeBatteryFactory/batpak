@@ -1,4 +1,4 @@
-// justifies: unified red-path reader tests use unwrap/panic as assertion style and narrow bounded test counters that fit within u32.
+// justifies: INV-TEST-PANIC-AS-ASSERTION, INV-MACRO-BOUNDED-CAST; unified red-path reader tests in tests/unified_reader_red.rs use unwrap/panic as assertion style and narrow bounded test counters that fit within u32.
 #![allow(clippy::unwrap_used, clippy::cast_possible_truncation, clippy::panic)]
 
 #[path = "support/unified_red.rs"]

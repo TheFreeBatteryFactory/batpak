@@ -1,4 +1,4 @@
-// justifies: crash-safety tests use unwrap as assertion style and narrow bounded counters that the fixture guarantees fit in target types.
+// justifies: INV-TEST-PANIC-AS-ASSERTION, INV-MACRO-BOUNDED-CAST; crash-safety tests in tests/group_commit_crash.rs use unwrap as assertion style and narrow bounded counters that the fixture guarantees fit in target types.
 #![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
 //! Crash safety and deterministic concurrency tests for group commit.
 //!
@@ -11,7 +11,7 @@ use tempfile::TempDir;
 
 /// Run a loom model with a bounded preemption budget. See
 /// `tests/deterministic_concurrency.rs::loom_model_bounded` for rationale.
-// justifies: helper is only reached from #[cfg(loom)] tests in this file; dead_code fires under the non-loom compile path.
+// justifies: INV-CONCURRENCY-SCHEDULE-PROOF; helper in tests/group_commit_crash.rs is only reached from #[cfg(loom)] tests in this file; dead_code fires under the non-loom compile path.
 #[allow(dead_code)]
 fn loom_model_bounded<F>(check: F)
 where

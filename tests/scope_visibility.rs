@@ -1,4 +1,4 @@
-// justifies: tests rely on expect/panic on unreachable failures; clippy::unwrap_used and clippy::panic are the standard harness allowances for integration tests.
+// justifies: INV-TEST-PANIC-AS-ASSERTION; tests in tests/scope_visibility.rs rely on expect/panic on unreachable failures; clippy::unwrap_used and clippy::panic are the standard harness allowances for integration tests.
 #![allow(clippy::unwrap_used, clippy::panic)]
 //! Scope query visibility + filter composition across index overlays.
 //!

@@ -1,4 +1,4 @@
-// justifies: mmap cold-start tests use panic! as the assertion style when invariants around checkpoint/mmap dispatch fail.
+// justifies: INV-TEST-PANIC-AS-ASSERTION, INV-MMAP-SEALED-READS; mmap cold-start tests in tests/mmap_cold_start.rs use panic! as the assertion style when invariants around checkpoint/mmap dispatch fail.
 #![allow(clippy::panic)]
 
 use batpak::coordinate::{Coordinate, Region};

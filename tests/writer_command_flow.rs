@@ -1,4 +1,4 @@
-// justifies: writer command-flow tests use panic! to surface unexpected writer states when the WriterCommand handshake breaks.
+// justifies: INV-TEST-PANIC-AS-ASSERTION, ADR-0002; writer command-flow tests in tests/writer_command_flow.rs use panic! to surface unexpected writer states when the WriterCommand handshake breaks.
 #![allow(clippy::panic)]
 
 use batpak::prelude::*;

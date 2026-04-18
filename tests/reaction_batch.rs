@@ -1,4 +1,4 @@
-// justifies: test body exercises precondition-holds invariants; .unwrap is acceptable in test code where a panic is a test failure.
+// justifies: INV-TEST-PANIC-AS-ASSERTION; test body in tests/reaction_batch.rs exercises precondition-holds invariants; .unwrap is acceptable in test code where a panic is a test failure.
 #![allow(clippy::unwrap_used, clippy::panic)]
 //! Integration tests for [`ReactionBatch`]'s public push surface
 //! (Dispatch Chapter T2).

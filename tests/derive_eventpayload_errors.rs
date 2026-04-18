@@ -1,4 +1,4 @@
-// justifies: trybuild fixtures surface fixture-mismatch failures via panic; the compile-fail harness relies on that assertion shape.
+// justifies: INV-TEST-PANIC-AS-ASSERTION; trybuild fixtures in tests/derive_eventpayload_errors.rs surface fixture-mismatch failures via panic; the compile-fail harness relies on that assertion shape.
 #![allow(clippy::panic)]
 //! Compile-fail coverage for the `#[derive(EventPayload)]` parser contract.
 //!

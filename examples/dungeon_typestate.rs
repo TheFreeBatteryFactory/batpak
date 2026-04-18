@@ -1,4 +1,4 @@
-// justifies: example binary demonstrates typestate transitions by printing the state trace to stdout; println is the user-observable success path.
+// justifies: INV-EXAMPLES-OBSERVABLE-OUTPUT; example binary in examples/dungeon_typestate.rs demonstrates typestate transitions by printing the state trace to stdout; println is the user-observable success path.
 #![allow(clippy::print_stdout)]
 //! # dungeon_typestate
 //!

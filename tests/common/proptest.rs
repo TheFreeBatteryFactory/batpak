@@ -31,7 +31,7 @@ pub(crate) fn effective_cases(default_cases: u32, env_value: Option<&str>) -> u3
     }
 }
 
-// justifies: invalid PROPTEST_CASES environment knob must fail the test harness loudly rather than silently falling back to a default.
+// justifies: INV-TEST-PANIC-AS-ASSERTION; invalid PROPTEST_CASES environment knob in tests/common/proptest.rs must fail the test harness loudly rather than silently falling back to a default.
 #[allow(clippy::panic)]
 fn invalid_proptest_cases(value: &str) -> u32 {
     panic!(

@@ -121,14 +121,14 @@ mod tests {
     #[test]
     fn parse_channel_from_toolchain_toml() {
         let toml = "[toolchain]\nchannel = \"1.92.0\"\nprofile = \"minimal\"\n";
-        // justifies: test-only; panic on setup failure is the test's signal of broken fixtures
+        // justifies: INV-TEST-PANIC-AS-ASSERTION; test-only in tools/xtask/src/preflight.rs; panic on setup failure is the test's signal of broken fixtures
         let channel = parse_toolchain_channel(toml).expect("channel present in fixture");
         assert_eq!(channel, "1.92.0");
     }
 
     #[test]
     fn parse_rustc_version_from_output() {
-        // justifies: test-only; panic on setup failure is the test's signal of broken fixtures
+        // justifies: INV-TEST-PANIC-AS-ASSERTION; test-only in tools/xtask/src/preflight.rs; panic on setup failure is the test's signal of broken fixtures
         let version = parse_rustc_version("rustc 1.92.0 (abcdef0 2026-04-17)")
             .expect("version present in fixture");
         assert_eq!(version, "1.92.0");

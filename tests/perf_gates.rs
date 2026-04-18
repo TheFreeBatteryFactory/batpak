@@ -1,4 +1,4 @@
-// justifies: perf-gate tests stream benchmark timings to stderr, panic! on regressions, and narrow timing counters into smaller integer types.
+// justifies: INV-TEST-PANIC-AS-ASSERTION, INV-MACRO-BOUNDED-CAST; perf-gate tests in tests/perf_gates.rs stream benchmark timings to stderr, panic! on regressions, and narrow timing counters into smaller integer types.
 #![allow(clippy::panic, clippy::print_stderr, clippy::cast_possible_truncation)]
 //! Performance gate tests use the library's Gate/Pipeline primitives as a
 //! reusable harness for catastrophic-regression checks.

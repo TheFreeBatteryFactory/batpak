@@ -1,4 +1,4 @@
-// justifies: tests rely on expect/panic on unreachable failures; clippy::unwrap_used and clippy::panic are the standard harness allowances for integration tests.
+// justifies: INV-TEST-PANIC-AS-ASSERTION, INV-BATCH-CRASH-RECOVERY; tests in tests/idempotent_batch_crash_recovery.rs rely on expect/panic on unreachable failures; clippy::unwrap_used and clippy::panic are the standard harness allowances for integration tests.
 #![allow(clippy::unwrap_used, clippy::panic)]
 //! Idempotent batch shape + replay recovery.
 //!

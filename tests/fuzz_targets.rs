@@ -1,4 +1,4 @@
-// justifies: fuzz targets report shrink cases on stderr and use panic/unwrap as the assertion style when a proptest invariant is falsified.
+// justifies: INV-TEST-PANIC-AS-ASSERTION; fuzz targets in tests/fuzz_targets.rs report shrink cases on stderr and use panic/unwrap as the assertion style when a proptest invariant is falsified.
 #![allow(clippy::panic, clippy::print_stderr, clippy::unwrap_used)]
 //! Fuzz targets for all critical paths in batpak.
 //! Uses proptest as a structured fuzzer with high iteration counts.

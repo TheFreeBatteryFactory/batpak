@@ -12,7 +12,7 @@ struct Tick {
     n: u32,
 }
 
-// justifies: example demonstrates submit-pipeline ticket completion via stdout; println is the observable success path for this demo.
+// justifies: INV-EXAMPLES-OBSERVABLE-OUTPUT; example in examples/submit_pipeline.rs demonstrates submit-pipeline ticket completion via stdout; println is the observable success path for this demo.
 #[allow(clippy::print_stdout)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;

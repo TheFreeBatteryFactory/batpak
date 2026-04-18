@@ -69,7 +69,7 @@ use write::writer::{WriterCommand, WriterHandle};
 
 /// Store: the runtime. Sync API. Send + Sync.
 /// Invariant 2: all methods are sync; async integration lives in channels.
-// justifies: async-store is not a declared feature; this compile_error guard must survive cargo check by silencing the unexpected cfg name
+// justifies: INV-STORE-SYNC-ONLY, ADR-0001; async-store is not a declared feature in src/store/mod.rs; this compile_error guard must survive cargo check by silencing the unexpected cfg name
 #[allow(unexpected_cfgs)]
 #[cfg(feature = "async-store")]
 compile_error!("INVARIANT 2: Store API is sync. Use spawn_blocking or flume recv_async.");
@@ -446,8 +446,8 @@ impl Store<Open> {
 
     /// SUBSCRIBE: push-based, lossy.
     pub fn subscribe_lossy(&self, region: &Region) -> Subscription {
-        // justifies: Store<Open> typestate guarantees writer presence at
-        // construction (see Store::open_with_cache — it fails the open
+        // justifies: INV-TYPESTATE-OPEN-HAS-WRITER; Store<Open> typestate guarantees writer presence at
+        // construction (see Store::open_with_cache in src/store/lifecycle.rs — it fails the open
         // instead of yielding Store<Open> if the writer cannot be spawned).
         // The expect here documents an invariant, it does not recover from
         // one: observing None means the store is mid-drop and every public
@@ -466,8 +466,8 @@ impl Store<Open> {
     /// `Store<Open>` has been partially moved out of during drop, a context
     /// in which every public method is already unreachable.
     pub(crate) fn writer_ref(&self) -> &WriterHandle {
-        // justifies: typestate invariant of Store<Open> — see open_components
-        // and Store::open_with_cache for the construction guarantee.
+        // justifies: INV-TYPESTATE-OPEN-HAS-WRITER; typestate invariant of Store<Open> — see open_components
+        // and Store::open_with_cache in src/store/lifecycle.rs for the construction guarantee.
         self.writer
             .as_ref()
             .expect("invariant: Store<Open> is constructed with a writer handle")

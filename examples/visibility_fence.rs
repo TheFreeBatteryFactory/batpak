@@ -12,7 +12,7 @@ struct Hidden {
     hidden: bool,
 }
 
-// justifies: example binary demonstrates the visibility-fence observable via println, which is the user-visible success signal here.
+// justifies: INV-EXAMPLES-OBSERVABLE-OUTPUT; example binary in examples/visibility_fence.rs demonstrates the visibility-fence observable via println, which is the user-visible success signal here.
 #[allow(clippy::print_stdout)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;

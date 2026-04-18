@@ -1,4 +1,4 @@
-// justifies: DecodeTyped lane tests treat decode failures as test failures; unwrap and panic are the assertion style throughout.
+// justifies: INV-TEST-PANIC-AS-ASSERTION; DecodeTyped lane tests in tests/decode_typed_seam.rs treat decode failures as test failures; unwrap and panic are the assertion style throughout.
 #![allow(clippy::unwrap_used, clippy::panic)]
 //! Per-lane behavioural tests for the `DecodeTyped` seam (Dispatch Chapter T1).
 //!

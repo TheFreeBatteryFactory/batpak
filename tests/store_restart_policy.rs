@@ -1,5 +1,5 @@
 #![cfg(feature = "dangerous-test-hooks")]
-// justifies: retry-poll loops in these tests use panic! as the escape hatch when the expected transition never arrives within the bound.
+// justifies: INV-TEST-PANIC-AS-ASSERTION, ADR-0006; retry-poll loops in tests/store_restart_policy.rs use panic! as the escape hatch when the expected transition never arrives within the bound.
 #![allow(clippy::panic)]
 //! Restart policy tests split out of store_advanced.rs.
 

@@ -22,7 +22,7 @@ struct Tick {
     n: u32,
 }
 
-// justifies: example main prints cursor-worker progress to stdout so the reader can see the observable drain.
+// justifies: INV-EXAMPLES-OBSERVABLE-OUTPUT; example main in examples/cursor_worker.rs prints cursor-worker progress to stdout so the reader can see the observable drain.
 #[allow(clippy::print_stdout)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;

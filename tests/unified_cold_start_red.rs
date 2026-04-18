@@ -1,4 +1,4 @@
-// justifies: unified red-path cold-start tests use unwrap/panic as assertion style and narrow bounded test counters that fit u32/u16.
+// justifies: INV-TEST-PANIC-AS-ASSERTION, INV-MACRO-BOUNDED-CAST; unified red-path cold-start tests in tests/unified_cold_start_red.rs use unwrap/panic as assertion style and narrow bounded test counters that fit u32/u16.
 #![allow(clippy::unwrap_used, clippy::cast_possible_truncation, clippy::panic)]
 
 #[path = "support/unified_red.rs"]

@@ -24,7 +24,7 @@ struct AuditLogged {
     participants: u32,
 }
 
-// justifies: example demonstrates batch append; println output is the observable success path shown to readers of this example.
+// justifies: INV-EXAMPLES-OBSERVABLE-OUTPUT; example in examples/batch_append.rs demonstrates batch append; println output is the observable success path shown to readers of this example.
 #[allow(clippy::print_stdout)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;

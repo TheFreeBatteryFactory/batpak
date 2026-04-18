@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-// justifies: impossible-feature guards (async-store, sha256) use cfg attributes for features intentionally not declared in Cargo.toml; item-level allow is unreliable for cfg checks on some toolchain versions so we silence at crate root.
+// justifies: INV-STORE-SYNC-ONLY, ADR-0001; impossible-feature guards in src/lib.rs (async-store, sha256) use cfg attributes for features intentionally not declared in Cargo.toml; item-level allow is unreliable for cfg checks on some toolchain versions so we silence at crate root.
 #![allow(unexpected_cfgs)]
 // cast_possible_truncation and cast_sign_loss are enforced via [lints.clippy] in Cargo.toml.
 // Each intentional cast has an inline #[allow] with a justification comment.
@@ -98,7 +98,7 @@ pub use crate::event::{EventPayload, EventSourced, MultiReactive};
 pub use batpak_macros::{EventPayload, EventSourced, MultiEventReactor};
 
 /// compile_error guards for impossible configurations:
-// justifies: async-store is not a declared feature; this guard must survive cargo check without the crate-level lint silencing the cfg reference
+// justifies: INV-STORE-SYNC-ONLY, ADR-0001; async-store is not a declared feature in src/lib.rs; this guard must survive cargo check without the crate-level lint silencing the cfg reference
 #[allow(unexpected_cfgs)]
 #[cfg(feature = "async-store")]
 compile_error!(
@@ -107,7 +107,7 @@ compile_error!(
      See: src/store/delivery/subscription.rs for the async pattern."
 );
 
-// justifies: sha256 is not a declared feature; this compile_error guard requires the cfg reference to reach codegen
+// justifies: INV-STORE-SYNC-ONLY; sha256 is not a declared feature in src/lib.rs; this compile_error guard requires the cfg reference to reach codegen
 #[allow(unexpected_cfgs)]
 #[cfg(feature = "sha256")]
 compile_error!(

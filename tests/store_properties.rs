@@ -1,4 +1,4 @@
-// justifies: algebraic property tests spawn threads via std::thread::spawn to exercise concurrency invariants.
+// justifies: INV-CONCURRENCY-SCHEDULE-PROOF; algebraic property tests in tests/store_properties.rs spawn threads via std::thread::spawn to exercise concurrency invariants.
 #![allow(clippy::disallowed_methods)]
 //! Store algebraic property tests: replay determinism, idempotency, commutativity,
 //! round-trip fidelity, law enforcement, flow connectivity, error propagation.

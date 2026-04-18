@@ -1,4 +1,4 @@
-// justifies: trybuild harness uses panic! internally to surface fixture mismatches; test bodies follow panic-as-assertion idiom.
+// justifies: INV-TEST-PANIC-AS-ASSERTION; trybuild harness in tests/derive_multi_event_reactor_errors.rs uses panic! internally to surface fixture mismatches; test bodies follow panic-as-assertion idiom.
 #![allow(clippy::panic)]
 //! Compile-fail coverage for the `#[derive(MultiEventReactor)]` attribute contract.
 //!

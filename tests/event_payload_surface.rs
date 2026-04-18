@@ -1,4 +1,4 @@
-// justifies: test body exercises precondition-holds invariants; .unwrap is acceptable in test code where a panic is a test failure.
+// justifies: INV-TEST-PANIC-AS-ASSERTION, ADR-0010; test body in tests/event_payload_surface.rs exercises precondition-holds invariants; .unwrap is acceptable in test code where a panic is a test failure.
 #![allow(clippy::unwrap_used, clippy::panic, clippy::cast_possible_truncation)]
 //! Integration tests for the EventPayload typed API surface (ADR-0010).
 //!

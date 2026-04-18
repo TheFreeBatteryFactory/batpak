@@ -1,4 +1,4 @@
-// justifies: unified red-path test uses unwrap/panic as the assertion style and narrows bounded test counters; these are file-wide idioms for this suite.
+// justifies: INV-TEST-PANIC-AS-ASSERTION, INV-MACRO-BOUNDED-CAST; unified red-path test in tests/unified_topology_red.rs uses unwrap/panic as the assertion style and narrows bounded test counters; these are file-wide idioms for this suite.
 #![allow(clippy::unwrap_used, clippy::cast_possible_truncation, clippy::panic)]
 
 #[path = "support/unified_red.rs"]

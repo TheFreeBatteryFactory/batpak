@@ -21,7 +21,7 @@ mod by_hash;
 ///
 /// Callers that need a fire-and-forget variant (`Vec<_>` return) can use
 /// [`collect_ancestors`].
-// justifies: Result-shaped sibling of collect_ancestors; crate-private seam used by try_walk_ancestors so cycle-surfacing has one source of truth.
+// justifies: INV-STORE-ERROR-TAXONOMY; Result-shaped sibling of collect_ancestors in src/store/ancestry/mod.rs; crate-private seam used by try_walk_ancestors so cycle-surfacing has one source of truth.
 #[allow(dead_code)]
 pub(super) fn try_collect_ancestors<State, Cursor, Step>(
     store: &Store<State>,
@@ -136,7 +136,7 @@ pub(crate) fn walk_ancestors<State>(
 /// of logging and truncating. Intended for callers that treat an
 /// ancestry cycle as a store-integrity failure rather than a traversal
 /// hiccup (e.g. repair tooling, integrity checks).
-// justifies: crate-private cycle-aware walk delivers D7's Err(StoreError::AncestryCorrupt) contract so the Result-shaped path stays compiled alongside collect_ancestors.
+// justifies: INV-STORE-ERROR-TAXONOMY; crate-private cycle-aware walk in src/store/ancestry/mod.rs delivers D7's Err(StoreError::AncestryCorrupt) contract so the Result-shaped path stays compiled alongside collect_ancestors.
 #[allow(dead_code)]
 pub(crate) fn try_walk_ancestors<State>(
     store: &Store<State>,

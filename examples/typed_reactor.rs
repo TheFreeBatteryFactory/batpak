@@ -1,4 +1,4 @@
-// justifies: example binary demonstrates typed-reactor observable output via println and spawns worker threads via std::thread::spawn as part of the demo.
+// justifies: INV-EXAMPLES-OBSERVABLE-OUTPUT; example binary in examples/typed_reactor.rs demonstrates typed-reactor observable output via println and spawns worker threads via std::thread::spawn as part of the demo.
 #![allow(clippy::print_stdout, clippy::disallowed_methods)]
 //! # typed_reactor
 //!

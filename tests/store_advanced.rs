@@ -1,4 +1,4 @@
-// justifies: advanced store tests rely on unwrap/panic as assertion style, spawn threads for chaos concurrency probes, and narrow bounded test data into target types that the fixture guarantees fit.
+// justifies: INV-TEST-PANIC-AS-ASSERTION, INV-MACRO-BOUNDED-CAST; advanced store tests in tests/store_advanced.rs rely on unwrap/panic as assertion style, spawn threads for chaos concurrency probes, and narrow bounded test data into target types that the fixture guarantees fit.
 #![allow(
     clippy::unwrap_used,
     clippy::disallowed_methods,

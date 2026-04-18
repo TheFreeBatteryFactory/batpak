@@ -1,4 +1,4 @@
-// justifies: raw projection mode tests use panic! as the assertion style when the raw-dispatch contract breaks.
+// justifies: INV-TEST-PANIC-AS-ASSERTION; raw projection mode tests in tests/raw_projection_mode.rs use panic! as the assertion style when the raw-dispatch contract breaks.
 #![allow(clippy::panic)]
 
 use std::sync::Arc;

@@ -1,10 +1,10 @@
-// justifies: build.rs is fail-fast by design; invariant violations halt the build with a cargo-parseable explanation. Every panic site is spanned by the `fail` helper below with a dedicated justification. This file-level allow is the single documented entry point for that policy.
+// justifies: INV-BUILD-FAIL-FAST; build.rs consolidates panic through the `fail` helper below, see build.rs and traceability/invariants.yaml
 #![allow(clippy::panic)]
 
 use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use syn::visit::Visit;
 
 /// Single documented failure path for build.rs. Every invariant violation
@@ -88,49 +88,191 @@ fn check_no_stubs_in_src() {
     });
 }
 
-/// Parse a single source line and return true if it carries a structured
-/// justification comment. A justification is `// justifies: <body>` where
-/// `<body>` has at least five whitespace-separated words. Matches either an
-/// inline trailing comment or a standalone comment line.
-fn line_carries_justification(line: &str) -> bool {
+/// Extract the prose body after `// justifies:` from a single source line.
+fn justifies_body(line: &str) -> Option<&str> {
     let trimmed = line.trim();
     if let Some(idx) = trimmed.find("// justifies:") {
-        let body = &trimmed[idx + "// justifies:".len()..];
-        return body.split_whitespace().count() >= 5;
+        return Some(trimmed[idx + "// justifies:".len()..].trim());
     }
     if trimmed.starts_with("//") {
         let stripped = trimmed.trim_start_matches('/').trim();
         if let Some(body) = stripped.strip_prefix("justifies:") {
-            return body.split_whitespace().count() >= 5;
+            return Some(body.trim());
         }
     }
-    false
+    None
 }
 
-/// FM-002 Rogue Silence defense: every #[allow(...)] in runtime or toolchain
-/// Rust code must carry a `// justifies: <>= 5 words>` comment on the same or
-/// previous line. Narrative-only comments and raw `//`-prefixed prose count as
-/// silencers; the structured prefix is load-bearing.
+/// Extract resolvable anchors from a justification body. Anchors are
+/// `INV-<NAME>`, `ADR-NNNN`, and repo-relative paths (`src/...`, `tests/...`,
+/// `examples/...`, etc. — ending in `.rs`, `.md`, `.yaml`, or `.toml`, with an
+/// optional `:line` suffix).
+fn extract_anchors(body: &str) -> Vec<Anchor> {
+    let mut out = Vec::new();
+    for tok in body.split(|c: char| c.is_whitespace() || c == ',' || c == ';' || c == '.') {
+        let tok = tok.trim_matches(|c: char| c == '(' || c == ')' || c == '\'' || c == '"');
+        if tok.is_empty() {
+            continue;
+        }
+        if let Some(rest) = tok.strip_prefix("INV-") {
+            if !rest.is_empty()
+                && rest
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-' || c == '_')
+            {
+                out.push(Anchor::Invariant(format!("INV-{rest}")));
+                continue;
+            }
+        }
+        if let Some(digits) = tok.strip_prefix("ADR-") {
+            let digits = digits.trim_end_matches(|c: char| !c.is_ascii_digit());
+            if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+                if let Ok(n) = digits.parse::<u32>() {
+                    out.push(Anchor::Adr(n));
+                    continue;
+                }
+            }
+        }
+        // Path-shaped token: starts with a recognised top-level dir OR equals "build.rs".
+        let starts_with_dir = [
+            "src/",
+            "tests/",
+            "examples/",
+            "batpak-macros/",
+            "batpak-macros-support/",
+            "benches/",
+            "tools/",
+            "fixtures/",
+            "docs/",
+            "traceability/",
+        ]
+        .iter()
+        .any(|p| tok.starts_with(p));
+        let is_build_rs = tok == "build.rs" || tok.starts_with("build.rs:");
+        if starts_with_dir || is_build_rs {
+            // strip optional :<line>
+            let file = tok
+                .rsplit_once(':')
+                .and_then(|(before, after)| {
+                    if after.chars().all(|c| c.is_ascii_digit()) {
+                        Some(before)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(tok);
+            // must end in a tracked extension
+            let ok_ext = [".rs", ".md", ".yaml", ".toml"]
+                .iter()
+                .any(|ext| file.ends_with(ext));
+            if ok_ext {
+                out.push(Anchor::Path(PathBuf::from(file)));
+            }
+        }
+    }
+    out
+}
+
+fn load_known_invariants(repo_root: &Path) -> BTreeSet<String> {
+    let path = repo_root.join("traceability/invariants.yaml");
+    let Ok(text) = fs::read_to_string(&path) else {
+        fail(&format!(
+            "cannot read {} to verify justifies: anchors",
+            path.display()
+        ));
+    };
+    #[derive(Deserialize)]
+    struct InvRecord {
+        id: String,
+    }
+    let records: Vec<InvRecord> = match yaml_serde::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => fail(&format!("parse {}: {}", path.display(), e)),
+    };
+    records.into_iter().map(|r| r.id).collect()
+}
+
+fn resolve_anchor(anchor: &Anchor, repo_root: &Path, known_invariants: &BTreeSet<String>) -> bool {
+    match anchor {
+        Anchor::Invariant(id) => known_invariants.contains(id),
+        Anchor::Adr(n) => {
+            let prefix = format!("ADR-{:04}", n);
+            let dir = repo_root.join("docs/adr");
+            fs::read_dir(&dir)
+                .ok()
+                .map(|it| {
+                    it.flatten().any(|entry| {
+                        entry
+                            .file_name()
+                            .to_str()
+                            .is_some_and(|name| name.starts_with(&prefix))
+                    })
+                })
+                .unwrap_or(false)
+        }
+        Anchor::Path(rel) => repo_root.join(rel).exists(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Anchor {
+    Invariant(String),
+    Adr(u32),
+    Path(PathBuf),
+}
+
+/// Parse a single source line and return true if it carries a structured
+/// justification comment with (a) >= 5 words of prose and (b) >= 1
+/// anchor that resolves against the current repo. See INV-ALLOW-IS-DESIGN.
+fn line_carries_justification(
+    line: &str,
+    repo_root: &Path,
+    known_invariants: &BTreeSet<String>,
+) -> bool {
+    let Some(body) = justifies_body(line) else {
+        return false;
+    };
+    if body.split_whitespace().count() < 5 {
+        return false;
+    }
+    extract_anchors(body)
+        .iter()
+        .any(|a| resolve_anchor(a, repo_root, known_invariants))
+}
+
+/// INV-ALLOW-IS-DESIGN enforcement: every #[allow(...)] in runtime or
+/// toolchain Rust code must carry a structured `// justifies:` comment with
+/// >= 5 words AND >= 1 resolvable anchor (INV-id, ADR-NNNN, or repo path).
 fn check_allow_justifications() {
+    let repo_root = std::env::current_dir().unwrap_or_else(|e| {
+        fail(&format!(
+            "cannot read current_dir while checking justifies: anchors: {e}"
+        ))
+    });
+    let known_invariants = load_known_invariants(&repo_root);
     walk_allow_checked_rs_files(&mut |path, contents| {
         let path_str = path.display().to_string();
         let lines: Vec<&str> = contents.lines().collect();
         for (line_no, line) in lines.iter().enumerate() {
             let trimmed = line.trim();
             if trimmed.starts_with("#![allow(") || trimmed.starts_with("#[allow(") {
-                let has_justification = line_carries_justification(line)
-                    || (line_no > 0
-                        && lines
-                            .get(line_no - 1)
-                            .map(|prev| line_carries_justification(prev))
-                            .unwrap_or(false));
+                let has_justification =
+                    line_carries_justification(line, &repo_root, &known_invariants)
+                        || (line_no > 0
+                            && lines
+                                .get(line_no - 1)
+                                .map(|prev| {
+                                    line_carries_justification(prev, &repo_root, &known_invariants)
+                                })
+                                .unwrap_or(false));
                 if !has_justification {
                     fail(&format!(
                         "ROGUE SILENCE in {path_str}:{}: `{trimmed}`\n\
-                         Every #[allow(...)] must carry a `// justifies: <>= 5 words>` comment on the same\n\
-                         or previous line explaining the design decision that makes the silencer safe.\n\
-                         Example: // justifies: pattern is a string literal known-safe at compile time; this expect cannot fire\n\
-                         See: Big Bang FM-002 (Rogue Silence).",
+                         Every #[allow(...)] must carry a `// justifies: <>=5 words + >=1 resolvable anchor>`\n\
+                         comment on the same or preceding line. Anchors: INV-<NAME> from\n\
+                         traceability/invariants.yaml, ADR-NNNN from docs/adr/, or a concrete repo path\n\
+                         (src/..., tests/..., examples/..., batpak-macros/..., batpak-macros-support/...,\n\
+                         benches/..., tools/..., build.rs). See INV-ALLOW-IS-DESIGN.",
                         line_no + 1
                     ));
                 }

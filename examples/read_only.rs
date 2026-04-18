@@ -12,7 +12,7 @@ struct Archived {
     n: u32,
 }
 
-// justifies: example main prints read-only reopening observable output via stdout; println is the success signal for this demo.
+// justifies: INV-EXAMPLES-OBSERVABLE-OUTPUT; example main in examples/read_only.rs prints read-only reopening observable output via stdout; println is the success signal for this demo.
 #[allow(clippy::print_stdout)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;

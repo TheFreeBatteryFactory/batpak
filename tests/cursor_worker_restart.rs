@@ -1,4 +1,4 @@
-// justifies: cursor worker restart tests use panic! to escape retry-poll loops when the expected event fails to arrive within the bound.
+// justifies: INV-TEST-PANIC-AS-ASSERTION; cursor worker restart tests in tests/cursor_worker_restart.rs use panic! to escape retry-poll loops when the expected event fails to arrive within the bound.
 #![allow(clippy::panic)]
 
 use batpak::prelude::*;

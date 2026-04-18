@@ -12,7 +12,7 @@ struct Tick {
     n: u32,
 }
 
-// justifies: example main prints outbox events to stdout so the reader can see the staging-then-flush observable result.
+// justifies: INV-EXAMPLES-OBSERVABLE-OUTPUT; example main in examples/outbox.rs prints outbox events to stdout so the reader can see the staging-then-flush observable result.
 #[allow(clippy::print_stdout)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;

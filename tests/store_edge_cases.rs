@@ -1,4 +1,4 @@
-// justifies: edge-case tests spawn threads for concurrent stress probes, rely on panic as the assertion style, and intentionally build config via field-by-field mutation; these allows are the file-wide idioms.
+// justifies: INV-TEST-PANIC-AS-ASSERTION; edge-case tests in tests/store_edge_cases.rs spawn threads for concurrent stress probes, rely on panic as the assertion style, and intentionally build config via field-by-field mutation; these allows are the file-wide idioms.
 #![allow(
     clippy::disallowed_methods,
     clippy::panic,
@@ -55,7 +55,7 @@ fn frame_decode_truncated() {
 fn frame_decode_crc_mismatch() {
     use batpak::store::segment::{frame_decode, FrameDecodeError};
     let payload = b"hello";
-    // justifies: b"hello" has len 5, far below u32::MAX, so usize-to-u32 narrowing cannot truncate in this fixed-size test payload.
+    // justifies: INV-MACRO-BOUNDED-CAST; b"hello" has len 5 in tests/store_edge_cases.rs, far below u32::MAX, so usize-to-u32 narrowing cannot truncate in this fixed-size test payload.
     #[allow(clippy::cast_possible_truncation)]
     let len = payload.len() as u32;
     let bad_crc = 0xDEADBEEFu32;

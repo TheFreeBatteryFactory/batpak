@@ -1,6 +1,6 @@
 // Intentional impossible-feature guard: exponential backoff belongs in the product supervisor, not the library.
 // exponential-backoff is not a declared feature — suppress cfg warning for this guard
-// justifies: the `exponential-backoff` feature is deliberately undeclared — this block is a compile_error tripwire for anyone who adds the feature to Cargo.toml.
+// justifies: ADR-0006; the `exponential-backoff` feature is deliberately undeclared in src/store/write/writer.rs — this block is a compile_error tripwire for anyone who adds the feature to Cargo.toml.
 #[allow(unexpected_cfgs)]
 #[cfg(feature = "exponential-backoff")]
 compile_error!(

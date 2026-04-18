@@ -1,4 +1,4 @@
-// justifies: example binary demonstrates derived-raw projection output via println, matches only the demo variants with a wildcard fallback, and narrows bounded counters to smaller integer types.
+// justifies: INV-EXAMPLES-OBSERVABLE-OUTPUT; example binary in examples/raw_projection_counter_derived.rs demonstrates derived-raw projection output via println, matches only the demo variants with a wildcard fallback, and narrows bounded counters to smaller integer types.
 #![allow(
     clippy::print_stdout,
     clippy::wildcard_enum_match_arm,

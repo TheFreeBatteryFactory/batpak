@@ -1,4 +1,4 @@
-// justifies: test bodies treat invariant violations as test failures; panic! is the assertion style throughout this file.
+// justifies: INV-TEST-PANIC-AS-ASSERTION, ADR-0007; test bodies in tests/control_plane_surface.rs treat invariant violations as test failures; panic! is the assertion style throughout this file.
 #![allow(clippy::panic)]
 
 use batpak::coordinate::{Coordinate, Region};

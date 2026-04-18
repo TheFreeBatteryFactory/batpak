@@ -1,4 +1,4 @@
-// justifies: wire-format golden tests assert via panic, intentionally group timestamp digits for readability, and emit a stderr warning when GOLDEN_UPDATE rewrites fixtures.
+// justifies: INV-TEST-PANIC-AS-ASSERTION; wire-format golden tests in tests/wire_format.rs assert via panic, intentionally group timestamp digits for readability, and emit a stderr warning when GOLDEN_UPDATE rewrites fixtures.
 #![allow(
     clippy::panic,
     clippy::inconsistent_digit_grouping,

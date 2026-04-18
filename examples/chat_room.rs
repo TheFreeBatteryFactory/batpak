@@ -1,4 +1,4 @@
-// justifies: example binary demonstrates the chat-room scenario with println and std::thread::spawn as the user-observable output and concurrency shape.
+// justifies: INV-EXAMPLES-OBSERVABLE-OUTPUT; example binary in examples/chat_room.rs demonstrates the chat-room scenario with println and std::thread::spawn as the user-observable output and concurrency shape.
 #![allow(clippy::print_stdout, clippy::disallowed_methods)]
 //! # chat_room
 //!

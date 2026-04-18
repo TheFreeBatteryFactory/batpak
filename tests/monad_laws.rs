@@ -1,4 +1,4 @@
-// justifies: proptest assertions match on the happy-case arm and use a wildcard fallback to report counterexamples without enumerating every failure variant.
+// justifies: INV-TEST-PANIC-AS-ASSERTION; proptest assertions in tests/monad_laws.rs match on the happy-case arm and use a wildcard fallback to report counterexamples without enumerating every failure variant.
 #![allow(clippy::wildcard_enum_match_arm)]
 //! Proptest verification of Outcome<T> monad laws.
 //! Left identity, right identity, associativity, and Batch distribution.

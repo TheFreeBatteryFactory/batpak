@@ -433,7 +433,7 @@ where
                         // same invariant as `Consistent` for group-local: hit
                         // only when state is unchanged.
                         //
-                        // justifies: legacy-cache rows lack monotonic time;
+                        // justifies: INV-CACHE-CAPABILITIES-EXPLICIT; legacy-cache rows lack monotonic time in src/store/projection/flow.rs;
                         // conservatively treat as stale for MaybeStale.
                         slot.watermark == replay.watermark
                             && slot.generation == replay.plan.generation
@@ -870,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    // justifies: diagnostic test reports cold-path breakdown on stderr; the eprintln is the observable artefact of the test.
+    // justifies: INV-OBSERVABILITY-FAILURE-PATHS; diagnostic test in src/store/projection/flow.rs reports cold-path breakdown on stderr; the eprintln is the observable artefact of the test.
     #[allow(clippy::print_stderr)]
     fn projection_timings_cold_path_breakdown() {
         let dir = TempDir::new().expect("temp dir");

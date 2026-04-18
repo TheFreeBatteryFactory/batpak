@@ -1,4 +1,4 @@
-// justifies: test body exercises precondition-holds invariants; .unwrap is acceptable in test code where a panic is a test failure.
+// justifies: INV-TEST-PANIC-AS-ASSERTION; test body in tests/react_loop_multi_raw.rs exercises precondition-holds invariants; .unwrap is acceptable in test code where a panic is a test failure.
 #![allow(clippy::unwrap_used, clippy::panic)]
 //! Raw-msgpack lane parity test for `#[derive(MultiEventReactor)]` (T6).
 //! Proves invariant 5 at the reactor surface: a reactor derived with

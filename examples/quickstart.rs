@@ -15,7 +15,7 @@ struct PlayerMoved {
     y: i32,
 }
 
-// justifies: quickstart example prints observable success output so new users can see the end-to-end append and query flow.
+// justifies: INV-EXAMPLES-OBSERVABLE-OUTPUT; quickstart example in examples/quickstart.rs prints observable success output so new users can see the end-to-end append and query flow.
 #[allow(clippy::print_stdout)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;

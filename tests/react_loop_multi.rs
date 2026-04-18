@@ -1,4 +1,4 @@
-// justifies: test body exercises precondition-holds invariants; .unwrap is acceptable in test code where a panic is a test failure.
+// justifies: INV-TEST-PANIC-AS-ASSERTION; test body in tests/react_loop_multi.rs exercises precondition-holds invariants; .unwrap is acceptable in test code where a panic is a test failure.
 #![allow(clippy::unwrap_used, clippy::panic)]
 //! Integration tests for `#[derive(MultiEventReactor)]` + `react_loop_multi`
 //! (Dispatch Chapter T6). Cover the JSON lane here; raw-msgpack lane

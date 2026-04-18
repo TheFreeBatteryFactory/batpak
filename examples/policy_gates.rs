@@ -1,4 +1,4 @@
-// justifies: policy-gates example shows the propose-evaluate-commit flow via println, and passes gate-shaped arguments by value/borrow as the gate API expects from a teaching fixture.
+// justifies: INV-EXAMPLES-OBSERVABLE-OUTPUT; policy-gates example in examples/policy_gates.rs shows the propose-evaluate-commit flow via println, and passes gate-shaped arguments by value/borrow as the gate API expects from a teaching fixture.
 #![allow(
     clippy::print_stdout,
     clippy::needless_pass_by_value,

@@ -1,4 +1,4 @@
-// justifies: example binary demonstrates observable output via println and spawns worker threads via std::thread::spawn as part of the teaching scenario.
+// justifies: INV-EXAMPLES-OBSERVABLE-OUTPUT; example binary in examples/typed_reactor_multi.rs demonstrates observable output via println and spawns worker threads via std::thread::spawn as part of the teaching scenario.
 #![allow(clippy::print_stdout, clippy::disallowed_methods)]
 //! # typed_reactor_multi
 //!

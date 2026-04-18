@@ -1,4 +1,4 @@
-// justifies: subscription tests spawn producer threads via std::thread::spawn and use unwrap as the assertion style throughout the file.
+// justifies: INV-TEST-PANIC-AS-ASSERTION; subscription tests in tests/subscription_ops.rs spawn producer threads via std::thread::spawn and use unwrap as the assertion style throughout the file.
 #![allow(clippy::disallowed_methods, clippy::unwrap_used)]
 //! Integration tests for SubscriptionOps: filter, take, and combined chains.
 //!

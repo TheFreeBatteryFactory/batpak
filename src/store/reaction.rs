@@ -118,7 +118,7 @@ impl Default for ReactionBatch {
 // Unit tests exercise `pub(crate) flush`; .unwrap() + panic! are standard
 // test idioms here and are gated by #[cfg(test)] so they never reach
 // non-test builds.
-// justifies: test-only module where `.unwrap()` and `panic!` are the idiomatic assertion shape and never reach production builds.
+// justifies: INV-TEST-PANIC-AS-ASSERTION; test-only module in src/store/reaction.rs where `.unwrap()` and `panic!` are the idiomatic assertion shape and never reach production builds.
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     //! Internal unit tests for `ReactionBatch::flush`. `flush` is `pub(crate)`

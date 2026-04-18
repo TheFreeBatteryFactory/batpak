@@ -128,7 +128,7 @@ impl SequenceGate {
     ///
     /// Panics if `up_to` exceeds the allocated counter or regresses below
     /// the current visible watermark.
-    // justifies: publish asserts a non-recoverable invariant (visibility watermark regression); panic is the correctness signal, not a bubbled error.
+    // justifies: INV-MULTI-VIEW-PUBLISH-AFTER-FANOUT; publish in src/store/index/mod.rs asserts a non-recoverable invariant (visibility watermark regression); panic is the correctness signal, not a bubbled error.
     #[allow(clippy::panic)]
     pub(crate) fn publish(&self, up_to: u64) {
         assert!(

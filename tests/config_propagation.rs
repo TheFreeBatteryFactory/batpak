@@ -433,7 +433,7 @@ fn store_config_all_fields_overridable() {
     // but never wired up, this test documents the expected behavior.
     let dir = TempDir::new().expect("create temp dir");
     let clock_fn: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| {
-        // justifies: u128 microseconds-since-epoch narrowed to i64 cannot overflow before year 292,277, far beyond any test run.
+        // justifies: INV-CLOCK-NOW-US-LIVE, INV-MACRO-BOUNDED-CAST; u128 microseconds-since-epoch narrowed to i64 in tests/config_propagation.rs cannot overflow before year 292,277, far beyond any test run.
         #[allow(clippy::cast_possible_truncation)]
         {
             std::time::SystemTime::now()

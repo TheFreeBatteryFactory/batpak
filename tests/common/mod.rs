@@ -9,7 +9,7 @@
 //! rotation, or `common::default_store()` for tests that just need a working
 //! Store.
 
-// justifies: shared test helpers are pulled in by multiple integration binaries; each binary only invokes a subset so dead_code is expected per-binary.
+// justifies: ADR-0005; shared test helpers in tests/common/mod.rs are pulled in by multiple integration binaries; each binary only invokes a subset so dead_code is expected per-binary.
 #![allow(dead_code)]
 
 pub mod proptest;

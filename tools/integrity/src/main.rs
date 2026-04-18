@@ -2,19 +2,25 @@
 //!
 //! # `// justifies:` comment convention
 //!
-//! Every `#[allow(...)]` and every `.unwrap()` / `.expect()` in the repo's
-//! runtime, tool, and build-script surfaces must carry a `// justifies: ...`
-//! comment either on the same line or on the line immediately preceding the
-//! attribute / expression. The comment body must:
+//! Every `#[allow(...)]` in the repo's runtime, tool, and build-script
+//! surfaces must carry a `// justifies: ...` comment either on the same line
+//! or on the line immediately preceding the attribute. The comment body must:
 //!
 //! 1. Start with the literal prefix `justifies:` (after an optional `//` and
 //!    whitespace).
 //! 2. Contain at least five whitespace-separated words after the prefix,
-//!    naming the design decision that makes the silencer or panic safe.
+//!    naming the design decision that makes the silencer safe.
+//! 3. Cite at least one resolvable anchor — an `INV-<NAME>` from
+//!    `traceability/invariants.yaml`, an `ADR-NNNN` whose file exists under
+//!    `docs/adr/`, or a concrete in-repo path (`src/...`, `tests/...`,
+//!    `examples/...`, `batpak-macros/...`, `batpak-macros-support/...`,
+//!    `build.rs`) whose file exists. Multiple anchors are fine; at least one
+//!    must resolve.
 //!
-//! Narrative prose without that structure counts as silence, not design. This
-//! tool lints itself to the same rule; every justification below is load-
-//! bearing and is checked by `check_allow_justifications` on every run.
+//! Narrative prose without that structure counts as silence, not design.
+//! INV-ALLOW-IS-DESIGN is the meta-invariant. This tool lints itself; every
+//! justification below is load-bearing and is checked by
+//! `check_allow_justifications` on every run.
 mod architecture_lints;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -84,7 +90,7 @@ struct AllowlistEntry {
 #[derive(Debug, Deserialize)]
 struct AllowlistWitness {
     path: String,
-    // justifies: lines is supplementary line-number metadata for human review; the AST walker verifies the path contains the item regardless of specific lines
+    // justifies: INV-TRACEABILITY-COMPLETE; lines is supplementary line-number metadata for human review; the AST walker in tools/integrity/src/main.rs verifies the path contains the item regardless of specific lines
     #[serde(default)]
     lines: Vec<u32>,
 }
@@ -431,7 +437,7 @@ fn check_ci_parity(repo_root: &Path) -> Result<()> {
     //    xtask main.rs.
     //    Match `cargo xtask <word>` patterns and look the word up in the
     //    XtaskCommand enum.
-    // justifies: pattern is a string literal known-safe at compile time; this expect cannot fire in any reachable code path
+    // justifies: INV-LITERAL-REGEX-UNWRAP-SAFE; pattern is a string literal known-safe at compile time in tools/integrity/src/main.rs; this expect cannot fire in any reachable code path
     let xtask_cmd_re = Regex::new(r"cargo\s+xtask\s+([a-z][a-z0-9-]*)")
         .expect("internal regex is a compile-time constant and will compile");
     let mut found_subcommands: BTreeSet<String> = BTreeSet::new();
@@ -520,10 +526,10 @@ fn check_ci_parity(repo_root: &Path) -> Result<()> {
     //    The regex requires the canonical `name@x.y[.z]` form. A bare
     //    `tool: nextest` is intentionally rejected — see ci.yml for the
     //    drift comment that explains the lock-step requirement.
-    // justifies: pattern is a string literal known-safe at compile time; this expect cannot fire in any reachable code path
+    // justifies: INV-LITERAL-REGEX-UNWRAP-SAFE; pattern is a string literal known-safe at compile time in tools/integrity/src/main.rs; this expect cannot fire in any reachable code path
     let tool_install_re = Regex::new(r#"tool:\s*([a-z][a-z0-9-]*)@(\d+(?:\.\d+)+)"#)
         .expect("internal regex is a compile-time constant and will compile");
-    // justifies: pattern is a string literal known-safe at compile time; this expect cannot fire in any reachable code path
+    // justifies: INV-LITERAL-REGEX-UNWRAP-SAFE; pattern is a string literal known-safe at compile time in tools/integrity/src/main.rs; this expect cannot fire in any reachable code path
     let bare_tool_re = Regex::new(r#"tool:\s*([a-z][a-z0-9-]*)\s*$"#)
         .expect("internal regex is a compile-time constant and will compile");
     // Reject any unpinned `tool:` entry up front so we never have to wonder
@@ -857,43 +863,178 @@ fn check_store_pub_fn_coverage(repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Parse the justification comment body and return the word-count after the
-/// `justifies:` prefix, or `None` if the string is not a structured
-/// justification. A justification comment must look like
-/// `// justifies: <clause with >= 5 words>` (ignoring leading whitespace and
-/// the optional `//`).
-fn justification_word_count(text: &str) -> Option<usize> {
-    // justifies: literal regex, compile-time-constant, unwrap safe by construction
-    let re = Regex::new(r"^\s*(?://\s*)?justifies:\s*(\S.*)$")
-        // justifies: pattern is a string literal known-safe at compile time; this expect cannot fire in any reachable code path
-        .expect("internal regex is a compile-time constant and will compile");
-    let caps = re.captures(text)?;
-    let body = caps.get(1)?.as_str();
-    Some(body.split_whitespace().count())
-}
-
-/// Return `Some(justification_body)` if the given line carries a structured
-/// justification comment. A line with a `// justifies: ...` suffix (or
-/// prefix, when the whole line is the comment) counts.
-fn line_carries_justification(line: &str) -> bool {
+/// Extract the justification body (the prose after `justifies:`) from a line
+/// that carries a structured justification comment. Returns `None` if the
+/// line is not a justification.
+fn justification_body(line: &str) -> Option<String> {
     let trimmed = line.trim();
     if let Some(idx) = trimmed.find("// justifies:") {
         let comment = &trimmed[idx + "// ".len()..];
-        return justification_word_count(comment).map_or(false, |w| w >= 5);
+        // justifies: INV-LITERAL-REGEX-UNWRAP-SAFE; literal pattern in tools/integrity/src/main.rs is compile-time constant
+        let re = Regex::new(r"^\s*(?://\s*)?justifies:\s*(\S.*)$")
+            // justifies: INV-LITERAL-REGEX-UNWRAP-SAFE; pattern is a string literal in tools/integrity/src/main.rs
+            .expect("internal regex is a compile-time constant and will compile");
+        return re
+            .captures(comment)
+            .and_then(|c| c.get(1).map(|m| m.as_str().to_string()));
     }
     if trimmed.starts_with("//") {
         let stripped = trimmed.trim_start_matches('/').trim();
         if stripped.starts_with("justifies:") {
-            return justification_word_count(stripped).map_or(false, |w| w >= 5);
+            // justifies: INV-LITERAL-REGEX-UNWRAP-SAFE; literal pattern cannot fail to compile, see tools/integrity/src/main.rs
+            let re = Regex::new(r"^\s*justifies:\s*(\S.*)$")
+                // justifies: INV-LITERAL-REGEX-UNWRAP-SAFE; compile-time regex in tools/integrity/src/main.rs
+                .expect("internal regex is a compile-time constant and will compile");
+            return re
+                .captures(stripped)
+                .and_then(|c| c.get(1).map(|m| m.as_str().to_string()));
         }
     }
-    false
+    None
+}
+
+/// An anchor extracted from a `// justifies:` body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JustifiesAnchor {
+    /// `INV-<NAME>` — must resolve to an id in `traceability/invariants.yaml`.
+    Invariant(String),
+    /// `ADR-NNNN` — must resolve to a file matching `docs/adr/ADR-NNNN-*.md`.
+    Adr(u32),
+    /// An in-repo path like `src/foo.rs`, `tests/bar.rs:42`, `examples/baz.rs`.
+    /// The optional `:line` suffix is informational; resolution checks file existence only.
+    Path(PathBuf),
+}
+
+fn extract_anchors(body: &str) -> Vec<JustifiesAnchor> {
+    // justifies: INV-LITERAL-REGEX-UNWRAP-SAFE; literal patterns in tools/integrity/src/main.rs are compile-time constants
+    let inv_re = Regex::new(r"\bINV-[A-Z][A-Z0-9_-]*\b")
+        .expect("inv anchor regex is a compile-time constant and will compile");
+    // justifies: INV-LITERAL-REGEX-UNWRAP-SAFE; literal pattern in tools/integrity/src/main.rs cannot fail to compile
+    let adr_re = Regex::new(r"\bADR-(\d{4})\b")
+        .expect("adr anchor regex is a compile-time constant and will compile");
+    // Paths: src/..., tests/..., examples/..., batpak-macros/..., batpak-macros-support/..., build.rs, benches/..., tools/...
+    // justifies: INV-LITERAL-REGEX-UNWRAP-SAFE; compile-time literal pattern in tools/integrity/src/main.rs
+    let path_re = Regex::new(
+        r"\b(?:src|tests|examples|batpak-macros|batpak-macros-support|benches|tools|fixtures|docs|traceability)/[A-Za-z0-9_./-]+\.(?:rs|md|yaml|toml)(?::\d+)?\b|\bbuild\.rs(?::\d+)?\b",
+    )
+    .expect("path anchor regex is a compile-time constant and will compile");
+
+    let mut out = Vec::new();
+    for m in inv_re.find_iter(body) {
+        out.push(JustifiesAnchor::Invariant(m.as_str().to_string()));
+    }
+    for caps in adr_re.captures_iter(body) {
+        if let Some(digits) = caps.get(1) {
+            if let Ok(n) = digits.as_str().parse::<u32>() {
+                out.push(JustifiesAnchor::Adr(n));
+            }
+        }
+    }
+    for m in path_re.find_iter(body) {
+        let s = m.as_str();
+        // Strip trailing :<line> if present.
+        let file = s
+            .rsplit_once(':')
+            .and_then(|(before, after)| {
+                if after.chars().all(|c| c.is_ascii_digit()) {
+                    Some(before)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(s);
+        out.push(JustifiesAnchor::Path(PathBuf::from(file)));
+    }
+    out
+}
+
+fn resolve_anchor(
+    anchor: &JustifiesAnchor,
+    repo_root: &Path,
+    known_invariants: &BTreeSet<String>,
+) -> Result<(), String> {
+    match anchor {
+        JustifiesAnchor::Invariant(id) => {
+            if known_invariants.contains(id) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "invariant id `{}` is not present in traceability/invariants.yaml",
+                    id
+                ))
+            }
+        }
+        JustifiesAnchor::Adr(n) => {
+            let prefix = format!("ADR-{:04}", n);
+            let adr_dir = repo_root.join("docs/adr");
+            if !adr_dir.is_dir() {
+                return Err(format!(
+                    "docs/adr/ directory not found while resolving ADR-{:04}",
+                    n
+                ));
+            }
+            let found = fs::read_dir(&adr_dir)
+                .map_err(|e| format!("read docs/adr/: {}", e))?
+                .any(|entry| {
+                    entry
+                        .ok()
+                        .and_then(|e| e.file_name().into_string().ok())
+                        .map_or(false, |name| name.starts_with(&prefix))
+                });
+            if found {
+                Ok(())
+            } else {
+                Err(format!(
+                    "ADR-{:04} does not match any file under docs/adr/",
+                    n
+                ))
+            }
+        }
+        JustifiesAnchor::Path(rel) => {
+            let abs = repo_root.join(rel);
+            if abs.exists() {
+                Ok(())
+            } else {
+                Err(format!("path anchor `{}` does not exist", rel.display()))
+            }
+        }
+    }
+}
+
+fn load_known_invariants(repo_root: &Path) -> Result<BTreeSet<String>> {
+    let records: Vec<InvariantRecord> = load_yaml(&repo_root.join("traceability/invariants.yaml"))?;
+    Ok(records.into_iter().map(|r| r.id).collect())
+}
+
+/// Return `true` if the given line carries a structured justification comment
+/// with at least 5 words **and** at least one resolvable anchor.
+fn line_carries_justification(
+    line: &str,
+    repo_root: &Path,
+    known_invariants: &BTreeSet<String>,
+) -> bool {
+    let Some(body) = justification_body(line) else {
+        return false;
+    };
+    if body.split_whitespace().count() < 5 {
+        return false;
+    }
+    let anchors = extract_anchors(&body);
+    anchors
+        .iter()
+        .any(|a| resolve_anchor(a, repo_root, known_invariants).is_ok())
 }
 
 fn check_allow_justifications(repo_root: &Path) -> Result<()> {
+    let known_invariants = load_known_invariants(repo_root)?;
     let mut paths = rust_files(&repo_root.join("src"));
     paths.extend(rust_files(&repo_root.join("tools/xtask/src")));
     paths.extend(rust_files(&repo_root.join("tools/integrity/src")));
+    paths.extend(rust_files(&repo_root.join("batpak-macros/src")));
+    paths.extend(rust_files(&repo_root.join("batpak-macros-support/src")));
+    paths.extend(rust_files(&repo_root.join("tests")));
+    paths.extend(rust_files(&repo_root.join("examples")));
+    paths.extend(rust_files(&repo_root.join("benches")));
     paths.push(repo_root.join("build.rs"));
     for path in paths {
         let content = fs::read_to_string(&path)?;
@@ -901,16 +1042,19 @@ fn check_allow_justifications(repo_root: &Path) -> Result<()> {
         for (index, line) in lines.iter().enumerate() {
             let trimmed = line.trim();
             if trimmed.starts_with("#![allow(") || trimmed.starts_with("#[allow(") {
-                let justified = line_carries_justification(line)
+                let justified = line_carries_justification(line, repo_root, &known_invariants)
                     || index
                         .checked_sub(1)
                         .and_then(|prev| lines.get(prev))
-                        .map(|prev| line_carries_justification(prev))
+                        .map(|prev| line_carries_justification(prev, repo_root, &known_invariants))
                         .unwrap_or(false);
                 ensure(
                     justified,
                     format!(
-                        "unjustified allow in {}:{} — every #[allow(...)] must carry a `// justifies: <>= 5 words>` comment on the same or preceding line",
+                        "unjustified allow in {}:{} — every #[allow(...)] must carry a `// justifies: <>=5 words + >=1 resolvable anchor>` comment. \
+                         An anchor is an INV-id from traceability/invariants.yaml, an ADR-NNNN whose file exists under docs/adr/, \
+                         or a concrete repo path (src/..., tests/..., examples/..., batpak-macros/..., batpak-macros-support/..., benches/..., tools/..., build.rs). \
+                         See INV-ALLOW-IS-DESIGN.",
                         relative(repo_root, &path),
                         index + 1
                     ),
@@ -1315,7 +1459,7 @@ mod tests {
             }
         "#;
 
-        // justifies: test-only; panic on setup failure is the test's signal of broken fixtures
+        // justifies: INV-TEST-PANIC-AS-ASSERTION; setup panics signal fixture breakage, see tools/integrity/src/main.rs
         let file = syn::parse_file(source).expect("parse source");
         let names = public_item_names(&file);
 
@@ -1336,7 +1480,7 @@ matrix:
     - "--all-features"
 "#;
 
-        // justifies: test-only; panic on setup failure is the test's signal of broken fixtures
+        // justifies: INV-TEST-PANIC-AS-ASSERTION; setup panics signal fixture breakage in tools/integrity/src/main.rs
         let values = workflow_list_values(workflow, "features").expect("parse values");
         assert_eq!(
             values,
@@ -1346,5 +1490,84 @@ matrix:
                 "--all-features".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn justification_body_returns_prose_after_prefix() {
+        assert_eq!(
+            justification_body("// justifies: INV-FOO; narrow cast bounds checked above here"),
+            Some("INV-FOO; narrow cast bounds checked above here".to_string()),
+        );
+        assert_eq!(
+            justification_body("    let _ = 1; // justifies: INV-BAR; inline anchored rationale"),
+            Some("INV-BAR; inline anchored rationale".to_string()),
+        );
+        assert_eq!(
+            justification_body("// this is not a justifies comment"),
+            None
+        );
+        assert_eq!(justification_body("let x = 1;"), None);
+    }
+
+    #[test]
+    fn extract_anchors_finds_inv_adr_and_path_tokens() {
+        let body =
+            "INV-MACRO-BOUNDED-CAST and ADR-0010 plus tests/coordinate_hardening.rs:42 cover this";
+        let anchors = extract_anchors(body);
+        assert!(anchors.contains(&JustifiesAnchor::Invariant("INV-MACRO-BOUNDED-CAST".into())));
+        assert!(anchors.contains(&JustifiesAnchor::Adr(10)));
+        assert!(anchors
+            .iter()
+            .any(|a| matches!(a, JustifiesAnchor::Path(p) if p.as_os_str() == "tests/coordinate_hardening.rs")));
+    }
+
+    #[test]
+    fn extract_anchors_rejects_non_inv_tokens() {
+        let body = "TODO-MAYBE-LATER AND some-random-words and INV- by itself are not anchors";
+        let anchors = extract_anchors(body);
+        assert!(
+            anchors.is_empty(),
+            "bare words must not produce anchors; got {:?}",
+            anchors
+        );
+    }
+
+    #[test]
+    fn line_carries_justification_requires_body_plus_anchor() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("crate lives under tools/integrity — two parents is the repo root")
+            .to_path_buf();
+        // justifies: INV-TEST-PANIC-AS-ASSERTION; test-only setup failure is the assertion signal in tools/integrity/src/main.rs
+        let known = load_known_invariants(&repo_root).expect("load catalog");
+
+        // good — real invariant anchor, prose is long enough
+        assert!(line_carries_justification(
+            "// justifies: INV-MACRO-BOUNDED-CAST; narrowing cast bounds checked in batpak-macros/src/lib.rs",
+            &repo_root,
+            &known,
+        ));
+
+        // bad — prose but no resolvable anchor
+        assert!(!line_carries_justification(
+            "// justifies: this is a narrative justification with no catalog anchor or path",
+            &repo_root,
+            &known,
+        ));
+
+        // bad — INV-id that is not in the catalog
+        assert!(!line_carries_justification(
+            "// justifies: INV-NOT-A-REAL-INVARIANT-IDENTIFIER-HERE covers this site",
+            &repo_root,
+            &known,
+        ));
+
+        // bad — too short (< 5 words) even with an anchor
+        assert!(!line_carries_justification(
+            "// justifies: INV-MACRO-BOUNDED-CAST ok",
+            &repo_root,
+            &known,
+        ));
     }
 }

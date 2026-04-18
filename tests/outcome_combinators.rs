@@ -1,4 +1,4 @@
-// justifies: Outcome combinator tests use panic/unwrap as assertion style and match the success arm with a wildcard fallback rather than enumerating every error variant.
+// justifies: INV-TEST-PANIC-AS-ASSERTION; Outcome combinator tests in tests/outcome_combinators.rs use panic/unwrap as assertion style and match the success arm with a wildcard fallback rather than enumerating every error variant.
 #![allow(clippy::panic, clippy::wildcard_enum_match_arm, clippy::unwrap_used)]
 //! Tests for Outcome combinators not covered by monad_laws.rs.
 //! Covers: inspect, inspect_err, map_err, or_else, and_then_if,
