@@ -1,0 +1,5 @@
+error: #[derive(EventSourced)] requires a named-field struct; tuple structs are not supported
+  --> tests/ui/es_on_tuple_struct.rs:12:13
+   |
+12 | struct Tuple(u64);
+   |             ^^^^^

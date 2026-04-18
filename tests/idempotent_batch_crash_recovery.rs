@@ -1,0 +1,161 @@
+// justifies: tests rely on expect/panic on unreachable failures; clippy::unwrap_used and clippy::panic are the standard harness allowances for integration tests.
+#![allow(clippy::unwrap_used, clippy::panic)]
+//! Idempotent batch shape + replay recovery.
+//!
+//! [INV-BATCH-IDEMPOTENT-SHAPE] A batch that mixes keyed and unkeyed items is
+//! rejected synchronously with `StoreError::IdempotencyPartialBatch` before
+//! any frame reaches disk. A fully-keyed batch survives close+reopen and is
+//! replayable without producing duplicate events.
+
+use batpak::coordinate::{Coordinate, Region};
+use batpak::event::EventKind;
+use batpak::store::{AppendOptions, BatchAppendItem, CausationRef, Store, StoreConfig, StoreError};
+use tempfile::TempDir;
+
+const KIND: EventKind = EventKind::custom(0xB, 1);
+
+fn coord() -> Coordinate {
+    Coordinate::new("entity:idem", "scope:batch").expect("valid coord")
+}
+
+fn config(dir: &TempDir) -> StoreConfig {
+    StoreConfig::new(dir.path())
+        .with_enable_checkpoint(false)
+        .with_enable_mmap_index(false)
+        .with_sync_every_n_events(1)
+}
+
+#[test]
+fn partial_keys_rejected_synchronously() {
+    let dir = TempDir::new().expect("temp dir");
+    let store = Store::open(config(&dir)).expect("open store");
+    let coord = coord();
+
+    // Item 0: carries an idempotency key.
+    // Item 1: does NOT carry one. The batch has a heterogeneous shape and
+    // must be rejected before any frame hits disk.
+    let items = vec![
+        BatchAppendItem::new(
+            coord.clone(),
+            KIND,
+            &serde_json::json!({"step": 0}),
+            AppendOptions::new().with_idempotency(0xAAAA_BBBB_CCCC_DDDD),
+            CausationRef::None,
+        )
+        .expect("keyed item"),
+        BatchAppendItem::new(
+            coord.clone(),
+            KIND,
+            &serde_json::json!({"step": 1}),
+            AppendOptions::new(),
+            CausationRef::None,
+        )
+        .expect("unkeyed item"),
+    ];
+
+    let result = store.append_batch(items);
+    let err = result.expect_err(
+        "PROPERTY: a batch that mixes keyed and unkeyed items must be rejected synchronously",
+    );
+    assert!(
+        matches!(err, StoreError::IdempotencyPartialBatch { .. }),
+        "PROPERTY: partial-key batch must route to StoreError::IdempotencyPartialBatch, got {err:?}"
+    );
+
+    // Nothing must be visible to readers.
+    let visible = store.query(&Region::all());
+    assert!(
+        visible.is_empty(),
+        "PROPERTY: a rejected partial-key batch must leave the store empty; found {} visible events",
+        visible.len()
+    );
+
+    store.close().expect("close store");
+}
+
+#[test]
+fn idempotent_batch_replayable_without_duplicates() {
+    // Use close+reopen as a crash proxy: the first append_batch writes
+    // frames (BEGIN + items + COMMIT) and fsyncs. Reopening rebuilds the
+    // index from disk. Submitting the same idempotent batch must deduplicate
+    // via the idempotency-key index and return the original receipts.
+    let dir = TempDir::new().expect("temp dir");
+    let coord = coord();
+
+    // Build a fully-keyed batch — both items carry unique idempotency keys.
+    fn build_batch(coord: &Coordinate) -> Vec<BatchAppendItem> {
+        vec![
+            BatchAppendItem::new(
+                coord.clone(),
+                KIND,
+                &serde_json::json!({"step": 0}),
+                AppendOptions::new().with_idempotency(0x1111_1111_1111_1111),
+                CausationRef::None,
+            )
+            .expect("keyed item 0"),
+            BatchAppendItem::new(
+                coord.clone(),
+                KIND,
+                &serde_json::json!({"step": 1}),
+                AppendOptions::new().with_idempotency(0x2222_2222_2222_2222),
+                CausationRef::None,
+            )
+            .expect("keyed item 1"),
+        ]
+    }
+
+    // Phase 1: first submission on a fresh store.
+    let first_receipts = {
+        let store = Store::open(config(&dir)).expect("open store");
+        let receipts = store
+            .append_batch(build_batch(&coord))
+            .expect("first batch submission must succeed");
+        assert_eq!(receipts.len(), 2);
+        let events = store.query(&Region::all());
+        assert_eq!(
+            events.len(),
+            2,
+            "PROPERTY: first batch submission must make both items visible"
+        );
+        store.close().expect("close store");
+        receipts
+    };
+
+    // Phase 2: reopen, resubmit the same batch. The idempotency index must
+    // recognise the keys and short-circuit to the cached receipts.
+    {
+        let store = Store::open(config(&dir)).expect("reopen store");
+        let replay_receipts = store
+            .append_batch(build_batch(&coord))
+            .expect("replay submission must succeed");
+        assert_eq!(
+            replay_receipts.len(),
+            2,
+            "PROPERTY: replay must return one receipt per item"
+        );
+
+        for (orig, replay) in first_receipts.iter().zip(replay_receipts.iter()) {
+            assert_eq!(
+                orig.event_id, replay.event_id,
+                "PROPERTY: idempotent replay must return the original event_id; \
+                 first={:x} replay={:x} — a fresh UUID here means dedup failed.",
+                orig.event_id, replay.event_id
+            );
+            assert_eq!(
+                orig.sequence, replay.sequence,
+                "PROPERTY: idempotent replay must return the original sequence"
+            );
+        }
+
+        // Only two events must be visible — no duplicates were created.
+        let events = store.query(&Region::all());
+        assert_eq!(
+            events.len(),
+            2,
+            "PROPERTY: idempotent replay must not duplicate events; found {} events",
+            events.len()
+        );
+
+        store.close().expect("close store");
+    }
+}

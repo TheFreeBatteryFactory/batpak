@@ -1,0 +1,5 @@
+error: #[derive(MultiEventReactor)] requires a named-field struct; unit structs are not supported
+  --> tests/ui/mer_on_unit_struct.rs:24:8
+   |
+24 | struct Reactor;
+   |        ^^^^^^^

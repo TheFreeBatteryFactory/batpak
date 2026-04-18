@@ -387,6 +387,7 @@ mod tests {
                 }
             }]
         });
+        // justifies: test-only; panic on setup failure is the test's signal of broken fixtures
         let summary = coverage_summary(&json).expect("summary");
         assert_eq!(summary.line_pct, 75);
         assert_eq!(summary.func_pct, 75);
@@ -441,6 +442,7 @@ TOTAL 22 3 86.36% 50 4 92.00%\n";
 
     #[test]
     fn coverage_export_dir_is_stable_under_target() {
+        // justifies: test-only; panic on setup failure is the test's signal of broken fixtures
         let path = coverage_export_dir().expect("export dir");
         assert_eq!(
             path,
@@ -450,6 +452,7 @@ TOTAL 22 3 86.36% 50 4 92.00%\n";
 
     #[test]
     fn coverage_staging_dir_stays_outside_target_tree() {
+        // justifies: test-only; panic on setup failure is the test's signal of broken fixtures
         let path = coverage_staging_dir().expect("staging dir");
         assert!(
             !path.starts_with(std::path::Path::new("target")),

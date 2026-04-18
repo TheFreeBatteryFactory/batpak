@@ -1,0 +1,5 @@
+error: duplicate `event = X` — each payload type may be bound to exactly one handler per projection
+  --> tests/ui/es_duplicate_event.rs:12:18
+   |
+12 | #[batpak(event = Ping, handler = second)]
+   |                  ^^^^

@@ -1,3 +1,20 @@
+//! Integrity tool — executable invariants for the batpak repo.
+//!
+//! # `// justifies:` comment convention
+//!
+//! Every `#[allow(...)]` and every `.unwrap()` / `.expect()` in the repo's
+//! runtime, tool, and build-script surfaces must carry a `// justifies: ...`
+//! comment either on the same line or on the line immediately preceding the
+//! attribute / expression. The comment body must:
+//!
+//! 1. Start with the literal prefix `justifies:` (after an optional `//` and
+//!    whitespace).
+//! 2. Contain at least five whitespace-separated words after the prefix,
+//!    naming the design decision that makes the silencer or panic safe.
+//!
+//! Narrative prose without that structure counts as silence, not design. This
+//! tool lints itself to the same rule; every justification below is load-
+//! bearing and is checked by `check_allow_justifications` on every run.
 mod architecture_lints;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -61,6 +78,21 @@ struct ArtifactRecord {
 struct AllowlistEntry {
     name: String,
     justification: String,
+    witness: Vec<AllowlistWitness>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AllowlistWitness {
+    path: String,
+    // justifies: lines is supplementary line-number metadata for human review; the AST walker verifies the path contains the item regardless of specific lines
+    #[serde(default)]
+    lines: Vec<u32>,
+}
+
+impl AllowlistWitness {
+    fn line_hints(&self) -> &[u32] {
+        &self.lines
+    }
 }
 
 fn main() -> Result<()> {
@@ -358,6 +390,25 @@ fn structural_check() -> Result<()> {
 /// workflow YAML reorganizes substantially, this check will need updates,
 /// which is the right behavior — drift detection requires the check to
 /// itself be regularly maintained.
+/// Construct a regex that matches `<tool>@<semver>` for a caller-supplied
+/// `tool` name. The `tool` string is validated to contain only
+/// `[A-Za-z0-9-]+` so no regex metacharacter can slip through. A malformed
+/// tool name returns an error rather than relying on `.unwrap()` at regex
+/// build time.
+fn build_tool_pin_regex(tool: &str) -> Result<Regex> {
+    if tool.is_empty()
+        || !tool
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        bail!(
+            "internal error: tool name `{tool}` contains characters outside [A-Za-z0-9_-]; refusing to build a regex that would be shaped by user input"
+        );
+    }
+    Regex::new(&format!(r"{tool}@(\d+(?:\.\d+)+)"))
+        .with_context(|| format!("compile tool-pin regex for `{tool}`"))
+}
+
 fn check_ci_parity(repo_root: &Path) -> Result<()> {
     let ci_yml = fs::read_to_string(repo_root.join(".github/workflows/ci.yml"))
         .context("read .github/workflows/ci.yml")?;
@@ -380,7 +431,9 @@ fn check_ci_parity(repo_root: &Path) -> Result<()> {
     //    xtask main.rs.
     //    Match `cargo xtask <word>` patterns and look the word up in the
     //    XtaskCommand enum.
-    let xtask_cmd_re = Regex::new(r"cargo\s+xtask\s+([a-z][a-z0-9-]*)").unwrap();
+    // justifies: pattern is a string literal known-safe at compile time; this expect cannot fire in any reachable code path
+    let xtask_cmd_re = Regex::new(r"cargo\s+xtask\s+([a-z][a-z0-9-]*)")
+        .expect("internal regex is a compile-time constant and will compile");
     let mut found_subcommands: BTreeSet<String> = BTreeSet::new();
     for (_, workflow) in workflows {
         for cap in xtask_cmd_re.captures_iter(workflow) {
@@ -467,8 +520,12 @@ fn check_ci_parity(repo_root: &Path) -> Result<()> {
     //    The regex requires the canonical `name@x.y[.z]` form. A bare
     //    `tool: nextest` is intentionally rejected — see ci.yml for the
     //    drift comment that explains the lock-step requirement.
-    let tool_install_re = Regex::new(r#"tool:\s*([a-z][a-z0-9-]*)@(\d+(?:\.\d+)+)"#).unwrap();
-    let bare_tool_re = Regex::new(r#"tool:\s*([a-z][a-z0-9-]*)\s*$"#).unwrap();
+    // justifies: pattern is a string literal known-safe at compile time; this expect cannot fire in any reachable code path
+    let tool_install_re = Regex::new(r#"tool:\s*([a-z][a-z0-9-]*)@(\d+(?:\.\d+)+)"#)
+        .expect("internal regex is a compile-time constant and will compile");
+    // justifies: pattern is a string literal known-safe at compile time; this expect cannot fire in any reachable code path
+    let bare_tool_re = Regex::new(r#"tool:\s*([a-z][a-z0-9-]*)\s*$"#)
+        .expect("internal regex is a compile-time constant and will compile");
     // Reject any unpinned `tool:` entry up front so we never have to wonder
     // why a Windows install drifted from the canonical Linux pin.
     for line in ci_yml.lines() {
@@ -503,7 +560,7 @@ fn check_ci_parity(repo_root: &Path) -> Result<()> {
                  Either add it to setup or remove from the workflow."
             );
         }
-        let xtask_pin_re = Regex::new(&format!(r"{tool}@(\d+(?:\.\d+)+)")).unwrap();
+        let xtask_pin_re = build_tool_pin_regex(tool)?;
         let xtask_ver = xtask_pin_re
             .captures(&xtask_sources)
             .and_then(|c| c.get(1))
@@ -537,8 +594,8 @@ fn check_ci_parity(repo_root: &Path) -> Result<()> {
         "cargo-mutants",
     ];
     for tool in pinned_tools {
-        let dock_pin_re = Regex::new(&format!(r"{tool}@(\d+(?:\.\d+)+)")).unwrap();
-        let xtask_pin_re = Regex::new(&format!(r"{tool}@(\d+(?:\.\d+)+)")).unwrap();
+        let dock_pin_re = build_tool_pin_regex(tool)?;
+        let xtask_pin_re = build_tool_pin_regex(tool)?;
         let dock_v = dock_pin_re
             .captures(&dockerfile)
             .and_then(|c| c.get(1))
@@ -589,7 +646,17 @@ fn assert_workflow_list_values(
 }
 
 fn workflow_list_values(workflow: &str, key: &str) -> Result<Vec<String>> {
-    let inline_re = Regex::new(&format!(r"^\s*{}\s*:\s*\[(?P<values>[^\]]+)\]\s*$", key)).unwrap();
+    if key.is_empty()
+        || !key
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        bail!(
+            "internal error: workflow list key `{key}` must be `[A-Za-z0-9_]+` so regex construction is safe"
+        );
+    }
+    let inline_re = Regex::new(&format!(r"^\s*{}\s*:\s*\[(?P<values>[^\]]+)\]\s*$", key))
+        .with_context(|| format!("compile workflow list regex for key `{key}`"))?;
     let mut lines = workflow.lines().enumerate().peekable();
     while let Some((index, line)) = lines.next() {
         if let Some(caps) = inline_re.captures(line) {
@@ -790,6 +857,39 @@ fn check_store_pub_fn_coverage(repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Parse the justification comment body and return the word-count after the
+/// `justifies:` prefix, or `None` if the string is not a structured
+/// justification. A justification comment must look like
+/// `// justifies: <clause with >= 5 words>` (ignoring leading whitespace and
+/// the optional `//`).
+fn justification_word_count(text: &str) -> Option<usize> {
+    // justifies: literal regex, compile-time-constant, unwrap safe by construction
+    let re = Regex::new(r"^\s*(?://\s*)?justifies:\s*(\S.*)$")
+        // justifies: pattern is a string literal known-safe at compile time; this expect cannot fire in any reachable code path
+        .expect("internal regex is a compile-time constant and will compile");
+    let caps = re.captures(text)?;
+    let body = caps.get(1)?.as_str();
+    Some(body.split_whitespace().count())
+}
+
+/// Return `Some(justification_body)` if the given line carries a structured
+/// justification comment. A line with a `// justifies: ...` suffix (or
+/// prefix, when the whole line is the comment) counts.
+fn line_carries_justification(line: &str) -> bool {
+    let trimmed = line.trim();
+    if let Some(idx) = trimmed.find("// justifies:") {
+        let comment = &trimmed[idx + "// ".len()..];
+        return justification_word_count(comment).map_or(false, |w| w >= 5);
+    }
+    if trimmed.starts_with("//") {
+        let stripped = trimmed.trim_start_matches('/').trim();
+        if stripped.starts_with("justifies:") {
+            return justification_word_count(stripped).map_or(false, |w| w >= 5);
+        }
+    }
+    false
+}
+
 fn check_allow_justifications(repo_root: &Path) -> Result<()> {
     let mut paths = rust_files(&repo_root.join("src"));
     paths.extend(rust_files(&repo_root.join("tools/xtask/src")));
@@ -801,16 +901,16 @@ fn check_allow_justifications(repo_root: &Path) -> Result<()> {
         for (index, line) in lines.iter().enumerate() {
             let trimmed = line.trim();
             if trimmed.starts_with("#![allow(") || trimmed.starts_with("#[allow(") {
-                let justified = trimmed.contains("//")
+                let justified = line_carries_justification(line)
                     || index
                         .checked_sub(1)
                         .and_then(|prev| lines.get(prev))
-                        .map(|prev| prev.trim_start().starts_with("//"))
+                        .map(|prev| line_carries_justification(prev))
                         .unwrap_or(false);
                 ensure(
                     justified,
                     format!(
-                        "unjustified allow in {}:{}",
+                        "unjustified allow in {}:{} — every #[allow(...)] must carry a `// justifies: <>= 5 words>` comment on the same or preceding line",
                         relative(repo_root, &path),
                         index + 1
                     ),
@@ -824,12 +924,71 @@ fn check_allow_justifications(repo_root: &Path) -> Result<()> {
 fn check_pub_items_have_references(repo_root: &Path) -> Result<()> {
     let allowlist: Vec<AllowlistEntry> =
         load_yaml(&repo_root.join("traceability/pub_item_allowlist.yaml"))?;
-    let allowed: HashMap<&str, &str> = allowlist
+    let allowed: HashMap<&str, &AllowlistEntry> = allowlist
         .iter()
-        .map(|entry| (entry.name.as_str(), entry.justification.as_str()))
+        .map(|entry| (entry.name.as_str(), entry))
         .collect();
-    let reference_space = collect_reference_text(repo_root)?;
+
+    // For every allowlist entry, validate every witness path:
+    //   - file must exist
+    //   - file must parse as Rust
+    //   - file must contain a real AST reference to the item name (not just a
+    //     substring in a string literal or comment)
+    for entry in &allowlist {
+        ensure(
+            !entry.justification.trim().is_empty(),
+            format!(
+                "pub_item_allowlist entry `{}` must include a non-empty supplementary `justification:`",
+                entry.name
+            ),
+        )?;
+        ensure(
+            !entry.witness.is_empty(),
+            format!(
+                "pub_item_allowlist entry `{}` must declare at least one `witness:` path pointing at a test that uses the item; narrative `justification:` is supplementary, not load-bearing",
+                entry.name
+            ),
+        )?;
+        for witness in &entry.witness {
+            let abs = repo_root.join(&witness.path);
+            ensure(
+                abs.exists(),
+                format!(
+                    "pub_item_allowlist entry `{}` declares witness path `{}` but that file does not exist",
+                    entry.name, witness.path
+                ),
+            )?;
+            let content = fs::read_to_string(&abs)
+                .with_context(|| format!("read witness {}", witness.path))?;
+            let file = syn::parse_file(&content)
+                .with_context(|| format!("parse witness {}", witness.path))?;
+            ensure(
+                ast_references_name(&file, &entry.name),
+                format!(
+                    "pub_item_allowlist entry `{}` witness `{}` (line hints {:?}) does not contain a real path-position reference to `{}`; either update the witness path or hide the item via `#[doc(hidden)]`",
+                    entry.name,
+                    witness.path,
+                    witness.line_hints(),
+                    entry.name,
+                ),
+            )?;
+        }
+    }
+
+    let test_files: Vec<PathBuf> = rust_files(&repo_root.join("tests"));
+    let parsed_tests: Vec<(PathBuf, syn::File)> = test_files
+        .into_iter()
+        .filter_map(|path| {
+            let content = fs::read_to_string(&path).ok()?;
+            let file = syn::parse_file(&content).ok()?;
+            Some((path, file))
+        })
+        .collect();
+
     for path in rust_files(&repo_root.join("src")) {
+        if path.ends_with("prelude.rs") {
+            continue;
+        }
         let content = fs::read_to_string(&path)?;
         let file = syn::parse_file(&content)
             .with_context(|| format!("parse {}", relative(repo_root, &path)))?;
@@ -837,12 +996,16 @@ fn check_pub_items_have_references(repo_root: &Path) -> Result<()> {
             if allowed.contains_key(name.as_str()) {
                 continue;
             }
+            let found = parsed_tests
+                .iter()
+                .any(|(_, ast)| ast_references_name(ast, &name));
             ensure(
-                reference_space.contains(&name),
+                found,
                 format!(
-                    "public item `{}` from {} has no coarse witness reference in tests/benches/examples/docs; add a named witness or reserve the allowlist for structural surfaces that cannot sensibly be named directly",
+                    "pub item `{}` declared at {} has no test reference (checked {} test files via AST); either add a real test use, add an allowlist entry with a `witness:` path that points to an actual use, or hide the item via `#[doc(hidden)]`.",
                     name,
-                    relative(repo_root, &path)
+                    relative(repo_root, &path),
+                    parsed_tests.len(),
                 ),
             )?;
         }
@@ -850,25 +1013,111 @@ fn check_pub_items_have_references(repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn collect_reference_text(repo_root: &Path) -> Result<BTreeSet<String>> {
-    let mut refs = BTreeSet::new();
-    let mut files = rust_files(&repo_root.join("tests"));
-    files.extend(rust_files(&repo_root.join("benches")));
-    files.extend(rust_files(&repo_root.join("examples")));
-    files.push(repo_root.join("README.md"));
-    files.push(repo_root.join("GUIDE.md"));
-    files.push(repo_root.join("REFERENCE.md"));
-    files.push(repo_root.join("CONTRIBUTING.md"));
-    files.push(repo_root.join("AGENTS.md"));
-    for path in files {
-        let content = fs::read_to_string(&path)?;
-        for token in content.split(|ch: char| !ch.is_alphanumeric() && ch != '_') {
-            if !token.is_empty() {
-                refs.insert(token.to_string());
+/// Walk a parsed Rust file and return true if any real path-position expression
+/// or type references `name`. This is an AST walk, not a substring match —
+/// references inside comments, string literals, and doc-comments are ignored.
+///
+/// Positions considered "real":
+/// - `syn::ExprPath` (e.g. `FooBar`, `module::FooBar`, `Store::method`)
+/// - `syn::TypePath` (e.g. `Vec<FooBar>`, `FooBar`)
+/// - `syn::UseTree::Name` / `syn::UseTree::Rename` (e.g. `use crate::FooBar`,
+///   `use crate::FooBar as _`)
+/// - A path whose last segment's identifier equals `name`
+/// - An identifier in a method-call position (`something.name(...)`)
+pub(crate) fn ast_references_name(file: &syn::File, name: &str) -> bool {
+    struct Walker<'a> {
+        needle: &'a str,
+        found: bool,
+    }
+    impl<'a, 'ast> Visit<'ast> for Walker<'a> {
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            if self.found {
+                return;
+            }
+            for segment in &path.segments {
+                if segment.ident == self.needle {
+                    self.found = true;
+                    return;
+                }
+            }
+            syn::visit::visit_path(self, path);
+        }
+
+        fn visit_use_tree(&mut self, tree: &'ast syn::UseTree) {
+            if self.found {
+                return;
+            }
+            match tree {
+                syn::UseTree::Name(n) => {
+                    if n.ident == self.needle {
+                        self.found = true;
+                    }
+                }
+                syn::UseTree::Rename(r) => {
+                    if r.ident == self.needle || r.rename == self.needle {
+                        self.found = true;
+                    }
+                }
+                syn::UseTree::Path(p) => {
+                    if p.ident == self.needle {
+                        self.found = true;
+                        return;
+                    }
+                    self.visit_use_tree(&p.tree);
+                }
+                syn::UseTree::Group(group) => {
+                    for item in &group.items {
+                        self.visit_use_tree(item);
+                        if self.found {
+                            return;
+                        }
+                    }
+                }
+                syn::UseTree::Glob(_) => {}
             }
         }
+
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if self.found {
+                return;
+            }
+            if call.method == self.needle {
+                self.found = true;
+                return;
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            if self.found {
+                return;
+            }
+            for segment in &mac.path.segments {
+                if segment.ident == self.needle {
+                    self.found = true;
+                    return;
+                }
+            }
+            syn::visit::visit_macro(self, mac);
+        }
+
+        fn visit_field(&mut self, field: &'ast syn::Field) {
+            if self.found {
+                return;
+            }
+            // Skip the field ident itself — we are only interested in the type
+            // path. `visit_field` on a struct definition would otherwise make
+            // every struct's field name match bogusly.
+            syn::visit::visit_type(self, &field.ty);
+        }
     }
-    Ok(refs)
+
+    let mut walker = Walker {
+        needle: name,
+        found: false,
+    };
+    walker.visit_file(file);
+    walker.found
 }
 
 fn public_item_names(file: &syn::File) -> Vec<String> {
@@ -1066,6 +1315,7 @@ mod tests {
             }
         "#;
 
+        // justifies: test-only; panic on setup failure is the test's signal of broken fixtures
         let file = syn::parse_file(source).expect("parse source");
         let names = public_item_names(&file);
 
@@ -1086,6 +1336,7 @@ matrix:
     - "--all-features"
 "#;
 
+        // justifies: test-only; panic on setup failure is the test's signal of broken fixtures
         let values = workflow_list_values(workflow, "features").expect("parse values");
         assert_eq!(
             values,

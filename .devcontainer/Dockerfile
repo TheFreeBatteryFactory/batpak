@@ -1,4 +1,4 @@
-FROM rust:bookworm
+FROM rust:1.92-bookworm
 
 ARG DEBIAN_FRONTEND=noninteractive
 # Host-matched UID/GID so files created inside the container appear owned

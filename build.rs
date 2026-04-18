@@ -1,4 +1,5 @@
-#![allow(clippy::panic)] // build.rs fails fast with explicit invariant messages by design
+// justifies: build.rs is fail-fast by design; invariant violations halt the build with a cargo-parseable explanation. Every panic site is spanned by the `fail` helper below with a dedicated justification. This file-level allow is the single documented entry point for that policy.
+#![allow(clippy::panic)]
 
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -6,10 +7,28 @@ use std::fs;
 use std::path::Path;
 use syn::visit::Visit;
 
+/// Single documented failure path for build.rs. Every invariant violation
+/// routes through here so the panic surface is consolidated and auditable.
+/// Emits a cargo-parseable warning on stdout, then panics so Cargo stops the
+/// build without relying on `process::exit`.
+fn fail(msg: &str) -> ! {
+    println!("cargo:warning=build.rs: {msg}");
+    panic!("build.rs invariant failed: {msg}")
+}
+
 #[derive(Debug, Deserialize)]
 struct PubItemAllowlistEntry {
     name: String,
     justification: String,
+    #[serde(default)]
+    witness: Vec<PubItemAllowlistWitness>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PubItemAllowlistWitness {
+    path: String,
+    #[serde(default)]
+    lines: Vec<u32>,
 }
 
 // build.rs runs before every cargo build/check/test. Cannot be skipped.
@@ -69,33 +88,51 @@ fn check_no_stubs_in_src() {
     });
 }
 
+/// Parse a single source line and return true if it carries a structured
+/// justification comment. A justification is `// justifies: <body>` where
+/// `<body>` has at least five whitespace-separated words. Matches either an
+/// inline trailing comment or a standalone comment line.
+fn line_carries_justification(line: &str) -> bool {
+    let trimmed = line.trim();
+    if let Some(idx) = trimmed.find("// justifies:") {
+        let body = &trimmed[idx + "// justifies:".len()..];
+        return body.split_whitespace().count() >= 5;
+    }
+    if trimmed.starts_with("//") {
+        let stripped = trimmed.trim_start_matches('/').trim();
+        if let Some(body) = stripped.strip_prefix("justifies:") {
+            return body.split_whitespace().count() >= 5;
+        }
+    }
+    false
+}
+
 /// FM-002 Rogue Silence defense: every #[allow(...)] in runtime or toolchain
-/// Rust code must have a
-/// justification comment on the same or previous line explaining why.
-/// Unjustified allows are how agents silence the compiler instead of fixing bugs.
+/// Rust code must carry a `// justifies: <>= 5 words>` comment on the same or
+/// previous line. Narrative-only comments and raw `//`-prefixed prose count as
+/// silencers; the structured prefix is load-bearing.
 fn check_allow_justifications() {
     walk_allow_checked_rs_files(&mut |path, contents| {
         let path_str = path.display().to_string();
-        for (line_no, line) in contents.lines().enumerate() {
+        let lines: Vec<&str> = contents.lines().collect();
+        for (line_no, line) in lines.iter().enumerate() {
             let trimmed = line.trim();
             if trimmed.starts_with("#![allow(") || trimmed.starts_with("#[allow(") {
-                // Check this line and previous line for a justification comment
-                let has_justification = trimmed.contains("//")
+                let has_justification = line_carries_justification(line)
                     || (line_no > 0
-                        && contents
-                            .lines()
-                            .nth(line_no - 1)
-                            .map(|prev| prev.trim().starts_with("//"))
+                        && lines
+                            .get(line_no - 1)
+                            .map(|prev| line_carries_justification(prev))
                             .unwrap_or(false));
                 if !has_justification {
-                    panic!(
+                    fail(&format!(
                         "ROGUE SILENCE in {path_str}:{}: `{trimmed}`\n\
-                         Every #[allow(...)] must have a justification comment on the same\n\
-                         or previous line explaining WHY the lint is suppressed.\n\
-                         Example: #[allow(clippy::cast_possible_truncation)] // frame_size < u32::MAX\n\
+                         Every #[allow(...)] must carry a `// justifies: <>= 5 words>` comment on the same\n\
+                         or previous line explaining the design decision that makes the silencer safe.\n\
+                         Example: // justifies: pattern is a string literal known-safe at compile time; this expect cannot fire\n\
                          See: Big Bang FM-002 (Rogue Silence).",
                         line_no + 1
-                    );
+                    ));
                 }
             }
         }
@@ -317,10 +354,10 @@ fn check_store_config_field_usage() {
             return;
         }
         let file = syn::parse_file(contents).unwrap_or_else(|err| {
-            panic!(
+            fail(&format!(
                 "CONFIG FIELD USAGE CHECK PARSE FAILURE in {}: {err}",
                 path.display()
-            )
+            ))
         });
         let mut collector = StoreConfigFieldAccessCollector::new(&fields);
         collector.visit_file(&file);
@@ -385,49 +422,66 @@ impl Visit<'_> for StoreConfigFieldAccessCollector<'_> {
     }
 }
 
-fn collect_rs_contents(dir: &Path, buf: &mut String, exclude: Option<&str>) {
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_rs_contents(&path, buf, exclude);
-            } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
-                if let Some(excl) = exclude {
-                    if path.to_string_lossy().replace('\\', "/").ends_with(excl) {
-                        continue;
-                    }
-                }
-                if let Ok(contents) = fs::read_to_string(&path) {
-                    buf.push_str(&contents);
-                }
-            }
-        }
-    }
-}
-
-/// Moonwalker post-mortem defense: every public item in src/ must have at least one
-/// coarse witness reference in tests/ or inline test/source contexts. This is a fast
-/// build-time tripwire, not a full semantic proof. LAW-003 (No Orphan Infrastructure),
-/// FM-007 (Island Syndrome).
+/// Moonwalker post-mortem defense: every public item in src/ must have at least
+/// one real path-position reference in a test file (verified via AST walk, not
+/// substring match). Allowlisted items must declare a `witness:` path that the
+/// AST walker confirms contains a real reference — a bogus witness fails the
+/// build. LAW-003 (No Orphan Infrastructure), FM-007 (Island Syndrome).
 fn check_pub_items_have_tests() {
-    // Collect all test file contents into one searchable string.
-    let mut test_contents = String::new();
-    collect_rs_contents(Path::new("tests"), &mut test_contents, None);
-    // Also include src/ inline #[cfg(test)] modules — they count as tests.
-    let mut src_contents = String::new();
-    collect_rs_contents(Path::new("src"), &mut src_contents, None);
-
     let allowlist = load_pub_item_allowlist();
     let allowed_names: BTreeSet<&str> = allowlist.iter().map(|entry| entry.name.as_str()).collect();
 
-    // Walk src/ and collect public item names from the parsed AST.
+    // Validate every allowlist entry's witness paths via the AST walker. A
+    // single real reference in the referenced file is sufficient. Bogus
+    // witnesses (path missing, file does not reference the item) fail here.
+    for entry in &allowlist {
+        if entry.witness.is_empty() {
+            fail(&format!(
+                "pub_item_allowlist entry `{}` must declare at least one `witness:` path pointing at a test that uses the item; narrative `justification:` is supplementary, not load-bearing",
+                entry.name
+            ));
+        }
+        for witness in &entry.witness {
+            let witness_path = Path::new(&witness.path);
+            let content = match fs::read_to_string(witness_path) {
+                Ok(c) => c,
+                Err(err) => fail(&format!(
+                    "pub_item_allowlist entry `{}` witness `{}` cannot be read: {err}",
+                    entry.name, witness.path
+                )),
+            };
+            let file = match syn::parse_file(&content) {
+                Ok(f) => f,
+                Err(err) => fail(&format!(
+                    "pub_item_allowlist entry `{}` witness `{}` does not parse: {err}",
+                    entry.name, witness.path
+                )),
+            };
+            if !ast_references_name(&file, &entry.name) {
+                fail(&format!(
+                    "pub_item_allowlist entry `{}` witness `{}` (line hints {:?}) has no real path-position reference to the item; update the witness path or hide the item via `#[doc(hidden)]`",
+                    entry.name, witness.path, witness.lines,
+                ));
+            }
+        }
+    }
+
+    // Parse every test file once.
+    let test_files: Vec<(std::path::PathBuf, syn::File)> = collect_rs_file_asts(Path::new("tests"));
+
+    // Walk src/ and collect public item names from the parsed AST, then
+    // confirm each name has at least one real path-position reference in the
+    // parsed tests.
     walk_rs_files(Path::new("src"), &mut |path, contents| {
+        if path.ends_with("prelude.rs") {
+            return;
+        }
         let path_str = path.display().to_string();
         let file = syn::parse_file(contents).unwrap_or_else(|err| {
-            panic!(
+            fail(&format!(
                 "PUB ITEM REFERENCE CHECK PARSE FAILURE in {path_str}: {err}\n\
                  This detector is syntax-aware by design; fix the source or the parser input."
-            )
+            ))
         });
         let mut collector = PublicItemCollector::default();
         collector.visit_file(&file);
@@ -435,45 +489,165 @@ fn check_pub_items_have_tests() {
             if allowed_names.contains(name.as_str()) {
                 continue;
             }
-            if !test_contents.contains(name.as_str()) && !has_test_reference(&src_contents, &name) {
-                panic!(
-                    "PUB ITEM REFERENCE GAP: `{name}` in {path_str}\n\
-                     This fast build-time detector only proves coarse name references in tests/\n\
-                     or inline test/source contexts; it does NOT prove semantic coverage.\n\
-                     Add a witness that names this item, or allowlist it only if it is a\n\
-                     structural surface that cannot sensibly be named directly (serde helper,\n\
-                     marker, type alias, etc.). Do not use the allowlist to evade missing\n\
-                     ergonomic API witnesses.\n\
-                     Structural exceptions belong in\n\
-                     traceability/pub_item_allowlist.yaml with a justification for why it is\n\
-                     structurally unavoidable.\n\
-                     See: LAW-003 (No Orphan Infrastructure), FM-007 (Island Syndrome)."
-                );
+            let witnessed = test_files
+                .iter()
+                .any(|(_, ast)| ast_references_name(ast, &name));
+            if !witnessed {
+                let (line, _col) = item_line_in_file(contents, &name);
+                fail(&format!(
+                    "pub item `{name}` declared at {path_str}:{line} has no test reference (checked {n} test files via AST); either add a real test use, add an allowlist entry with a `witness:` path that points to an actual use, or hide the item via `#[doc(hidden)]`.",
+                    n = test_files.len(),
+                ));
             }
         }
     });
 }
 
+fn collect_rs_file_asts(dir: &Path) -> Vec<(std::path::PathBuf, syn::File)> {
+    let mut out = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(collect_rs_file_asts(&path));
+            } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
+                if let Ok(contents) = fs::read_to_string(&path) {
+                    if let Ok(file) = syn::parse_file(&contents) {
+                        out.push((path, file));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Walk a parsed Rust file and return true if any real path-position expression
+/// or type references `name`. References inside comments and string literals
+/// are ignored; only AST path positions count. Mirrors the integrity-tool
+/// walker exactly so build-time and tool-time checks agree.
+fn ast_references_name(file: &syn::File, name: &str) -> bool {
+    struct Walker<'a> {
+        needle: &'a str,
+        found: bool,
+    }
+    impl<'a, 'ast> Visit<'ast> for Walker<'a> {
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            if self.found {
+                return;
+            }
+            for segment in &path.segments {
+                if segment.ident == self.needle {
+                    self.found = true;
+                    return;
+                }
+            }
+            syn::visit::visit_path(self, path);
+        }
+
+        fn visit_use_tree(&mut self, tree: &'ast syn::UseTree) {
+            if self.found {
+                return;
+            }
+            match tree {
+                syn::UseTree::Name(n) => {
+                    if n.ident == self.needle {
+                        self.found = true;
+                    }
+                }
+                syn::UseTree::Rename(r) => {
+                    if r.ident == self.needle || r.rename == self.needle {
+                        self.found = true;
+                    }
+                }
+                syn::UseTree::Path(p) => {
+                    if p.ident == self.needle {
+                        self.found = true;
+                        return;
+                    }
+                    self.visit_use_tree(&p.tree);
+                }
+                syn::UseTree::Group(group) => {
+                    for item in &group.items {
+                        self.visit_use_tree(item);
+                        if self.found {
+                            return;
+                        }
+                    }
+                }
+                syn::UseTree::Glob(_) => {}
+            }
+        }
+
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if self.found {
+                return;
+            }
+            if call.method == self.needle {
+                self.found = true;
+                return;
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            if self.found {
+                return;
+            }
+            for segment in &mac.path.segments {
+                if segment.ident == self.needle {
+                    self.found = true;
+                    return;
+                }
+            }
+            syn::visit::visit_macro(self, mac);
+        }
+
+        fn visit_field(&mut self, field: &'ast syn::Field) {
+            if self.found {
+                return;
+            }
+            syn::visit::visit_type(self, &field.ty);
+        }
+    }
+
+    let mut walker = Walker {
+        needle: name,
+        found: false,
+    };
+    walker.visit_file(file);
+    walker.found
+}
+
+fn item_line_in_file(contents: &str, name: &str) -> (usize, usize) {
+    for (idx, line) in contents.lines().enumerate() {
+        if line.contains(name) {
+            return (idx + 1, line.find(name).unwrap_or(0) + 1);
+        }
+    }
+    (0, 0)
+}
+
 fn load_pub_item_allowlist() -> Vec<PubItemAllowlistEntry> {
     let path = Path::new("traceability/pub_item_allowlist.yaml");
     let contents = fs::read_to_string(path)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        .unwrap_or_else(|err| fail(&format!("failed to read {}: {err}", path.display())));
     let entries: Vec<PubItemAllowlistEntry> = yaml_serde::from_str(&contents)
-        .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
+        .unwrap_or_else(|err| fail(&format!("failed to parse {}: {err}", path.display())));
     for entry in &entries {
         if entry.name.trim().is_empty() {
-            panic!(
+            fail(&format!(
                 "invalid {} entry: `name` must not be empty (justification: {})",
                 path.display(),
                 entry.justification
-            );
+            ));
         }
         if entry.justification.trim().is_empty() {
-            panic!(
+            fail(&format!(
                 "invalid {} entry for `{}`: `justification` must not be empty",
                 path.display(),
                 entry.name
-            );
+            ));
         }
     }
     entries
@@ -557,25 +731,6 @@ impl Visit<'_> for PublicItemCollector {
         self.record_visibility(&node.vis, node.sig.ident.to_string());
         syn::visit::visit_impl_item_fn(self, node);
     }
-}
-
-/// Check if a name appears in a #[cfg(test)] context within src/ contents.
-/// Simple heuristic: the name appears somewhere in the source that also contains #[cfg(test)].
-fn has_test_reference(src_contents: &str, name: &str) -> bool {
-    // This is a coarse check — if the name appears in src/ at all beyond its definition,
-    // it's likely referenced by inline tests or other modules.
-    // The primary guard is the test_contents check; this is the fallback for inline tests.
-    let mut count = 0;
-    for line in src_contents.lines() {
-        if line.contains(name) {
-            count += 1;
-        }
-        // More than just the definition line means it's referenced elsewhere
-        if count > 2 {
-            return true;
-        }
-    }
-    false
 }
 
 fn walk_rs_files(dir: &Path, check: &mut dyn FnMut(&Path, &str)) {

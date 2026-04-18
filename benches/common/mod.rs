@@ -1,3 +1,4 @@
+// justifies: shared bench helpers are imported by different bench binaries; each bench binary only uses a subset so unused helpers are expected in every compile.
 #![allow(dead_code)]
 
 use criterion::measurement::WallTime;

@@ -1,0 +1,5 @@
+error: duplicate `input =` across `#[batpak(...)]` config attributes — `input` must appear exactly once
+  --> tests/ui/es_duplicate_input.rs:11:18
+   |
+11 | #[batpak(input = RawMsgpackInput)]
+   |                  ^^^^^^^^^^^^^^^

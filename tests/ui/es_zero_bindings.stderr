@@ -1,0 +1,5 @@
+error: `#[derive(EventSourced)]` requires at least one `#[batpak(event = T, handler = h)]` binding
+  --> tests/ui/es_zero_bindings.rs:10:8
+   |
+10 | struct State {
+   |        ^^^^^

@@ -1,0 +1,5 @@
+error: #[derive(EventSourced)] requires `#[batpak(input = <Lane>)]` — e.g. `input = JsonValueInput` or `input = RawMsgpackInput`
+  --> tests/ui/es_missing_input.rs:11:8
+   |
+11 | struct State {}
+   |        ^^^^^

@@ -1,0 +1,204 @@
+// justifies: tests rely on expect/panic on unreachable failures; clippy::unwrap_used and clippy::panic are the standard harness allowances for integration tests.
+#![allow(clippy::unwrap_used, clippy::panic)]
+//! Segment-scan hardening.
+//!
+//! [INV-SEGMENT-SCAN-BOUNDED] The cold-start scan rejects or stops at every
+//! malformed frame without allocating unbounded memory and without panicking:
+//!
+//!   * a frame header claiming a payload larger than the hard frame-size cap
+//!     terminates the scan and preserves every earlier frame;
+//!   * a SIDX footer with an absurd entry_count never causes the loader to
+//!     allocate against the bogus size — the reopen falls back to the
+//!     permissive frame-scan and still surfaces the pre-corruption entries;
+//!   * truncating a segment mid-frame is observable through reduced
+//!     visibility, not through a panic.
+//!
+//! Coverage is black-box: we directly manipulate the on-disk segment bytes
+//! and observe what `Store::open` + `query` produce.
+
+use batpak::coordinate::{Coordinate, Region};
+use batpak::event::EventKind;
+use batpak::store::segment::{SEGMENT_EXTENSION, SEGMENT_MAGIC};
+use batpak::store::{Store, StoreConfig};
+use tempfile::TempDir;
+
+const KIND: EventKind = EventKind::custom(0xE, 2);
+
+fn config(dir: &TempDir) -> StoreConfig {
+    StoreConfig::new(dir.path())
+        .with_enable_checkpoint(false) // force a frame scan on reopen
+        .with_enable_mmap_index(false)
+        .with_sync_every_n_events(1)
+}
+
+fn segment_path(dir: &TempDir) -> std::path::PathBuf {
+    let mut out = None;
+    for entry in std::fs::read_dir(dir.path()).expect("read data dir") {
+        let entry = entry.expect("read_dir entry");
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some(SEGMENT_EXTENSION) {
+            assert!(
+                out.is_none(),
+                "test populates exactly one segment; found multiple: {path:?}"
+            );
+            out = Some(path);
+        }
+    }
+    out.expect("exactly one segment must exist")
+}
+
+fn seed_store(dir: &TempDir, count: u32) {
+    let store = Store::open(config(dir)).expect("open store");
+    let coord = Coordinate::new("entity:scan", "scope:test").expect("valid coord");
+    for i in 0..count {
+        store
+            .append(&coord, KIND, &serde_json::json!({"i": i}))
+            .expect("append");
+    }
+    store.close().expect("clean close");
+}
+
+#[test]
+fn pathological_frame_length_is_bounded_not_panicking() {
+    // Seed a segment with several real frames, then overwrite a frame-header
+    // length field with the u32::MAX sentinel. The scan must see the length
+    // exceeds MAX_FRAME_PAYLOAD (256 MB), log a warning, and stop scanning
+    // — preserving every earlier frame.
+    let dir = TempDir::new().expect("temp dir");
+    seed_store(&dir, 4);
+
+    let seg = segment_path(&dir);
+    let mut bytes = std::fs::read(&seg).expect("read segment");
+    assert_eq!(
+        &bytes[..SEGMENT_MAGIC.len()],
+        SEGMENT_MAGIC,
+        "seeded segment must start with the canonical segment magic"
+    );
+    assert!(
+        bytes.len() >= 16,
+        "segment must have at least a 16-byte SIDX trailer"
+    );
+
+    // Strip the SIDX footer so the cold-start walks the slow path.
+    // The trailer format is [string_table_offset:u64 LE][count:u32 LE][b"SDX2"].
+    let trailer_start = bytes.len() - 16;
+    let string_table_offset = u64::from_le_bytes(
+        bytes[trailer_start..trailer_start + 8]
+            .try_into()
+            .expect("8 bytes"),
+    );
+    bytes.truncate(string_table_offset.try_into().expect("offset fits usize"));
+
+    // Find the first frame header — it lives right after magic(4) +
+    // header_len(4) + msgpack header bytes. The msgpack header starts at
+    // offset 8; its length is the u32 BE at bytes[4..8].
+    let header_len = u32::from_be_bytes(bytes[4..8].try_into().expect("4 bytes")) as usize;
+    let first_frame_offset = 8 + header_len;
+
+    // Walk past the first real frame so at least ONE legit frame remains
+    // recoverable before the pathological header.
+    let first_len = u32::from_be_bytes(
+        bytes[first_frame_offset..first_frame_offset + 4]
+            .try_into()
+            .expect("4 bytes"),
+    ) as usize;
+    let poison_frame_offset = first_frame_offset + 8 + first_len;
+
+    assert!(
+        poison_frame_offset + 4 <= bytes.len(),
+        "segment must contain a second frame to poison; size={}, target={}",
+        bytes.len(),
+        poison_frame_offset + 4
+    );
+
+    // Overwrite the frame's length field with u32::MAX — far beyond
+    // MAX_FRAME_PAYLOAD so the scan terminates immediately.
+    bytes[poison_frame_offset..poison_frame_offset + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+    std::fs::write(&seg, &bytes).expect("write poisoned segment");
+
+    // Reopen must not panic or error. The scan stops at the poisoned frame.
+    let store = Store::open(config(&dir)).expect("reopen with poisoned frame");
+    let entries = store.query(&Region::all());
+
+    assert!(
+        !entries.is_empty(),
+        "PROPERTY: pre-corruption frames must survive a pathological frame-length poison; got 0 entries"
+    );
+    assert!(
+        entries.len() < 4,
+        "PROPERTY: poisoning the second frame's length must prevent it and later frames from surfacing; \
+         got {} entries (max 3 expected if only the first frame survives)",
+        entries.len()
+    );
+
+    // The store remains usable.
+    let coord = Coordinate::new("entity:scan", "scope:test").expect("valid coord");
+    store
+        .append(&coord, KIND, &serde_json::json!({"post_poison": true}))
+        .expect("append after corrupt reopen");
+    store.close().expect("close");
+}
+
+#[test]
+fn sidx_footer_magic_mismatch_falls_back_to_frame_scan() {
+    // Overwriting the SIDX magic is a common real-world corruption: the
+    // trailer looks present but does not match the sentinel. The loader
+    // must treat it as "no SIDX present" and fall back to the frame scan,
+    // which still recovers every frame.
+    let dir = TempDir::new().expect("temp dir");
+    seed_store(&dir, 8);
+
+    let seg = segment_path(&dir);
+    let mut bytes = std::fs::read(&seg).expect("read segment");
+    assert_eq!(
+        &bytes[bytes.len() - 4..],
+        b"SDX2",
+        "seeded segment must have the SIDX magic"
+    );
+    // Corrupt the last byte of the SIDX magic.
+    let magic_offset = bytes.len() - 1;
+    bytes[magic_offset] = b'Z';
+    std::fs::write(&seg, &bytes).expect("write bad-magic segment");
+
+    let store = Store::open(config(&dir)).expect("reopen with SIDX magic corruption");
+    let entries = store.query(&Region::all());
+
+    // The frame scan recovers every frame despite the SIDX trailer being
+    // unreadable — SIDX is an accelerator, not the durability oracle.
+    assert_eq!(
+        entries.len(),
+        8,
+        "PROPERTY: a SIDX magic corruption must fall back to the frame scan without data loss; \
+         got {} entries (expected 8)",
+        entries.len()
+    );
+    store.close().expect("close");
+}
+
+#[test]
+fn truncating_segment_mid_frame_never_panics() {
+    // Truncate a segment inside a frame body. The scanner sees an
+    // UnexpectedEof on read_exact for the payload and stops cleanly.
+    let dir = TempDir::new().expect("temp dir");
+    seed_store(&dir, 4);
+
+    let seg = segment_path(&dir);
+    let bytes = std::fs::read(&seg).expect("read segment");
+    // Strip SIDX trailer first so the scan takes the slow path.
+    let trailer_offset = u64::from_le_bytes(
+        bytes[bytes.len() - 16..bytes.len() - 8]
+            .try_into()
+            .expect("8 bytes"),
+    );
+    let truncated_len = (usize::try_from(trailer_offset).expect("offset fits usize")) / 2;
+    std::fs::write(&seg, &bytes[..truncated_len]).expect("write truncated segment");
+
+    let store = Store::open(config(&dir)).expect("reopen with mid-frame truncation");
+    let entries = store.query(&Region::all());
+    assert!(
+        entries.len() <= 4,
+        "PROPERTY: truncated segment scan must not fabricate entries; got {} (max 4)",
+        entries.len()
+    );
+    store.close().expect("close");
+}

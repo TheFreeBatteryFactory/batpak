@@ -44,7 +44,9 @@ fn check_no_tracked_archive_or_audit_docs(
 }
 
 fn check_no_live_spec_markers(repo_root: &Path, tracked_files: &[PathBuf]) -> Result<()> {
-    let marker = Regex::new(r"\\?\[SPEC:").unwrap();
+    // justifies: literal regex, compile-time-constant, unwrap safe by construction
+    let marker = Regex::new(r"\\?\[SPEC:")
+        .expect("internal regex is a compile-time constant and will compile");
     let allow = [repo_root.join("tools/integrity/src/architecture_lints.rs")];
     for path in tracked_files {
         if allow.iter().any(|allowed| allowed == path) {
@@ -84,11 +86,28 @@ fn check_no_legacy_topology_or_replay_names(
     repo_root: &Path,
     tracked_files: &[PathBuf],
 ) -> Result<()> {
+    // justifies: literal regex, compile-time-constant, unwrap safe by construction
     let banned_terms = [
-        ("IndexLayout", Regex::new(r"\bIndexLayout\b").unwrap()),
-        ("ViewConfig", Regex::new(r"\bViewConfig\b").unwrap()),
-        ("ProjectionMode", Regex::new(r"\bProjectionMode\b").unwrap()),
-        ("ValueInput", Regex::new(r"\bValueInput\b").unwrap()),
+        (
+            "IndexLayout",
+            Regex::new(r"\bIndexLayout\b")
+                .expect("internal regex is a compile-time constant and will compile"),
+        ),
+        (
+            "ViewConfig",
+            Regex::new(r"\bViewConfig\b")
+                .expect("internal regex is a compile-time constant and will compile"),
+        ),
+        (
+            "ProjectionMode",
+            Regex::new(r"\bProjectionMode\b")
+                .expect("internal regex is a compile-time constant and will compile"),
+        ),
+        (
+            "ValueInput",
+            Regex::new(r"\bValueInput\b")
+                .expect("internal regex is a compile-time constant and will compile"),
+        ),
     ];
     let allow = [
         repo_root.join("CHANGELOG.md"),
@@ -131,8 +150,12 @@ fn check_no_legacy_topology_or_replay_names(
 }
 
 fn check_for_absolute_paths(repo_root: &Path, tracked_files: &[PathBuf]) -> Result<()> {
-    let absolute_windows = Regex::new(r"(^|[^A-Za-z])([A-Za-z]:\\)").unwrap();
-    let absolute_unix = Regex::new(r"(?m)(file://|/Users/|/home/|/opt/|/tmp/)").unwrap();
+    // justifies: literal regex, compile-time-constant, unwrap safe by construction
+    let absolute_windows = Regex::new(r"(^|[^A-Za-z])([A-Za-z]:\\)")
+        .expect("internal regex is a compile-time constant and will compile");
+    // justifies: literal regex, compile-time-constant, unwrap safe by construction
+    let absolute_unix = Regex::new(r"(?m)(file://|/Users/|/home/|/opt/|/tmp/)")
+        .expect("internal regex is a compile-time constant and will compile");
     let allow = [
         repo_root.join(".devcontainer/Dockerfile"),
         // devcontainer.json intentionally describes a Linux container's

@@ -1,0 +1,5 @@
+error: event type must be named by its in-scope single-segment name — use a `use` import if the type is in another module
+  --> tests/ui/es_duplicate_event_qualified.rs:16:18
+   |
+16 | #[batpak(event = crate::Foo, handler = b)]
+   |                  ^^^^^^^^^^

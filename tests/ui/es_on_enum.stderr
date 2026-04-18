@@ -1,0 +1,5 @@
+error: #[derive(EventSourced)] requires a named-field struct; enums are not supported
+  --> tests/ui/es_on_enum.rs:12:1
+   |
+12 | enum NotAStruct {
+   | ^^^^

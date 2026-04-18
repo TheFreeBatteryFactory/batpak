@@ -1,0 +1,14 @@
+// justifies: trybuild harness uses panic! internally to surface fixture mismatches; test bodies follow panic-as-assertion idiom.
+#![allow(clippy::panic)]
+//! Compile-fail coverage for the `#[derive(MultiEventReactor)]` attribute contract.
+//!
+//! Each fixture in `tests/ui/mer_*.rs` violates a specific contract rule and
+//! must fail to compile with a span-pointed error. The `.stderr` files pin
+//! the exact error wording so regressions in message clarity or span quality
+//! surface as trybuild diffs.
+
+#[test]
+fn compile_fail_multi_event_reactor_derive_errors() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/mer_on_unit_struct.rs");
+}
